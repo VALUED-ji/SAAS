@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>登录页 10 款完整 HTML 效果</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;font-family:Inter,"PingFang SC","Microsoft YaHei",Arial,sans-serif;background:#eef2f6;color:#172033}.layout{min-height:100vh;display:grid;grid-template-columns:280px 1fr}.side{border-right:1px solid #dce4ee;background:#fff;padding:20px}.side h1{margin:0 0 6px;font-size:18px}.side p{margin:0 0 18px;color:#667085;font-size:12px;line-height:18px}.side a{display:block;margin-bottom:8px;padding:10px 12px;border:1px solid #dce4ee;color:#344054;text-decoration:none;font-size:13px}.side a:hover,.side a.active{border-color:#93b7ff;background:#edf4ff;color:#1f5fe0}.preview{min-width:0;display:grid;grid-template-rows:44px 1fr}.bar{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #dce4ee;background:#f8fafc;padding:0 14px;color:#667085;font-size:12px}.bar b{color:#172033}iframe{width:100%;height:100%;border:0;background:white}@media(max-width:900px){.layout{grid-template-columns:1fr}.side{border-right:0;border-bottom:1px solid #dce4ee}.preview{height:720px}}
+  </style>
+</head>
+<body>
+  <main class="layout">
+    <aside class="side">
+      <h1>登录页 10 款效果</h1>
+      <p>每个都是完整 HTML。点击左侧切换预览，选中方向后再改正式代码。</p>
+      <a class="active" href="01-site-photo-premium.html" target="frame">01 高端工地实景双栏</a>
+      <a href="02-blueprint-studio.html" target="frame">02 设计图纸质感</a>
+      <a href="03-saas-command-center.html" target="frame">03 空间管理驾驶舱</a>
+      <a href="04-minimal-brand.html" target="frame">04 极简品牌中心</a>
+      <a href="05-dark-material-luxury.html" target="frame">05 深色材质高级版</a>
+      <a href="06-renovation-flow.html" target="frame">06 装修流程时间线</a>
+      <a href="07-material-board.html" target="frame">07 材料与预算主题</a>
+      <a href="08-branch-network.html" target="frame">08 多门店组织网络</a>
+      <a href="09-light-editorial.html" target="frame">09 白底高级留白</a>
+      <a href="10-quotation-cover.html" target="frame">10 品牌报价封面式</a>
+    </aside>
+    <section class="preview">
+      <div class="bar"><b id="title">01 高端工地实景双栏</b><span>完整 HTML 预览，不影响现有代码</span></div>
+      <iframe name="frame" src="01-site-photo-premium.html"></iframe>
+    </section>
+  </main>
+  <script>
+    const links = [...document.querySelectorAll(".side a")];
+    const title = document.getElementById("title");
+    links.forEach(link => link.addEventListener("click", () => {
+      links.forEach(item => item.classList.remove("active"));
+      link.classList.add("active");
+      title.textContent = link.textContent;
+    }));
+  </script>
+</body>
+</html>

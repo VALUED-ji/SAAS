@@ -1,0 +1,439 @@
+.overlay {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(24, 34, 48, 0.34);
+  padding: 24px 16px;
+  backdrop-filter: blur(2px);
+}
+
+.shell {
+  display: flex;
+  width: 100%;
+  max-width: 620px;
+  max-height: calc(100dvh - 48px);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #dfe6ef;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 60px rgba(31, 41, 53, 0.18);
+  color: #1f2937;
+}
+
+.header {
+  display: flex;
+  min-height: 62px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid #dfe6ef;
+  background: #ffffff;
+  padding: 10px 16px;
+}
+
+.heading {
+  min-width: 0;
+}
+
+.heading h2,
+.heading p {
+  margin: 0;
+}
+
+.heading h2 {
+  color: #1f2937;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 22px;
+}
+
+.heading p {
+  margin-top: 2px;
+  overflow: hidden;
+  color: #667085;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.closeButton {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #7b8798;
+  transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease;
+}
+
+.closeButton:hover:not(:disabled) {
+  border-color: #d0d8e4;
+  background: #f8fafc;
+  color: #344054;
+}
+
+.scrollArea {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 14px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: #f5f7fb;
+  padding: 16px;
+  scrollbar-color: #cbd5e1 transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.signatureSection,
+.commentField {
+  display: block;
+  min-width: 0;
+}
+
+.sectionLabel {
+  display: flex;
+  min-height: 18px;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 6px;
+  color: #344054;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 650;
+  line-height: 18px;
+}
+
+.sectionLabel strong {
+  color: #dc2626;
+  font-weight: 700;
+}
+
+.sectionLabel em {
+  color: #98a2b3;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 500;
+}
+
+.signatureList {
+  display: grid;
+  gap: 7px;
+}
+
+.signatureOption,
+.signatureSkeleton {
+  display: grid;
+  width: 100%;
+  min-height: 76px;
+  grid-template-columns: 20px minmax(0, 1fr) 108px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #d7e0eb;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 8px 10px;
+}
+
+.signatureOption {
+  text-align: left;
+  transition: border-color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
+}
+
+.signatureOption:hover:not([data-selected="true"]) {
+  border-color: #b8c7dc;
+  background: #fbfcfe;
+}
+
+.signatureOption[data-selected="true"] {
+  border-color: #8aabff;
+  background: #edf4ff;
+  box-shadow: inset 3px 0 0 #407aff;
+}
+
+.selectionMark {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #b8c2cf;
+  border-radius: 50%;
+  background: #ffffff;
+  color: transparent;
+}
+
+.signatureOption[data-selected="true"] .selectionMark {
+  border-color: #407aff;
+  background: #407aff;
+  color: #ffffff;
+}
+
+.signaturePreview {
+  display: flex;
+  height: 58px;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid #dfe6ef;
+  border-radius: 5px;
+  background: #ffffff;
+}
+
+.signatureName {
+  overflow: hidden;
+  color: #1f2937;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skeletonCheck,
+.skeletonPreview,
+.skeletonName {
+  display: block;
+  background: #eef2f6;
+}
+
+.skeletonCheck {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+}
+
+.skeletonPreview {
+  height: 58px;
+  border-radius: 5px;
+}
+
+.skeletonName {
+  width: 76px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.commentInput {
+  display: block;
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+  border: 1px solid #d0d8e4;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 9px 10px;
+  color: #1f2937;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 19px;
+  outline: none;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.commentInput::placeholder {
+  color: #98a2b3;
+  font-weight: 500;
+}
+
+.commentInput:hover {
+  border-color: #b8c7dc;
+}
+
+.commentInput:focus {
+  border-color: #407aff;
+  box-shadow: 0 0 0 3px rgba(64, 122, 255, 0.12);
+}
+
+.errorMessage {
+  margin: 0;
+  border: 1px solid #fecdca;
+  border-radius: 6px;
+  background: #fff1f2;
+  padding: 8px 10px;
+  color: #b42318;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.emptyState {
+  display: flex;
+  min-height: 194px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed #cfd7e3;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 18px;
+  text-align: center;
+}
+
+.emptyIcon {
+  display: inline-grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 6px;
+  background: #edf4ff;
+  color: #407aff;
+}
+
+.emptyTitle {
+  margin: 10px 0 0;
+  color: #1f2937;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+}
+
+.emptyText {
+  margin: 2px 0 0;
+  color: #667085;
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.profileButton,
+.cancelButton,
+.confirmButton {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0 14px;
+  font-size: 12px;
+  font-weight: 650;
+  transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease;
+}
+
+.profileButton {
+  margin-top: 12px;
+  border-color: #407aff;
+  background: #407aff;
+  color: #ffffff;
+}
+
+.footer {
+  display: flex;
+  min-height: 58px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid #dfe6ef;
+  background: #ffffff;
+  padding: 10px 16px;
+}
+
+.cancelButton {
+  border-color: #d0d8e4;
+  background: #ffffff;
+  color: #344054;
+}
+
+.confirmButton {
+  min-width: 112px;
+  gap: 6px;
+  color: #ffffff;
+}
+
+.approveButton {
+  border-color: #407aff;
+  background: #407aff;
+}
+
+.rejectButton {
+  border-color: #dc2626;
+  background: #dc2626;
+}
+
+.cancelButton:hover:not(:disabled) {
+  border-color: #b8c7dc;
+  background: #f8fafc;
+}
+
+.profileButton:hover:not(:disabled),
+.approveButton:hover:not(:disabled) {
+  border-color: #2f66e8;
+  background: #2f66e8;
+}
+
+.rejectButton:hover:not(:disabled) {
+  border-color: #b42318;
+  background: #b42318;
+}
+
+.closeButton:focus-visible,
+.signatureOption:focus-visible,
+.profileButton:focus-visible,
+.cancelButton:focus-visible,
+.confirmButton:focus-visible {
+  outline: 2px solid rgba(64, 122, 255, 0.32);
+  outline-offset: 1px;
+}
+
+.closeButton:disabled,
+.profileButton:disabled,
+.cancelButton:disabled,
+.confirmButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+@media (max-width: 520px) {
+  .overlay {
+    padding: 8px;
+  }
+
+  .shell {
+    max-height: calc(100dvh - 16px);
+  }
+
+  .header,
+  .footer {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .scrollArea {
+    padding: 12px;
+  }
+
+  .signatureOption,
+  .signatureSkeleton {
+    grid-template-columns: 20px minmax(0, 1fr);
+  }
+
+  .signatureName,
+  .skeletonName {
+    grid-column: 2;
+    width: auto;
+  }
+
+  .signaturePreview,
+  .skeletonPreview {
+    height: 52px;
+  }
+
+  .cancelButton,
+  .confirmButton {
+    flex: 1 1 0;
+  }
+}

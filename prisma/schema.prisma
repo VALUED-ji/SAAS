@@ -1,0 +1,585 @@
+// ============================================================
+// 装修管家 SaaS - Database Schema
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// Enums
+// ============================================================
+
+// ============================================================
+// Models
+// ============================================================
+
+// 公司/租户
+model Company {
+  id        String    @id @default(cuid())
+  name      String
+  logo      String?
+  phone     String?
+  address   String?
+  province  String?
+  city      String?
+  district  String?
+  industry  String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  users          User[]
+  customers      Customer[]
+  projects       Project[]
+  materials      Material[]
+  suppliers      Supplier[]
+  quotations     Quotation[]
+  contracts      Contract[]
+  materialOrders MaterialOrder[]
+  payrollRecords PayrollRecord[]
+
+  @@map("companies")
+}
+
+// 用户
+// 用户
+model User {
+  id        String    @id @default(cuid())
+  companyId String
+  company   Company   @relation(fields: [companyId], references: [id])
+  name      String
+  phone     String    @unique
+  email     String?
+  password  String?
+  avatar    String?
+  role      String  @default("SALES")
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // Relation back-references
+  assignedProjects             Project[]             @relation("ProjectManager")
+  assignedTasks                Task[]                @relation("TaskAssignee")
+  createdCustomers             Customer[]
+  authoredFollowUps            FollowUp[]
+  authoredDailyLogs            DailyLog[]            @relation("DailyLogAuthor")
+  createdQuotations            Quotation[]
+  createdContracts             Contract[]
+  paymentRecords               PaymentRecord[]
+  authoredMaterialOrders       MaterialOrder[]
+  issuedMaterialRequisitions   MaterialRequisition[] @relation("MaterialIssue")
+  receivedMaterialRequisitions MaterialRequisition[] @relation("MaterialReceive")
+  attachments                  Attachment[]
+  notifications                Notification[]
+  operationLogs                OperationLog[]
+  payrollRecords               PayrollRecord[]
+
+  @@map("users")
+}
+
+model Customer {
+  id          String         @id @default(cuid())
+  companyId   String
+  company     Company        @relation(fields: [companyId], references: [id])
+  name        String
+  phone       String
+  area        String? // 所在区域
+  address     String?
+  houseAddress String? @map("house_address")
+  buildingNo String? @map("building_no")
+  unitNo String? @map("unit_no")
+  roomNo String? @map("room_no")
+  noRoomNumber Boolean @default(false) @map("no_room_number")
+  source      String? // 来源：转介绍/小程序/广告/门店
+  status      String @default("NEW")
+  currentAction String?
+  intention   String? // 意向风格
+  budget      Float? // 预算
+  areaSize    Float? // 房屋面积
+  createdById String?
+  createdBy   User?          @relation(fields: [createdById], references: [id])
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  deletedAt   DateTime?
+
+  // 关系
+  projects  Project[]
+  followUps FollowUp[]
+
+  @@map("customers")
+}
+
+// 跟进记录
+model FollowUp {
+  id         String    @id @default(cuid())
+  customerId String
+  customer   Customer  @relation(fields: [customerId], references: [id])
+  userId     String
+  user       User      @relation(fields: [userId], references: [id])
+  type       String // 电话/量房/见面/微信
+  content    String
+  nextDate   DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@map("follow_ups")
+}
+
+// 项目
+model Project {
+  id             String             @id @default(cuid())
+  companyId      String
+  company        Company            @relation(fields: [companyId], references: [id])
+  customerId     String
+  customer       Customer           @relation(fields: [customerId], references: [id])
+  managerId      String
+  manager        User               @relation("ProjectManager", fields: [managerId], references: [id])
+  name           String
+  address        String?
+  area           Float? // 面积(㎡)
+  style          String? // 装修风格
+  status         String      @default("LEAD")
+  budgetAmount   Float? // 预算金额
+  contractAmount Float? // 合同金额
+  startDate      DateTime?
+  plannedEndDate DateTime?
+  actualEndDate  DateTime?
+  description    String?
+  progress       Int                @default(0) // 0-100
+  currentPhase   String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  deletedAt      DateTime?
+
+  // 关系
+  phases               ProjectPhase[]
+  tasks                Task[]
+  quotations           Quotation[]
+  contracts            Contract[]
+  paymentPlans         PaymentPlan[]
+  dailyLogs            DailyLog[]
+  materialRequisitions MaterialRequisition[]
+  attachments          Attachment[]
+  materialOrders       MaterialOrder[]
+
+  @@map("projects")
+}
+
+// 项目阶段
+model ProjectPhase {
+  id          String            @id @default(cuid())
+  projectId   String
+  project     Project           @relation(fields: [projectId], references: [id])
+  phase       String
+  name        String
+  order       Int // 排序
+  status      String        @default("PENDING")
+  startDate   DateTime?
+  endDate     DateTime?
+  description String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  tasks Task[]
+
+  @@map("project_phases")
+}
+
+// 任务
+model Task {
+  id           String        @id @default(cuid())
+  projectId    String
+  project      Project       @relation(fields: [projectId], references: [id])
+  phaseId      String?
+  phase        ProjectPhase? @relation(fields: [phaseId], references: [id])
+  name         String
+  description  String?
+  assigneeId   String?
+  assignee     User?         @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  status       String    @default("PENDING")
+  priority     String      @default("MEDIUM")
+  plannedStart DateTime?
+  plannedEnd   DateTime?
+  actualStart  DateTime?
+  actualEnd    DateTime?
+  laborCost    Float? // 人工费预估
+  notes        String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  deletedAt    DateTime?
+
+  @@map("tasks")
+}
+
+// 报价单
+model Quotation {
+  id          String          @id @default(cuid())
+  projectId   String
+  project     Project         @relation(fields: [projectId], references: [id])
+  companyId   String
+  company     Company         @relation(fields: [companyId], references: [id])
+  version     Int             @default(1)
+  totalAmount Float
+  discount    Float           @default(0)
+  finalAmount Float
+  status      String @default("DRAFT")
+  notes       String?
+  createdById String
+  createdBy   User            @relation(fields: [createdById], references: [id])
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  deletedAt   DateTime?
+
+  items QuotationItem[]
+
+  @@map("quotations")
+}
+
+// 报价单项
+model QuotationItem {
+  id           String    @id @default(cuid())
+  quotationId  String
+  quotation    Quotation @relation(fields: [quotationId], references: [id])
+  category     String // 分类：拆改/水电/泥瓦/木工/油漆/安装/材料/其他
+  space        String? // 空间：客餐厅/卧室/厨房/卫生间等
+  name         String
+  spec         String? // 规格
+  materialModel String? @map("material_model") // 型号
+  remark       String? // 备注
+  unit         String // 单位
+  quantity     Float
+  unitPrice    Float
+  totalPrice   Float
+  materialCost Float? // 材料成本
+  laborCost    Float? // 人工成本
+  profitMargin Float? // 利润率
+  sortOrder    Int       @default(0)
+  createdAt    DateTime  @default(now())
+
+  @@map("quotation_items")
+}
+
+// 合同
+model Contract {
+  id          String         @id @default(cuid())
+  projectId   String
+  project     Project        @relation(fields: [projectId], references: [id])
+  companyId   String
+  company     Company        @relation(fields: [companyId], references: [id])
+  contractNo  String         @unique // 合同编号
+  title       String
+  totalAmount Float
+  status      String @default("DRAFT")
+  signedAt    DateTime?
+  effectiveAt DateTime?
+  expireAt    DateTime?
+  fileUrl     String? // 电子版合同URL
+  content     String? // 合同正文(富文本)
+  createdById String
+  createdBy   User           @relation(fields: [createdById], references: [id])
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  deletedAt   DateTime?
+
+  paymentPlans PaymentPlan[]
+
+  @@map("contracts")
+}
+
+// 收款计划
+model PaymentPlan {
+  id         String        @id @default(cuid())
+  projectId  String
+  project    Project       @relation(fields: [projectId], references: [id])
+  contractId String?
+  contract   Contract?     @relation(fields: [contractId], references: [id])
+  milestone  String // 收款节点(签约30%/水电30%/竣工40%)
+  dueDate    DateTime?
+  amount     Float
+  status     String @default("PENDING")
+  sortOrder  Int           @default(0)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  records PaymentRecord[]
+
+  @@map("payment_plans")
+}
+
+// 收款记录
+model PaymentRecord {
+  id            String      @id @default(cuid())
+  paymentPlanId String
+  paymentPlan   PaymentPlan @relation(fields: [paymentPlanId], references: [id])
+  userId        String
+  user          User        @relation(fields: [userId], references: [id])
+  amount        Float
+  payMethod     String // 现金/转账/微信/支付宝/刷卡
+  payDate       DateTime    @default(now())
+  receiptNo     String? // 收据编号
+  notes         String?
+  createdAt     DateTime    @default(now())
+
+  @@map("payment_records")
+}
+
+// 材料目录
+model Material {
+  id         String            @id @default(cuid())
+  companyId  String
+  company    Company           @relation(fields: [companyId], references: [id])
+  categoryId String?
+  category   MaterialCategory? @relation(fields: [categoryId], references: [id])
+  name       String
+  brand      String?
+  spec       String?
+  unit       String // 片/㎡/桶/套/个/张
+  unitPrice  Float
+  costPrice  Float? // 进价/成本价
+  supplierId String?
+  supplier   Supplier?         @relation(fields: [supplierId], references: [id])
+  stock      Int               @default(0)
+  minStock   Int               @default(0) // 最低库存预警
+  image      String?
+  remark     String?
+  isActive   Boolean           @default(true)
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  deletedAt  DateTime?
+
+  requisitionItems MaterialRequisitionItem[]
+  orderItems       MaterialOrderItem[]
+
+  @@map("materials")
+}
+
+// 材料分类
+model MaterialCategory {
+  id        String             @id @default(cuid())
+  name      String
+  parentId  String?
+  parent    MaterialCategory?  @relation("MaterialCategoryParent", fields: [parentId], references: [id])
+  children  MaterialCategory[] @relation("MaterialCategoryParent")
+  sortOrder Int                @default(0)
+  createdAt DateTime           @default(now())
+
+  materials Material[]
+
+  @@map("material_categories")
+}
+
+// 供应商
+model Supplier {
+  id        String    @id @default(cuid())
+  companyId String
+  company   Company   @relation(fields: [companyId], references: [id])
+  name      String
+  contact   String?
+  phone     String?
+  address   String?
+  remark    String?
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  materials      Material[]
+  materialOrders MaterialOrder[]
+
+  @@map("suppliers")
+}
+
+// 材料采购单
+model MaterialOrder {
+  id           String              @id @default(cuid())
+  companyId    String
+  company      Company             @relation(fields: [companyId], references: [id])
+  projectId    String?
+  project      Project?            @relation(fields: [projectId], references: [id])
+  supplierId   String?
+  supplier     Supplier?           @relation(fields: [supplierId], references: [id])
+  orderNo      String              @unique
+  status       String @default("PENDING")
+  totalAmount  Float               @default(0)
+  paidAmount   Float               @default(0)
+  orderDate    DateTime            @default(now())
+  deliveryDate DateTime?
+  notes        String?
+  createdById  String
+  createdBy    User                @relation(fields: [createdById], references: [id])
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+  deletedAt    DateTime?
+
+  items MaterialOrderItem[]
+
+  @@map("material_orders")
+}
+
+// 采购单明细
+model MaterialOrderItem {
+  id          String        @id @default(cuid())
+  orderId     String
+  order       MaterialOrder @relation(fields: [orderId], references: [id])
+  materialId  String
+  material    Material      @relation(fields: [materialId], references: [id])
+  quantity    Float
+  unitPrice   Float
+  totalPrice  Float
+  receivedQty Float         @default(0) // 已收货数量
+  remark      String?
+  createdAt   DateTime      @default(now())
+
+  @@map("material_order_items")
+}
+
+// 材料领用单
+model MaterialRequisition {
+  id            String   @id @default(cuid())
+  projectId     String
+  project       Project  @relation(fields: [projectId], references: [id])
+  requisitionNo String   @unique
+  issuedById    String
+  issuedBy      User     @relation("MaterialIssue", fields: [issuedById], references: [id])
+  receivedById  String?
+  receivedBy    User?    @relation("MaterialReceive", fields: [receivedById], references: [id])
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  items MaterialRequisitionItem[]
+
+  @@map("material_requisitions")
+}
+
+model MaterialRequisitionItem {
+  id            String              @id @default(cuid())
+  requisitionId String
+  requisition   MaterialRequisition @relation(fields: [requisitionId], references: [id])
+  materialId    String
+  material      Material            @relation(fields: [materialId], references: [id])
+  quantity      Float
+  unitPrice     Float?
+  remark        String?
+  createdAt     DateTime            @default(now())
+
+  @@map("material_requisition_items")
+}
+
+// 施工日志
+model DailyLog {
+  id          String   @id @default(cuid())
+  projectId   String   @map("project_id")
+  project     Project  @relation(fields: [projectId], references: [id])
+  authorId    String   @map("author_id")
+  author      User     @relation("DailyLogAuthor", fields: [authorId], references: [id])
+  logDate     DateTime @default(now()) @map("log_date")
+  phase       String?
+  weather     String?
+  temperature Int? // 温度(℃)
+  content     String
+  workerCount Int? @map("worker_count") // 今日施工人数
+  completedWork String? @map("completed_work") // 今日完成事项
+  materialNotes String? @map("material_notes") // 材料到场/使用
+  qualityNotes  String? @map("quality_notes") // 质量检查
+  safetyNotes String? @map("safety_notes") // 安全注意事项
+  issueNotes  String? @map("issue_notes") // 问题风险
+  nextPlan    String? @map("next_plan") // 明日计划
+  locationName String? @map("location_name") // 定位名称
+  locationAddress String? @map("location_address") // 定位地址
+  latitude    Float?
+  longitude   Float?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  photos DailyLogPhoto[]
+
+  @@map("daily_logs")
+}
+
+// 施工日志照片
+model DailyLogPhoto {
+  id        String   @id @default(cuid())
+  logId     String
+  log       DailyLog @relation(fields: [logId], references: [id])
+  url       String
+  caption   String?
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@map("daily_log_photos")
+}
+
+// 附件（通用）
+model Attachment {
+  id        String   @id @default(cuid())
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id])
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  fileName  String
+  fileUrl   String
+  fileSize  Int?
+  mimeType  String?
+  category  String? // 设计图/效果图/合同/验收单/其他
+  createdAt DateTime @default(now())
+
+  @@map("attachments")
+}
+
+// 通知
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id])
+  type      String
+  title     String
+  content   String?
+  isRead    Boolean          @default(false)
+  linkUrl   String?
+  createdAt DateTime         @default(now())
+
+  @@map("notifications")
+}
+
+// 操作日志
+model OperationLog {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  action    String // create/update/delete/approve/reject/...
+  entity    String // Project/Quotation/Contract/...
+  entityId  String?
+  detail    String? // JSON string with changes
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@map("operation_logs")
+}
+
+// 工资结算
+model PayrollRecord {
+  id        String    @id @default(cuid())
+  companyId String
+  company   Company   @relation(fields: [companyId], references: [id])
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  period    String // 结算周期 e.g. "2026-06"
+  basePay   Float // 基本工资
+  bonus     Float? // 奖金
+  deduction Float? // 扣款
+  totalPay  Float // 实发
+  status    String // PENDING/PAID
+  payDate   DateTime?
+  notes     String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@map("payroll_records")
+}

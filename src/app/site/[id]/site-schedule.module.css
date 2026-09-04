@@ -1,0 +1,578 @@
+.workspace {
+  --schedule-panel: #ffffff;
+  --schedule-panel-soft: #f7faff;
+  --schedule-canvas: #f6f7f9;
+  --schedule-line: #dce5f1;
+  --schedule-line-soft: #e9eff7;
+  --schedule-text: #162033;
+  --schedule-text-mid: #34445a;
+  --schedule-muted: #667085;
+  --schedule-primary: #407aff;
+  --schedule-primary-soft: #edf4ff;
+  --schedule-planned: #f2a900;
+  --schedule-actual: #31a96b;
+
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.overviewPanel,
+.ganttPanel {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--schedule-line) !important;
+  border-radius: 8px !important;
+  background: var(--schedule-panel);
+  box-shadow: none !important;
+}
+
+.overviewPanel {
+  flex: 0 0 auto;
+}
+
+.toolbar {
+  display: flex;
+  min-height: 68px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  background: var(--schedule-panel);
+}
+
+.titleArea {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.titleIcon {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #d6e4ff;
+  border-radius: 7px;
+  background: var(--schedule-primary-soft);
+  color: var(--schedule-primary);
+}
+
+.titleCopy {
+  min-width: 0;
+}
+
+.title {
+  color: var(--schedule-text);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 20px;
+}
+
+.metaRow {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 18px;
+  margin-top: 5px;
+}
+
+.metaItem {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  color: var(--schedule-muted);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.metaLabel {
+  color: #8491a5;
+}
+
+.metaValue {
+  max-width: 260px;
+  overflow: hidden;
+  color: var(--schedule-text-mid);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actionArea {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+}
+
+.workspace .toolbar .actionArea .exportButton {
+  min-height: 36px !important;
+  border-radius: 7px !important;
+  padding: 0 14px !important;
+  font-size: 13px !important;
+  white-space: nowrap;
+}
+
+.actionMessage {
+  max-width: 240px;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: right;
+}
+
+.summaryStrip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--schedule-line-soft);
+  background: var(--schedule-panel-soft);
+}
+
+.summaryItem {
+  position: relative;
+  min-width: 0;
+  min-height: 58px;
+  padding: 10px 16px;
+  border-right: 1px solid var(--schedule-line-soft);
+}
+
+.summaryItem:last-child {
+  border-right: 0;
+}
+
+.summaryLabel {
+  color: #8491a5;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.summaryValue {
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--schedule-text);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ganttPanel {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.ganttPanelFullscreen {
+  position: fixed;
+  inset: 12px;
+  z-index: 88;
+  min-height: 0;
+  border-radius: 10px !important;
+  background: var(--schedule-panel);
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.22) !important;
+}
+
+.ganttToolbar {
+  display: flex;
+  min-height: 46px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--schedule-line);
+  background: var(--schedule-panel-soft);
+}
+
+.ganttToolbarActions {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.ganttTitle {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--schedule-text);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fullscreenButton {
+  display: inline-flex;
+  min-height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid #cfd9e6;
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 0 10px;
+  color: #52647b;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 16px;
+  white-space: nowrap;
+  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease;
+}
+
+.fullscreenButton:hover {
+  border-color: #9fbcff;
+  background: #f7faff;
+  color: #3268df;
+}
+
+.fullscreenButton:focus-visible {
+  outline: 2px solid rgba(64, 122, 255, 0.28);
+  outline-offset: 2px;
+}
+
+.legend {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px 14px;
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--schedule-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.legendSwatch {
+  display: inline-block;
+  width: 18px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.legendPlanned {
+  background: var(--schedule-planned);
+}
+
+.legendActual {
+  background: var(--schedule-actual);
+}
+
+.legendNonWorking,
+.nonWorkingHalf {
+  background-color: #f2f5f9;
+  background-image: repeating-linear-gradient(135deg, rgba(101, 117, 139, 0.32) 0, rgba(101, 117, 139, 0.32) 2px, transparent 2px, transparent 5px);
+}
+
+.legendNonWorking {
+  border: 1px solid #d3dce8;
+}
+
+.state {
+  display: flex;
+  min-height: 360px;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+}
+
+.scrollArea {
+  min-height: 0;
+  flex: 1 1 auto;
+  background: var(--schedule-panel);
+}
+
+.scrollViewport {
+  width: 100%;
+  height: 100%;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.table {
+  border-spacing: 0;
+  border-collapse: separate;
+  background: var(--schedule-panel);
+  color: var(--schedule-text-mid);
+  font-size: 12px;
+  line-height: 18px;
+  table-layout: fixed;
+}
+
+.table th,
+.table td {
+  box-sizing: border-box;
+  border-right: 1px solid var(--schedule-line-soft) !important;
+  border-bottom: 1px solid var(--schedule-line-soft) !important;
+}
+
+.table th {
+  background: #edf4ff !important;
+  color: #40516a !important;
+  font-weight: 650 !important;
+}
+
+.fixedHeader,
+.monthHeader,
+.dateHeader {
+  position: sticky;
+}
+
+.fixedHeader {
+  top: 0;
+  z-index: 9;
+  height: 62px;
+  padding: 0 10px;
+  text-align: left;
+}
+
+.monthHeader {
+  top: 0;
+  z-index: 7;
+  height: 32px;
+  padding: 0 4px;
+  text-align: center;
+}
+
+.dateHeader {
+  top: 32px;
+  z-index: 7;
+  width: 36px;
+  min-width: 36px;
+  height: 30px;
+  overflow: hidden;
+  padding: 0;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.nonWorkingHeader {
+  background-color: #e8eef6 !important;
+  background-image: repeating-linear-gradient(135deg, rgba(101, 117, 139, 0.28) 0, rgba(101, 117, 139, 0.28) 2px, transparent 2px, transparent 5px) !important;
+  color: #65758b !important;
+}
+
+.row {
+  height: 40px;
+}
+
+.row:hover .infoCell,
+.row:hover .stageCell {
+  background: #f8fbff !important;
+}
+
+.infoCell,
+.stageCell {
+  position: sticky;
+  z-index: 4;
+  padding: 7px 10px;
+  background: #ffffff !important;
+  color: var(--schedule-text-mid);
+  vertical-align: middle;
+}
+
+.stageCell {
+  z-index: 5;
+  border-left: 3px solid #8db1ff !important;
+  background: #f4f8ff !important;
+  color: #24436f;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.nodeCell {
+  font-weight: 600;
+  text-align: left;
+}
+
+.cellText {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rangeCell,
+.durationCell {
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.durationCell {
+  font-weight: 650;
+}
+
+.stageColumn {
+  left: 0;
+  width: 112px;
+  min-width: 112px;
+  max-width: 112px;
+}
+
+.nodeColumn {
+  left: 112px;
+  width: 164px;
+  min-width: 164px;
+  max-width: 164px;
+}
+
+.rangeColumn {
+  left: 276px;
+  width: 156px;
+  min-width: 156px;
+  max-width: 156px;
+}
+
+.durationColumn {
+  left: 432px;
+  width: 64px;
+  min-width: 64px;
+  max-width: 64px;
+  box-shadow: 8px 0 12px -12px rgba(28, 47, 74, 0.75);
+}
+
+.timelineCell {
+  width: 36px;
+  min-width: 36px;
+  height: 40px;
+  padding: 0;
+  background: #ffffff;
+  vertical-align: middle;
+}
+
+.timelineSplit {
+  display: grid;
+  height: 100%;
+  grid-template-rows: 1fr 1fr;
+}
+
+.timelineHalf {
+  min-height: 0;
+}
+
+.timelineHalf + .timelineHalf {
+  border-top: 1px solid var(--schedule-line-soft);
+}
+
+.plannedActive {
+  background: var(--schedule-planned);
+}
+
+.actualActive {
+  background: var(--schedule-actual);
+}
+
+@media (max-width: 1024px) {
+  .workspace {
+    min-height: 640px;
+  }
+
+  .toolbar,
+  .ganttToolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ganttToolbarActions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .actionArea {
+    width: 100%;
+    align-items: flex-start;
+  }
+
+  .actionMessage {
+    text-align: left;
+  }
+
+  .summaryStrip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .summaryItem:nth-child(2) {
+    border-right: 0;
+  }
+
+  .summaryItem:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--schedule-line-soft);
+  }
+
+  .legend {
+    justify-content: flex-start;
+  }
+
+  .ganttPanelFullscreen {
+    inset: 8px;
+  }
+}
+
+@media (max-width: 640px) {
+  .toolbar {
+    padding: 12px;
+  }
+
+  .metaRow {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .metaItem,
+  .metaValue {
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .summaryStrip {
+    grid-template-columns: 1fr;
+  }
+
+  .summaryItem,
+  .summaryItem:nth-child(2) {
+    border-right: 0;
+    border-bottom: 1px solid var(--schedule-line-soft);
+  }
+
+  .summaryItem:last-child {
+    border-bottom: 0;
+  }
+
+  .ganttToolbar {
+    padding: 10px 12px;
+  }
+
+  .ganttToolbarActions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

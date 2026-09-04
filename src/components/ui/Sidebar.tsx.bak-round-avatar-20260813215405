@@ -1,0 +1,549 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
+import { cn } from "@/lib/utils";
+import { useAuth } from "@/lib/auth";
+import NativeImage from "@/components/ui/NativeImage";
+import LogoutConfirmDialog from "@/components/ui/LogoutConfirmDialog";
+import type { LucideIcon } from "lucide-react";
+import {
+  Building2,
+  LayoutDashboard,
+  ClipboardList,
+  FileText,
+  Handshake,
+  Package,
+  UsersRound,
+  Wallet,
+  Calculator,
+  CheckSquare,
+  Hammer,
+  ShoppingCart,
+  PanelLeftClose,
+  PanelLeft,
+  Settings,
+  SlidersHorizontal,
+  ChevronDown,
+  LogOut,
+} from "lucide-react";
+
+type SidebarNavItem = {
+  href: string;
+  label: string;
+  icon: LucideIcon;
+  children?: {
+    href: string;
+    label: string;
+  }[];
+};
+
+const navItems: SidebarNavItem[] = [
+ { href: "/group-dashboard", label: "集团总览", icon: Building2 },
+ { href: "/dashboard", label: "经营总览", icon: LayoutDashboard },
+ { href: "/todos", label: "待办中心", icon: CheckSquare },
+  { href: "/projects", label: "客户管理", icon: ClipboardList },
+  { href: "/quotations", label: "报价合同", icon: FileText },
+  { href: "/site", label: "工地管理", icon: Hammer },
+  { href: "/finance/owner-receipts", label: "财务中心", icon: Wallet, children: [
+    { href: "/finance/owner-receipts", label: "业主收款" },
+    { href: "/finance/labor-settlement", label: "人工结算" },
+  ] },
+  { href: "/quota", label: "定额管理", icon: Calculator, children: [
+    { href: "/quota/library", label: "定额库" },
+    { href: "/quota/templates", label: "定额模板" },
+  ] },
+  { href: "/orders", label: "订单管理", icon: ShoppingCart, children: [
+    { href: "/orders/auxiliary", label: "辅材订单" },
+  ] },
+  { href: "/materials", label: "材料管理", icon: Package, children: [
+    { href: "/materials/library", label: "材料库" },
+    { href: "/materials/inventory", label: "库存管理" },
+    { href: "/materials/inbound", label: "入库单" },
+  ] },
+  { href: "/suppliers", label: "供应商管理", icon: Handshake, children: [
+    { href: "/suppliers/info", label: "供应商信息" },
+  ] },
+  { href: "/organization", label: "组织权限", icon: UsersRound, children: [
+    { href: "/organization", label: "组织管理" },
+    { href: "/team", label: "团队管理" },
+    { href: "/roles", label: "角色管理" },
+  ] },
+  { href: "/branch-settings", label: "分公司设置", icon: SlidersHorizontal },
+  { href: "/settings", label: "系统设置", icon: Settings, children: [
+    { href: "/settings/materials", label: "材料类设置" },
+  ] },
+];
+
+const adminOnlyNavHrefs = new Set(["/settings"]);
+
+function readStoredIds(key: string) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
+function PersonAvatar({
+  avatar,
+  name,
+  className,
+}: {
+  avatar?: string | null;
+  name?: string | null;
+  className: string;
+}) {
+  const initial = name?.[0] || "管";
+  return (
+    <span className={cn("flex shrink-0 items-center justify-center overflow-hidden", className)}>
+      {avatar ? <NativeImage src={avatar} alt={`${name || "当前账号"}头像`} className="h-full w-full object-cover" loading="eager" /> : initial}
+    </span>
+  );
+}
+
+export default function Sidebar() {
+  const pathname = usePathname();
+  const router = useRouter();
+  const { user, logout } = useAuth();
+  const [, startRouteTransition] = useTransition();
+  const [collapsed, setCollapsed] = useState(false);
+  const [todoCount, setTodoCount] = useState(0);
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
+  const [pendingHref, setPendingHref] = useState("");
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  const todoCountRequestRef = useRef<Promise<void> | null>(null);
+  const lastTodoCountFetchAtRef = useRef(0);
+  const prefetchedRoutesRef = useRef<Set<string>>(new Set());
+  const brandName = useMemo(() => {
+    const orgBrandName = String(user?.sidebarBrandName || "").trim();
+    if (orgBrandName) return orgBrandName;
+    const shortName = String(user?.companyShortName || "").trim();
+    return shortName ? Array.from(shortName).slice(0, 6).join("") : "星艺装饰";
+  }, [user?.companyShortName, user?.sidebarBrandName]);
+  const brandLogoUrl = String(user?.sidebarBrandLogoUrl || "").trim() || "/brand/default-sidebar-logo.png";
+  const brandSubtitle = String(user?.sidebarBrandSubtitle || "").trim();
+  const visibleNavItems = useMemo(
+    () => navItems.filter((item) => !adminOnlyNavHrefs.has(item.href) || ["OWNER", "ADMIN"].includes(user?.role || "")),
+    [user?.role]
+  );
+
+  useEffect(() => {
+    document.documentElement.style.setProperty("--active-sidebar-width", collapsed ? "76px" : "var(--sidebar-width)");
+  }, [collapsed]);
+
+  useEffect(() => {
+    setPendingHref("");
+  }, [pathname]);
+
+  const navigateTo = useCallback((href: string) => {
+    if (!href || pathname === href) return;
+    setPendingHref(href);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("app:navigation-start", { detail: { href } }));
+    }
+    startRouteTransition(() => {
+      router.push(href);
+    });
+  }, [pathname, router, startRouteTransition]);
+
+  const prefetchRoute = useCallback((href: string) => {
+    if (!href || prefetchedRoutesRef.current.has(href)) return;
+    prefetchedRoutesRef.current.add(href);
+    router.prefetch(href);
+  }, [router]);
+
+  const prefetchNavItem = useCallback((item: SidebarNavItem) => {
+    prefetchRoute(item.href);
+    item.children?.forEach((child) => prefetchRoute(child.href));
+  }, [prefetchRoute]);
+
+  useEffect(() => {
+    const routes = visibleNavItems.flatMap((item) => [item.href, ...(item.children || []).map((child) => child.href)]);
+    if (typeof window === "undefined") return;
+    const timerIds = routes.map((href, index) => window.setTimeout(() => {
+      if (href !== pathname) prefetchRoute(href);
+    }, 250 + index * 160));
+    const prefetchRemaining = () => {
+      routes.forEach((href) => {
+        if (href !== pathname) prefetchRoute(href);
+      });
+    };
+    const idleCallback = window.requestIdleCallback || ((callback: IdleRequestCallback) => window.setTimeout(callback, 800));
+    const cancelIdleCallback = window.cancelIdleCallback || window.clearTimeout;
+    const idleId = idleCallback(prefetchRemaining, { timeout: 2500 });
+    return () => {
+      timerIds.forEach((timerId) => window.clearTimeout(timerId));
+      cancelIdleCallback(idleId);
+    };
+  }, [pathname, prefetchRoute, visibleNavItems]);
+
+  useEffect(() => {
+    const activeGroup = visibleNavItems.find((item) => {
+      if (!item.children?.length) return false;
+      const activeHref = item.href.split("?")[0];
+      return (
+        pathname === activeHref ||
+        pathname.startsWith(activeHref + "/") ||
+        item.children.some((child) => pathname === child.href || pathname.startsWith(child.href + "/"))
+      );
+    });
+    if (activeGroup) setOpenGroups({ [activeGroup.href]: true });
+  }, [pathname, visibleNavItems]);
+
+  useEffect(() => {
+    if (!user?.id && !user?.name) return;
+    let cancelled = false;
+    const updateTodoCount = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastTodoCountFetchAtRef.current < 15000) return;
+      if (todoCountRequestRef.current) return;
+      lastTodoCountFetchAtRef.current = now;
+      const token = localStorage.getItem("zxgj_token");
+      const request = Promise.all([
+        fetch("/api/followups?scope=todo", {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }).then((res) => res.ok ? res.json() : []).catch(() => []),
+        fetch("/api/todos/designer-assignment", {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }).then((res) => res.ok ? res.json() : { items: [] }).catch(() => ({ items: [] })),
+        fetch("/api/todos/quotation-receipt", {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }).then((res) => res.ok ? res.json() : { items: [] }).catch(() => ({ items: [] })),
+        fetch("/api/todos/contract-approval", {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }).then((res) => res.ok ? res.json() : { items: [] }).catch(() => ({ items: [] })),
+        fetch("/api/todos/deposit-approval", {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }).then((res) => res.ok ? res.json() : { items: [] }).catch(() => ({ items: [] })),
+        fetch("/api/todos/deposit-refund-approval", {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }).then((res) => res.ok ? res.json() : { items: [] }).catch(() => ({ items: [] })),
+        fetch("/api/todos/change-order-approval", {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }).then((res) => res.ok ? res.json() : { items: [] }).catch(() => ({ items: [] })),
+        fetch("/api/notifications?scope=result&unread=1", {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }).then((res) => res.ok ? res.json() : { unreadCount: 0 }).catch(() => ({ unreadCount: 0 })),
+      ])
+        .then(([data, designerData, quotationData, contractData, depositData, depositRefundData, changeOrderData, notificationData]) => {
+          const ignoredIds = readStoredIds("todos_ignored");
+          const processedIds = readStoredIds("todos_processed");
+          const pendingItems = (data || []).filter((item: any) =>
+            item.customer_name &&
+            (
+              item.content?.includes("@" + user.name) ||
+              (user.id ? item.reply_to_user_id === user.id && item.user_id !== user.id : item.reply_to_user_name === user.name && item.user_name !== user.name)
+            ) &&
+            !ignoredIds.includes(item.id) &&
+            !processedIds.includes(item.id)
+          );
+          const designerCount = (designerData?.items || []).filter((item: any) => Number(item?.is_actionable || 0) === 1).length;
+          const quotationCount = (quotationData?.items || []).filter((item: any) => item.status === "pending").length;
+          const contractCount = (contractData?.items || []).filter((item: any) => item.status === "pending").length;
+          const depositCount = (depositData?.items || []).filter((item: any) => item.status === "pending").length;
+          const depositRefundCount = (depositRefundData?.items || []).filter((item: any) => item.status === "pending").length;
+          const changeOrderCount = (changeOrderData?.items || []).filter((item: any) => item.status === "pending").length;
+          const notificationCount = Number(notificationData?.unreadCount || 0);
+          if (!cancelled) {
+            setTodoCount(pendingItems.length + designerCount + quotationCount + contractCount + depositCount + depositRefundCount + changeOrderCount + notificationCount);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          todoCountRequestRef.current = null;
+        });
+      todoCountRequestRef.current = request;
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") updateTodoCount(true);
+    };
+
+    updateTodoCount(true);
+    const intervalId = window.setInterval(() => updateTodoCount(false), 60000);
+    const handleImmediateTodoRefresh = () => updateTodoCount(true);
+    const handleFocusTodoRefresh = () => updateTodoCount(false);
+    window.addEventListener("storage", handleImmediateTodoRefresh);
+    window.addEventListener("todos:changed", handleImmediateTodoRefresh);
+    window.addEventListener("focus", handleFocusTodoRefresh);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("storage", handleImmediateTodoRefresh);
+      window.removeEventListener("todos:changed", handleImmediateTodoRefresh);
+      window.removeEventListener("focus", handleFocusTodoRefresh);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [user?.id, user?.name]);
+
+  return (
+    <aside
+      className={cn(
+        "enterprise-shell-sidebar flex shrink-0 border-[#DDE6F2] text-[#182230] transition-all duration-300 md:flex-col md:border-r",
+        collapsed ? "w-[76px]" : "w-[--sidebar-width]",
+        "max-md:w-full max-md:border-b"
+      )}
+    >
+      {/* Logo */}
+      <div className="flex h-[76px] shrink-0 items-center justify-between border-[#DDE6F2] bg-white/86 px-3 md:border-b max-md:w-[76px] max-md:justify-center max-md:px-3">
+        {!collapsed && (
+          <Link
+            href="/dashboard"
+            prefetch
+            onPointerEnter={() => prefetchRoute("/dashboard")}
+            onFocus={() => prefetchRoute("/dashboard")}
+            onClick={(event) => {
+              event.preventDefault();
+              navigateTo("/dashboard");
+            }}
+            className="enterprise-brand-link flex min-w-0 flex-1 items-center gap-3 px-2.5 py-2"
+          >
+            <div className="enterprise-brand-mark flex h-10 w-10 items-center justify-center overflow-hidden rounded-[10px] bg-transparent">
+              <NativeImage src={brandLogoUrl} alt={`${brandName}标识`} className="h-full w-full object-cover" loading="eager" />
+            </div>
+            <div className="flex min-w-0 flex-col justify-center max-md:hidden">
+              <span className="block truncate text-[16px] font-semibold text-[#182230]">{brandName}</span>
+              {brandSubtitle && (
+                <span className="block truncate text-[10px] font-medium text-[#7c8aa0]">{brandSubtitle}</span>
+              )}
+            </div>
+          </Link>
+        )}
+        <button
+          onClick={() => setCollapsed(!collapsed)}
+          className={cn(
+            "enterprise-collapse-button flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] border border-[#DDE6F2] bg-white text-[#7c8aa0] transition-colors hover:bg-[#F6F8FB] hover:text-[#2f6feb]",
+            collapsed && "mx-auto",
+            !collapsed && "ml-2",
+            "max-md:hidden"
+          )}
+          aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"}
+        >
+          {collapsed ? <PanelLeft className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+        </button>
+      </div>
+
+      {/* Navigation */}
+      <nav className="scrollbar-none flex-1 gap-1 overflow-auto px-4 py-4 md:space-y-1 max-md:flex max-md:items-center">
+        {visibleNavItems.map((item) => {
+          const activeHref = item.href.split("?")[0];
+          const isRouteActive =
+            pathname === activeHref ||
+            pathname.startsWith(activeHref + "/") ||
+            Boolean(item.children?.some((child) => pathname === child.href || pathname.startsWith(child.href + "/")));
+          const isPendingActive = Boolean(pendingHref) && (
+            pendingHref === activeHref ||
+            pendingHref.startsWith(activeHref + "/") ||
+            Boolean(item.children?.some((child) => pendingHref === child.href || pendingHref.startsWith(child.href + "/")))
+          );
+          const isActive = pendingHref ? isPendingActive : isRouteActive;
+          const itemPending = Boolean(pendingHref) && isPendingActive;
+          const Icon = item.icon;
+	          const hasChildren = Boolean(item.children?.length);
+	          const isOpen = Boolean(openGroups[item.href]);
+	          const showTodoBadge = item.href === "/todos" && todoCount > 0;
+	          const todoBadgeText = todoCount > 99 ? "99+" : String(todoCount);
+
+	          return (
+            <div key={item.href} className="enterprise-menu-block">
+              {hasChildren && !collapsed ? (
+                <button
+                  type="button"
+                  aria-expanded={isOpen}
+                  onPointerEnter={() => prefetchNavItem(item)}
+                  onFocus={() => prefetchNavItem(item)}
+                  onClick={() => {
+                    prefetchNavItem(item);
+                    if (!isRouteActive) {
+                      setOpenGroups({ [item.href]: true });
+                      navigateTo(item.href);
+                      return;
+                    }
+                    setOpenGroups(isOpen ? {} : { [item.href]: true });
+                  }}
+                  className={cn(
+                    "enterprise-menu-item group relative flex min-h-10 w-full items-center gap-2.5 rounded-[8px] border border-transparent px-2.5 py-2 text-left text-sm font-medium text-[#475467] transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#CFE0FF]",
+                    isActive && "is-active",
+                    itemPending && "opacity-80",
+                    "max-md:justify-center max-md:px-2"
+                  )}
+                >
+                  <span className={cn(
+                    "enterprise-menu-indicator absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full transition-all duration-150",
+                    isActive ? "bg-[#407AFF] opacity-100" : "bg-transparent opacity-0"
+                  )} />
+                  <span
+                    className={cn(
+                      "enterprise-menu-icon flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] text-[#A8B2C1] transition-colors duration-150",
+                      isActive && "is-active",
+                      itemPending && "animate-pulse"
+                    )}
+                  >
+                    <Icon className="h-4 w-4" />
+                  </span>
+	                  <span className="min-w-0 flex-1 truncate max-md:hidden">{item.label}</span>
+	                  {showTodoBadge && !collapsed && (
+	                    <span className="enterprise-menu-count ml-auto inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-red-500 px-1.5 text-[11px] font-bold leading-none text-white max-md:hidden">
+	                      {todoBadgeText}
+	                    </span>
+	                  )}
+	                  <span className={cn(
+                    "enterprise-menu-chevron ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] text-[#A8B2C1] transition-all duration-150 max-md:hidden",
+                    isOpen && "text-[#7c8aa0]"
+                  )}>
+                    <ChevronDown className={cn("h-4 w-4 transition-transform duration-200", isOpen && "rotate-180")} />
+                  </span>
+                </button>
+              ) : (
+                <Link
+                  href={item.href}
+                  prefetch
+                  onPointerEnter={() => prefetchRoute(item.href)}
+                  onFocus={() => prefetchRoute(item.href)}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    setPendingHref(item.href);
+                    setOpenGroups({});
+                    navigateTo(item.href);
+                  }}
+                  className={cn(
+                    "enterprise-menu-item relative flex min-h-10 items-center gap-2.5 rounded-[8px] border border-transparent px-2.5 py-2 text-sm font-medium text-[#475467] transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#CFE0FF]",
+                    isActive && "is-active",
+                    itemPending && "opacity-80",
+                    collapsed && "justify-center px-2",
+                    "max-md:justify-center max-md:px-2"
+                  )}
+                  title={collapsed ? item.label : undefined}
+                >
+                  <span className={cn(
+                    "enterprise-menu-indicator absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full transition-all duration-150",
+                    isActive ? "bg-[#407AFF] opacity-100" : "bg-transparent opacity-0"
+                  )} />
+                  <span
+                    className={cn(
+                      "enterprise-menu-icon flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] text-[#A8B2C1] transition-colors duration-150",
+                      isActive && "is-active",
+                      itemPending && "animate-pulse"
+                    )}
+                  >
+                    <Icon className="h-4 w-4" />
+                  </span>
+	                  {!collapsed && <span className="min-w-0 flex-1 truncate max-md:hidden">{item.label}</span>}
+	                  {showTodoBadge && (
+	                    <span
+	                      className={cn(
+	                        "enterprise-menu-count inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-red-500 px-1.5 text-[11px] font-bold leading-none text-white",
+	                        collapsed ? "absolute right-1 top-1" : "ml-auto max-md:hidden"
+	                      )}
+	                    >
+	                      {todoBadgeText}
+	                    </span>
+	                  )}
+	                </Link>
+	              )}
+              {hasChildren && !collapsed && (
+                <div
+                  className={cn(
+                    "enterprise-submenu-wrap grid overflow-hidden transition-[grid-template-rows,opacity,transform,margin-top] duration-200 ease-out max-md:hidden",
+                    isOpen ? "mt-1 grid-rows-[1fr] translate-y-0 opacity-100" : "pointer-events-none mt-0 grid-rows-[0fr] -translate-y-1 opacity-0"
+                  )}
+                  aria-hidden={!isOpen}
+                >
+                  <div className="min-h-0 space-y-1 py-1 pl-10">
+                    {item.children?.map((child) => {
+                      const childActive = pathname === child.href || pathname.startsWith(child.href + "/");
+                      const childPending = pendingHref === child.href;
+                      const childCurrent = pendingHref ? childPending : childActive;
+                      return (
+                        <Link
+                          key={child.href}
+                          href={child.href}
+                          prefetch
+                          onPointerEnter={() => prefetchRoute(child.href)}
+                          onFocus={() => prefetchRoute(child.href)}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            setPendingHref(child.href);
+                            navigateTo(child.href);
+                          }}
+                          className={cn(
+                            "enterprise-submenu-item group/sub flex min-h-9 items-center rounded-[7px] border border-transparent px-2 text-sm font-medium text-[#667085] transition-colors duration-150",
+                            childCurrent && "is-active"
+                          )}
+                        >
+                          <span className="truncate">{child.label}</span>
+                        </Link>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </nav>
+
+      {/* Bottom */}
+      <div className={cn("enterprise-account-footer relative border-t border-[#DDE6F2] p-3 max-md:hidden", collapsed && "px-2")}>
+        {collapsed ? (
+          <div className="flex flex-col items-center gap-2">
+            <button
+              onPointerEnter={() => prefetchRoute("/profile")}
+              onFocus={() => prefetchRoute("/profile")}
+              onClick={() => navigateTo("/profile")}
+              className="rounded-[13px] shadow-[0_10px_22px_rgba(64,122,255,0.20)]"
+              aria-label="个人中心"
+            >
+              <PersonAvatar
+                avatar={user?.avatar}
+                name={user?.name}
+                className="h-10 w-10 rounded-[13px] bg-[#407AFF] text-sm font-black text-white"
+              />
+            </button>
+          </div>
+        ) : (
+          <div className="enterprise-account-card">
+            <div className="flex min-w-0 items-center gap-2">
+              <button
+                onPointerEnter={() => prefetchRoute("/profile")}
+                onFocus={() => prefetchRoute("/profile")}
+                onClick={() => navigateTo("/profile")}
+                className="enterprise-account-link"
+              >
+                <PersonAvatar
+                  avatar={user?.avatar}
+                  name={user?.name}
+                  className="enterprise-account-avatar h-10 w-10 bg-[#EDF4FF] text-sm font-black text-[#2f6feb] ring-1 ring-[#CFE0FF]"
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="enterprise-account-name">{user?.name || "加载中"}</span>
+                  <span className="enterprise-account-role">{user?.role === "OWNER" ? "管理员" : "员工"}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setLogoutConfirmOpen(true)}
+                className="enterprise-account-logout"
+                aria-label="退出登录"
+                title="退出登录"
+              >
+                <LogOut className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <LogoutConfirmDialog
+        open={logoutConfirmOpen}
+        onClose={() => setLogoutConfirmOpen(false)}
+        onConfirm={logout}
+      />
+    </aside>
+  );
+}

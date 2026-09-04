@@ -1,0 +1,2206 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { Building2, Check, ChevronDown, CircleHelp, Download, Loader2, Pencil, Phone, Plus, RotateCcw, Search, SlidersHorizontal, Trash2, Upload, Users, X } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { formatCurrency, formatDate } from "@/lib/data";
+import { formatDateTime, parseAppDate } from "@/lib/utils";
+import StatusBadge from "@/components/ui/StatusBadge";
+import AddCustomerModal from "@/components/ui/AddCustomerModal";
+import DataPagination from "@/components/ui/DataPagination";
+import ThinScrollArea from "@/components/ui/ThinScrollArea";
+import { customerStatusFlow, customerStatusLabels, normalizeCustomerStatus } from "@/lib/customerStatus";
+import SystemSelect from "@/components/ui/SystemSelect";
+import styles from "./projects.module.css";
+
+type Customer = {
+  id: string;
+  name?: string | null;
+  phone?: string | null;
+  weixin?: string | null;
+  source?: string | null;
+  address?: string | null;
+  house_address?: string | null;
+  building_no?: string | null;
+  unit_no?: string | null;
+  room_no?: string | null;
+  no_room_number?: number | boolean | null;
+  area?: string | null;
+  area_size?: number | string | null;
+  budget?: number | string | null;
+  status?: string | null;
+  intention?: string | null;
+  created_by_name?: string | null;
+  advisor_name?: string | null;
+  business_department_name?: string | null;
+  inviter_name?: string | null;
+  inviter_id?: string | null;
+  designer_name?: string | null;
+  design_department_name?: string | null;
+  last_followup_at?: string | Date | null;
+  next_followup_at?: string | Date | null;
+  has_overdue_followup?: number | boolean | null;
+  overdue_followup_days?: number | string | null;
+  created_at?: string | Date | null;
+  service_store?: string | null;
+  service_store_is_active?: number | string | null;
+  house_type?: string | null;
+  decoration_type?: string | null;
+  is_delivered?: number | boolean | null;
+  requirements?: string | null;
+  remarks?: string | null;
+  phone_duplicate_count?: number | string | null;
+  deleted_at?: string | Date | null;
+};
+
+type CustomerListResponse = {
+  customers: Customer[];
+  total: number;
+  page: number;
+  pageSize: number;
+  statusCounts: Record<string, number>;
+  sourceOptions: string[];
+  storeOptions: string[];
+  advisorOptions: CustomerFilterOption[];
+  designerOptions: CustomerFilterOption[];
+  intentionOptions: string[];
+};
+
+type CustomerListMeta = Pick<
+  CustomerListResponse,
+  "statusCounts" | "sourceOptions" | "storeOptions" | "advisorOptions" | "designerOptions" | "intentionOptions"
+>;
+
+type CustomerOwnerScope = "all" | "service" | "managed";
+type CustomerListMode = "active" | "deleted";
+
+type DepartmentFilterType = "business" | "design" | "service_store" | "participant";
+
+type CustomerFilterOption = {
+  value: string;
+  label: string;
+};
+
+type OrgUnit = {
+  id: string;
+  name: string;
+  type: string;
+  parent_id: string | null;
+  is_active?: number;
+};
+
+type OrgOption = OrgUnit & {
+  depth: number;
+  path: string;
+};
+
+const statusFilter: { value: string; label: string; filterStatus: string | null }[] = [
+  { value: "all", label: "全部", filterStatus: null },
+  ...customerStatusFlow.map((status) => ({
+    value: status.value,
+    label: status.label,
+    filterStatus: status.value,
+  })),
+];
+
+const columnDefs = [
+  { key: "name", label: "客户姓名" },
+  { key: "intention", label: "客户意向" },
+  { key: "duplicate", label: "重复次数" },
+  { key: "contact", label: "手机号" },
+  { key: "address", label: "房号" },
+  { key: "area_size", label: "面积" },
+  { key: "budget", label: "装修预算" },
+  { key: "status", label: "客户状态/阶段" },
+  { key: "advisor", label: "家装顾问" },
+  { key: "business_department", label: "业务部门" },
+  { key: "designer", label: "设计师" },
+  { key: "design_department", label: "设计部门" },
+  { key: "created_at", label: "创建时间" },
+  { key: "last_followup", label: "最近跟进" },
+  { key: "next_followup", label: "下次跟进时间" },
+  { key: "service_store", label: "服务门店" },
+  { key: "followup_status", label: "跟进状态" },
+];
+
+const customerOwnerScopes: { value: Exclude<CustomerOwnerScope, "all">; label: string; icon: typeof Users }[] = [
+  { value: "service", label: "我服务的", icon: Users },
+  { value: "managed", label: "我管理的", icon: Building2 },
+];
+
+const customerOwnerScopeTips: Record<Exclude<CustomerOwnerScope, "all">, string> = {
+  service: "我参与服务团队、由我邀约创建，或我负责项目的客户",
+  managed: "我负责的组织及其下级组织名下的客户",
+};
+
+const departmentFilterTypes: { value: DepartmentFilterType; label: string }[] = [
+  { value: "business", label: "业务部门" },
+  { value: "design", label: "设计部门" },
+  { value: "service_store", label: "服务门店" },
+  { value: "participant", label: "全部参与部门" },
+];
+
+const departmentFilterTypeTips: Record<DepartmentFilterType, string> = {
+  business: "按客户的家装顾问、邀约人或创建人所在组织筛选",
+  design: "按客户已分配设计师所在组织筛选",
+  service_store: "按客户当前所属服务门店或组织名称筛选",
+  participant: "按服务团队、其他人员、邀约人、创建人、项目经理等参与人员所在组织筛选",
+};
+
+const orgTypeLabels: Record<string, string> = {
+  group: "集团",
+  region: "大区",
+  company: "公司",
+  store: "门店",
+  dept: "部门",
+  team: "小组",
+};
+
+const lifecycleStatusClassNames: Record<string, string> = {
+  NEW: styles.lifecycleStatusNew,
+  CONTACTED: styles.lifecycleStatusContacted,
+  INVITED: styles.lifecycleStatusInvited,
+  MEASURED: styles.lifecycleStatusMeasured,
+  DEPOSITED: styles.lifecycleStatusDeposited,
+  PROPOSAL: styles.lifecycleStatusProposal,
+  SIGNED: styles.lifecycleStatusSigned,
+  LOST: styles.lifecycleStatusLost,
+};
+
+const defaultColumns = columnDefs.map((column) => column.key);
+
+function mergeCustomerColumnOrder(savedColumns: unknown) {
+  if (!Array.isArray(savedColumns)) return defaultColumns;
+  const knownColumns = savedColumns.filter((key): key is string => typeof key === "string" && defaultColumns.includes(key));
+  const knownSet = new Set(knownColumns);
+  const missingSet = new Set(defaultColumns.filter((key) => !knownSet.has(key)));
+  const merged: string[] = [];
+
+  knownColumns.forEach((key) => {
+    merged.push(key);
+    const defaultIndex = defaultColumns.indexOf(key);
+    let nextIndex = defaultIndex + 1;
+    while (nextIndex < defaultColumns.length && missingSet.has(defaultColumns[nextIndex])) {
+      merged.push(defaultColumns[nextIndex]);
+      missingSet.delete(defaultColumns[nextIndex]);
+      nextIndex += 1;
+    }
+  });
+
+  const nextOrder = [...merged, ...defaultColumns.filter((key) => missingSet.has(key))];
+  return ["name", ...nextOrder.filter((key) => key !== "name")];
+}
+
+function isStarIntention(value?: string | null) {
+  return /^★{1,5}$/.test(String(value || ""));
+}
+
+function isOrgActive(unit?: OrgUnit | null) {
+  return Number(unit?.is_active ?? 1) === 1;
+}
+
+function buildOrgOptions(units: OrgUnit[]): OrgOption[] {
+  const map = new Map<string, OrgUnit & { children: OrgUnit[] }>();
+  units.forEach((unit) => map.set(unit.id, { ...unit, children: [] }));
+  const roots: (OrgUnit & { children: OrgUnit[] })[] = [];
+  units.forEach((unit) => {
+    const node = map.get(unit.id);
+    if (!node) return;
+    if (unit.parent_id && map.has(unit.parent_id)) {
+      map.get(unit.parent_id)?.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  });
+  const options: OrgOption[] = [];
+  const walk = (node: OrgUnit & { children: OrgUnit[] }, depth: number, ancestors: string[]) => {
+    const pathParts = [...ancestors, node.name];
+    options.push({ ...node, depth, path: pathParts.join(" / ") });
+    node.children.forEach((child) => walk(child as OrgUnit & { children: OrgUnit[] }, depth + 1, pathParts));
+  };
+  roots.forEach((root) => walk(root, 0, []));
+  return options;
+}
+
+const pageClass = styles.page;
+const tableCellBase = `${styles.tableCell} whitespace-nowrap align-middle`;
+const panelClass = styles.panel;
+const secondaryButtonClass = `${styles.secondaryButton} inline-flex shrink-0 items-center gap-2 px-3.5 py-1.5 transition disabled:cursor-not-allowed disabled:opacity-60`;
+const primaryButtonClass = `${styles.primaryButton} inline-flex shrink-0 items-center gap-2 px-3.5 py-1.5 transition disabled:cursor-not-allowed disabled:opacity-60`;
+const inputControlClass = `${styles.inputControl} h-9 px-3 text-sm outline-none transition`;
+const filterButtonClass = `${styles.filterButton} inline-flex min-h-9 items-center justify-center gap-2 border px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60`;
+const filterGhostButtonClass = styles.filterGhostButton;
+const filterActiveButtonClass = styles.segmentActive;
+
+function normalizeRoomPart(value: string | null | undefined, suffixes: string[]) {
+  const cleaned = value?.trim();
+  if (!cleaned) return "";
+  const suffix = suffixes.find((item) => cleaned.endsWith(item));
+  return suffix ? cleaned.slice(0, -suffix.length) : cleaned;
+}
+
+function buildCustomerRoomNumber(customer: Customer) {
+  if (customer.no_room_number === true || customer.no_room_number === 1) return "暂无房号";
+  const building = normalizeRoomPart(customer.building_no, ["号楼", "栋", "幢", "座"]);
+  const unit = normalizeRoomPart(customer.unit_no, ["单元"]);
+  const room = normalizeRoomPart(customer.room_no, ["室", "房", "号"]);
+  return [building, unit, room].filter(Boolean).join("-");
+}
+
+function getCustomerRoomDisplay(customer: Customer) {
+  const community = customer.address?.trim();
+  const roomNumber = buildCustomerRoomNumber(customer);
+  if (community && roomNumber && roomNumber !== "暂无房号") return `${community}${roomNumber}`;
+  return community || customer.house_address?.trim() || customer.area?.trim() || "";
+}
+
+function getCustomerPhoneKey(customer: Customer) {
+  const phone = customer.phone?.trim();
+  if (!phone || phone === "仅微信联系") return "";
+  return phone;
+}
+
+function getDateOnlyValue(value?: string | Date | null) {
+  const date = parseAppDate(value);
+  if (!date) return null;
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+function getFollowupOverdueDays(nextFollowupAt?: string | Date | null, overdueDays?: number | string | null) {
+  const parsedDays = Number(overdueDays || 0);
+  if (Number.isFinite(parsedDays) && parsedDays > 0) return Math.floor(parsedDays);
+  const nextDate = getDateOnlyValue(nextFollowupAt);
+  const today = getDateOnlyValue(new Date());
+  if (!nextDate || !today || nextDate >= today) return 0;
+  const diff = (new Date(`${today}T00:00:00+08:00`).getTime() - new Date(`${nextDate}T00:00:00+08:00`).getTime()) / 86400000;
+  return Number.isFinite(diff) ? Math.max(1, Math.floor(diff)) : 0;
+}
+
+function getFollowupStatus(nextFollowupAt?: string | Date | null, hasOverdueFollowup?: number | boolean | null, overdueDays?: number | string | null) {
+  if (hasOverdueFollowup === true || hasOverdueFollowup === 1) {
+    const days = getFollowupOverdueDays(nextFollowupAt, overdueDays);
+    return { label: days > 0 ? `跟进逾期${days}天` : "跟进逾期", className: "bg-red-50 text-red-700 ring-red-100" };
+  }
+  const nextDate = getDateOnlyValue(nextFollowupAt);
+  if (!nextDate) {
+    return { label: "未安排跟进", className: "bg-surface-100 text-surface-500 ring-surface-200" };
+  }
+  const today = getDateOnlyValue(new Date());
+  if (!today) {
+    return { label: "正常跟进", className: "bg-emerald-50 text-emerald-700 ring-emerald-100" };
+  }
+  if (nextDate < today) {
+    const days = getFollowupOverdueDays(nextFollowupAt, overdueDays);
+    return { label: days > 0 ? `跟进逾期${days}天` : "跟进逾期", className: "bg-red-50 text-red-700 ring-red-100" };
+  }
+  if (nextDate === today) {
+    return { label: "今日跟进", className: "bg-amber-50 text-amber-700 ring-amber-100" };
+  }
+  return { label: "正常跟进", className: "bg-emerald-50 text-emerald-700 ring-emerald-100" };
+}
+
+function useDebouncedValue<T>(value: T, delay = 300) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedValue(value), delay);
+    return () => window.clearTimeout(timer);
+  }, [delay, value]);
+
+  return debouncedValue;
+}
+
+function buildCustomerListUrl({
+  page,
+  pageSize,
+  filter,
+  search,
+  createdFrom,
+  createdTo,
+  sourceFilter,
+  storeFilter,
+  advisorFilter,
+  designerFilter,
+  intentionFilter,
+  followupFilter,
+  departmentType,
+  departmentOrgId,
+  departmentIncludeChildren,
+  duplicateFilter,
+  exportAll = false,
+  includeMeta = true,
+  duplicatePhone,
+  ownerScope = "all",
+  listMode = "active",
+}: {
+  page: number;
+  pageSize: number;
+  filter: string;
+  search: string;
+  createdFrom: string;
+  createdTo: string;
+  sourceFilter: string;
+  storeFilter: string;
+  advisorFilter: string;
+  designerFilter: string;
+  intentionFilter: string;
+  followupFilter: string;
+  departmentType: DepartmentFilterType;
+  departmentOrgId: string;
+  departmentIncludeChildren: boolean;
+  duplicateFilter: string;
+  exportAll?: boolean;
+  includeMeta?: boolean;
+  duplicatePhone?: string | null;
+  ownerScope?: CustomerOwnerScope;
+  listMode?: CustomerListMode;
+}) {
+  const params = new URLSearchParams({
+    mode: "list",
+    page: String(page),
+    pageSize: String(pageSize),
+    status: filter,
+  });
+  const append = (key: string, value?: string | null) => {
+    const trimmed = value?.trim();
+    if (trimmed) params.set(key, trimmed);
+  };
+  append("search", search);
+  append("createdFrom", createdFrom);
+  append("createdTo", createdTo);
+  append("source", sourceFilter);
+  append("store", storeFilter);
+  append("advisor", advisorFilter);
+  append("designer", designerFilter);
+  append("intention", intentionFilter);
+  append("followup", followupFilter);
+  append("departmentType", departmentOrgId ? departmentType : "");
+  append("departmentOrgId", departmentOrgId);
+  if (departmentOrgId && departmentIncludeChildren) params.set("departmentIncludeChildren", "1");
+  append("duplicate", duplicateFilter);
+  if (exportAll) params.set("export", "1");
+  if (!includeMeta) params.set("includeMeta", "0");
+  append("duplicatePhone", duplicatePhone);
+  if (ownerScope !== "all") params.set("scope", ownerScope);
+  if (listMode === "deleted") params.set("deleted", "1");
+  return `/api/customers?${params.toString()}`;
+}
+
+function buildCustomerListMetaUrl(options: Parameters<typeof buildCustomerListUrl>[0]) {
+  const listUrl = buildCustomerListUrl({ ...options, page: 1, pageSize: 1, includeMeta: true });
+  const [path, query = ""] = listUrl.split("?");
+  const params = new URLSearchParams(query);
+  params.set("mode", "list-meta");
+  params.delete("page");
+  params.delete("pageSize");
+  params.delete("includeMeta");
+  params.delete("export");
+  params.delete("duplicatePhone");
+  return `${path}?${params.toString()}`;
+}
+
+async function fetchCustomerList(url: string, signal?: AbortSignal): Promise<CustomerListResponse> {
+  const token = typeof window !== "undefined" ? localStorage.getItem("zxgj_token") : null;
+  const res = await fetch(url, {
+    signal,
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.message || "客户列表加载失败");
+  }
+  return res.json();
+}
+
+async function fetchCustomerMeta(url: string, signal?: AbortSignal): Promise<CustomerListMeta> {
+  const token = typeof window !== "undefined" ? localStorage.getItem("zxgj_token") : null;
+  const res = await fetch(url, {
+    signal,
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.message || "客户筛选数据加载失败");
+  }
+  return res.json();
+}
+
+export default function CustomerManagementPage() {
+  const router = useRouter();
+  const [listMode, setListMode] = useState<CustomerListMode>("active");
+  const [filter, setFilter] = useState("all");
+  const [ownerScope, setOwnerScope] = useState<CustomerOwnerScope>("service");
+  const [search, setSearch] = useState("");
+  const [showMoreFilters, setShowMoreFilters] = useState(false);
+  const moreFiltersButtonRef = useRef<HTMLButtonElement>(null);
+  const moreFiltersPanelRef = useRef<HTMLDivElement>(null);
+  const [createdFrom, setCreatedFrom] = useState("");
+  const [createdTo, setCreatedTo] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("");
+  const [storeFilter, setStoreFilter] = useState("");
+  const [advisorFilter, setAdvisorFilter] = useState("");
+  const [designerFilter, setDesignerFilter] = useState("");
+  const [intentionFilter, setIntentionFilter] = useState("");
+  const [followupFilter, setFollowupFilter] = useState("");
+  const [departmentType, setDepartmentType] = useState<DepartmentFilterType>("business");
+  const [departmentOrgId, setDepartmentOrgId] = useState("");
+  const [departmentIncludeChildren, setDepartmentIncludeChildren] = useState(true);
+  const [duplicateFilter, setDuplicateFilter] = useState("");
+  const [orgUnits, setOrgUnits] = useState<OrgUnit[]>([]);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [editingProfileCustomer, setEditingProfileCustomer] = useState<Customer | null>(null);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [duplicatePhone, setDuplicatePhone] = useState<string | null>(null);
+  const [duplicateCustomers, setDuplicateCustomers] = useState<Customer[]>([]);
+  const [duplicateLoading, setDuplicateLoading] = useState(false);
+  const [customerData, setCustomerData] = useState<CustomerListResponse | null>(null);
+  const [customerMeta, setCustomerMeta] = useState<{ key: string; data: CustomerListMeta } | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSizeState] = useState(20);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [openingCustomerId, setOpeningCustomerId] = useState<string | null>(null);
+  const [deletingCustomerId, setDeletingCustomerId] = useState<string | null>(null);
+  const [restoringCustomerId, setRestoringCustomerId] = useState<string | null>(null);
+  const debouncedSearch = useDebouncedValue(search, 300);
+
+  useEffect(() => {
+    if (!showMoreFilters) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (moreFiltersButtonRef.current?.contains(target) || moreFiltersPanelRef.current?.contains(target)) return;
+      if (target instanceof Element && target.closest(".system-select-menu, [data-customer-filter-overlay]")) return;
+      setShowMoreFilters(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowMoreFilters(false);
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showMoreFilters]);
+
+  const customerList = useMemo(() => customerData?.customers ?? [], [customerData]);
+  const totalCustomers = customerData?.total ?? 0;
+  const sourceOptions = customerMeta?.data.sourceOptions ?? customerData?.sourceOptions ?? [];
+  const storeOptions = customerMeta?.data.storeOptions ?? customerData?.storeOptions ?? [];
+  const advisorOptions = customerMeta?.data.advisorOptions ?? customerData?.advisorOptions ?? [];
+  const designerOptions = customerMeta?.data.designerOptions ?? customerData?.designerOptions ?? [];
+  const intentionOptions = useMemo(
+    () => customerMeta?.data.intentionOptions ?? customerData?.intentionOptions ?? [],
+    [customerData?.intentionOptions, customerMeta?.data.intentionOptions],
+  );
+  const intentionFilterOptions = useMemo(() => {
+    const starOptions = Array.from({ length: 5 }, (_, index) => "★".repeat(index + 1));
+    return Array.from(new Set([...starOptions, ...intentionOptions])).filter(Boolean);
+  }, [intentionOptions]);
+  const orgOptions = useMemo(() => buildOrgOptions(orgUnits), [orgUnits]);
+  const selectedDepartmentOrg = useMemo(() => orgOptions.find((option) => option.id === departmentOrgId) || null, [departmentOrgId, orgOptions]);
+  const selectedDepartmentTypeLabel = departmentFilterTypes.find((item) => item.value === departmentType)?.label || "部门";
+  const customerFilterKey = useMemo(() => [
+    filter,
+    debouncedSearch,
+    createdFrom,
+    createdTo,
+    sourceFilter,
+    storeFilter,
+    advisorFilter,
+    designerFilter,
+    intentionFilter,
+    followupFilter,
+    departmentType,
+    departmentOrgId,
+    departmentIncludeChildren ? "1" : "0",
+    duplicateFilter,
+    ownerScope,
+    listMode,
+  ].join("|"), [advisorFilter, createdFrom, createdTo, debouncedSearch, departmentIncludeChildren, departmentOrgId, departmentType, designerFilter, duplicateFilter, filter, followupFilter, intentionFilter, listMode, ownerScope, sourceFilter, storeFilter]);
+  const lastCustomerFilterKey = useRef(customerFilterKey);
+  const effectivePage = lastCustomerFilterKey.current === customerFilterKey ? page : 1;
+
+  const phoneCountMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    customerList.forEach((customer) => {
+      const phone = getCustomerPhoneKey(customer);
+      const duplicateCount = Number(customer.phone_duplicate_count || 0);
+      if (phone) map[phone] = duplicateCount > 0 ? duplicateCount : (map[phone] || 0) + 1;
+    });
+    return map;
+  }, [customerList]);
+
+ const currentListUrl = useMemo(() => buildCustomerListUrl({
+    page: effectivePage,
+    pageSize,
+    filter,
+    search: debouncedSearch,
+    createdFrom,
+    createdTo,
+    sourceFilter,
+    storeFilter,
+    advisorFilter,
+    designerFilter,
+    intentionFilter,
+    followupFilter,
+    departmentType,
+    departmentOrgId,
+    departmentIncludeChildren,
+    duplicateFilter,
+    includeMeta: false,
+    ownerScope,
+    listMode,
+  }), [advisorFilter, createdFrom, createdTo, debouncedSearch, departmentIncludeChildren, departmentOrgId, departmentType, designerFilter, duplicateFilter, effectivePage, filter, followupFilter, intentionFilter, listMode, ownerScope, pageSize, sourceFilter, storeFilter]);
+
+  const currentMetaUrl = useMemo(() => buildCustomerListMetaUrl({
+    page: 1,
+    pageSize,
+    filter: "all",
+    search: debouncedSearch,
+    createdFrom,
+    createdTo,
+    sourceFilter,
+    storeFilter,
+    advisorFilter,
+    designerFilter,
+    intentionFilter,
+    followupFilter,
+    departmentType,
+    departmentOrgId,
+    departmentIncludeChildren,
+    duplicateFilter,
+    ownerScope,
+    listMode,
+  }), [advisorFilter, createdFrom, createdTo, debouncedSearch, departmentIncludeChildren, departmentOrgId, departmentType, designerFilter, duplicateFilter, followupFilter, intentionFilter, listMode, ownerScope, pageSize, sourceFilter, storeFilter]);
+
+  const statusCountsReady = customerMeta?.key === currentMetaUrl || Boolean(customerData?.statusCounts && Object.keys(customerData.statusCounts).length > 0);
+  const statusCounts = statusCountsReady
+    ? (customerMeta?.key === currentMetaUrl ? customerMeta.data.statusCounts : customerData?.statusCounts ?? {})
+    : {};
+
+  const reloadCustomerMeta = useCallback(async () => {
+    try {
+      const data = await fetchCustomerMeta(currentMetaUrl);
+      setCustomerMeta({ key: currentMetaUrl, data });
+    } catch {
+      // 筛选辅助数据加载失败不影响客户列表首屏展示。
+    }
+  }, [currentMetaUrl]);
+
+  const reloadCustomers = useCallback(async () => {
+    setIsLoading(true);
+    setLoadError("");
+    try {
+      const data = await fetchCustomerList(currentListUrl);
+      setCustomerData(data);
+      void reloadCustomerMeta();
+    } catch (err: any) {
+      setLoadError(err?.message || "客户列表加载失败");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [currentListUrl, reloadCustomerMeta]);
+
+  useEffect(() => {
+    if (lastCustomerFilterKey.current === customerFilterKey) return;
+    lastCustomerFilterKey.current = customerFilterKey;
+    setPage(1);
+  }, [customerFilterKey]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setIsLoading(true);
+    setLoadError("");
+    fetchCustomerList(currentListUrl, controller.signal)
+      .then((data) => setCustomerData(data))
+      .catch((err) => {
+        if (err?.name === "AbortError") return;
+        setLoadError(err?.message || "客户列表加载失败");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setIsLoading(false);
+      });
+    return () => controller.abort();
+  }, [currentListUrl]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchCustomerMeta(currentMetaUrl, controller.signal)
+      .then((data) => setCustomerMeta({ key: currentMetaUrl, data }))
+      .catch(() => {});
+    return () => controller.abort();
+  }, [currentMetaUrl]);
+
+  useEffect(() => {
+    fetch("/api/org")
+      .then((res) => res.json())
+      .then((data) => setOrgUnits(Array.isArray(data) ? data : []))
+      .catch(() => setOrgUnits([]));
+  }, []);
+
+  useEffect(() => {
+    if (!duplicatePhone) {
+      setDuplicateCustomers([]);
+      setDuplicateLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setDuplicateLoading(true);
+    fetchCustomerList(buildCustomerListUrl({
+      page: 1,
+      pageSize: 300,
+      filter: "all",
+      search: "",
+      createdFrom: "",
+      createdTo: "",
+      sourceFilter: "",
+      storeFilter: "",
+      advisorFilter: "",
+      designerFilter: "",
+      intentionFilter: "",
+      followupFilter: "",
+      departmentType: "business",
+      departmentOrgId: "",
+      departmentIncludeChildren: true,
+      duplicateFilter: "",
+      includeMeta: false,
+      duplicatePhone,
+      listMode: "active",
+    }), controller.signal)
+      .then((data) => setDuplicateCustomers(data.customers || []))
+      .catch(() => setDuplicateCustomers([]))
+      .finally(() => {
+        if (!controller.signal.aborted) setDuplicateLoading(false);
+      });
+    return () => controller.abort();
+  }, [duplicatePhone]);
+
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => {
+    try {
+      const saved = typeof window !== "undefined" ? localStorage.getItem("customer_columns_order") : null;
+      const parsed = saved ? JSON.parse(saved) : null;
+      return mergeCustomerColumnOrder(parsed);
+    } catch {
+      return defaultColumns;
+    }
+  });
+  const [dragOverCol, setDragOverCol] = useState<string | null>(null);
+  const dragCol = useRef<string | null>(null);
+  const visibleColumnOrder = columnOrder;
+
+  const handleColDragStart = (key: string) => {
+    dragCol.current = key;
+  };
+
+  const handleColDragOver = (e: React.DragEvent, key: string) => {
+    e.preventDefault();
+    setDragOverCol(key);
+  };
+
+  const handleColDrop = (key: string) => {
+    if (!dragCol.current || dragCol.current === key) {
+      setDragOverCol(null);
+      return;
+    }
+    const newOrder = [...columnOrder];
+    const fromIdx = newOrder.indexOf(dragCol.current);
+    const toIdx = newOrder.indexOf(key);
+    newOrder.splice(fromIdx, 1);
+    newOrder.splice(toIdx, 0, dragCol.current);
+    setColumnOrder(newOrder);
+    try {
+      localStorage.setItem("customer_columns_order", JSON.stringify(newOrder));
+    } catch {}
+    dragCol.current = null;
+    setDragOverCol(null);
+  };
+
+  const handleColDragEnd = () => {
+    dragCol.current = null;
+    setDragOverCol(null);
+  };
+
+  const setPageSize = (nextPageSize: number) => {
+    setPageSizeState(nextPageSize);
+    setPage(1);
+  };
+
+  const handleExportCustomers = async () => {
+    const headers = ["客户姓名", "手机号", "微信号", "客户来源", "房号", "装修面积", "装修预算", "客户状态", "客户意向", "服务门店", "户型", "装修类型", "创建时间"];
+    setExporting(true);
+    try {
+      const data = await fetchCustomerList(buildCustomerListUrl({
+        page: 1,
+        pageSize: 100000,
+        filter,
+        search,
+        createdFrom,
+        createdTo,
+        sourceFilter,
+        storeFilter,
+        advisorFilter,
+        designerFilter,
+        intentionFilter,
+        followupFilter,
+        departmentType,
+        departmentOrgId,
+        departmentIncludeChildren,
+        duplicateFilter,
+        exportAll: true,
+        includeMeta: false,
+        ownerScope,
+        listMode,
+      }));
+      const rows = (data.customers || []).map((customer) => [
+        customer.name || "",
+        customer.phone || "",
+        customer.weixin || "",
+        customer.source || "",
+        getCustomerRoomDisplay(customer),
+        customer.area_size || "",
+        customer.budget || "",
+        customerStatusLabels[normalizeCustomerStatus(customer.status)] || "",
+        customer.intention || "",
+        customer.service_store || "",
+        customer.house_type || "",
+        customer.decoration_type || "",
+        customer.created_at ? formatDate(customer.created_at) : "",
+      ]);
+      downloadCsv(`客户导出_${new Date().toISOString().slice(0, 10)}.csv`, [headers, ...rows]);
+    } catch (err: any) {
+      setLoadError(err?.message || "客户导出失败");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const resetMoreFilters = () => {
+    setListMode("active");
+    setCreatedFrom("");
+    setCreatedTo("");
+    setSourceFilter("");
+    setStoreFilter("");
+    setAdvisorFilter("");
+    setDesignerFilter("");
+    setIntentionFilter("");
+    setFollowupFilter("");
+    setDepartmentType("business");
+    setDepartmentOrgId("");
+    setDepartmentIncludeChildren(true);
+    setDuplicateFilter("");
+  };
+
+  const toggleOwnerScope = (nextScope: Exclude<CustomerOwnerScope, "all">) => {
+    setOwnerScope((currentScope) => (currentScope === nextScope ? "all" : nextScope));
+  };
+
+  const switchListMode = (nextMode: CustomerListMode) => {
+    setListMode(nextMode);
+    if (nextMode === "deleted") setFilter("all");
+    setPage(1);
+    setLoadError("");
+    setOpeningCustomerId(null);
+  };
+
+  const getCustomerDetailHref = useCallback((customerId: string) => `/projects/${customerId}`, []);
+
+  const prefetchCustomerDetail = useCallback((customerId: string) => {
+    router.prefetch(getCustomerDetailHref(customerId));
+  }, [getCustomerDetailHref, router]);
+
+  const openCustomerDetail = useCallback((customerId: string) => {
+    if (listMode === "deleted") return;
+    setOpeningCustomerId(customerId);
+    const href = getCustomerDetailHref(customerId);
+    router.prefetch(href);
+    router.push(href);
+  }, [getCustomerDetailHref, listMode, router]);
+
+  const activeMoreFilterCount = [
+    listMode === "deleted" ? "deleted" : "",
+    createdFrom,
+    createdTo,
+    sourceFilter,
+    storeFilter,
+    advisorFilter,
+    designerFilter,
+    intentionFilter,
+    followupFilter,
+    departmentOrgId,
+    duplicateFilter,
+  ].filter(Boolean).length;
+
+  const appliedFilterChips = [
+    createdFrom ? { key: "createdFrom", label: `创建日期 ≥ ${createdFrom}`, clear: () => setCreatedFrom("") } : null,
+    createdTo ? { key: "createdTo", label: `创建日期 ≤ ${createdTo}`, clear: () => setCreatedTo("") } : null,
+    sourceFilter ? { key: "source", label: `来源：${sourceFilter}`, clear: () => setSourceFilter("") } : null,
+    storeFilter ? { key: "store", label: `门店：${storeFilter}`, clear: () => setStoreFilter("") } : null,
+    advisorFilter ? { key: "advisor", label: `顾问：${advisorOptions.find((item) => item.value === advisorFilter)?.label || advisorFilter}`, clear: () => setAdvisorFilter("") } : null,
+    designerFilter ? { key: "designer", label: `设计师：${designerOptions.find((item) => item.value === designerFilter)?.label || designerFilter}`, clear: () => setDesignerFilter("") } : null,
+    intentionFilter ? { key: "intention", label: `意向：${intentionFilter === "__empty" ? "未设置" : intentionFilter}`, clear: () => setIntentionFilter("") } : null,
+    followupFilter ? { key: "followup", label: `跟进：${({ overdue: "已逾期", today: "今日", upcoming: "已安排", none: "未安排" } as Record<string, string>)[followupFilter] || followupFilter}`, clear: () => setFollowupFilter("") } : null,
+    duplicateFilter ? { key: "duplicate", label: `重复：${duplicateFilter === "duplicate" ? "重复客户" : "非重复客户"}`, clear: () => setDuplicateFilter("") } : null,
+    departmentOrgId ? { key: "department", label: `${selectedDepartmentTypeLabel}：${selectedDepartmentOrg?.name || "已选择组织"}${departmentIncludeChildren ? "（含下级）" : ""}`, clear: () => setDepartmentOrgId("") } : null,
+  ].filter((item): item is { key: string; label: string; clear: () => void } => Boolean(item));
+
+  const getStatusCount = (filterItem: (typeof statusFilter)[0]) => {
+    if (!statusCountsReady) return null;
+    if (filterItem.filterStatus === null) return Number(statusCounts.all || 0);
+    return Number(statusCounts[filterItem.filterStatus] || 0);
+  };
+
+  const emptyText = <span className={styles.emptyValue}>-</span>;
+
+  const renderCell = (customer: Customer, colKey: string) => {
+    const tdCls = tableCellBase;
+    const phone = customer.phone?.trim();
+    const budget = Number(customer.budget);
+    const status = normalizeCustomerStatus(customer.status);
+
+    switch (colKey) {
+      case "name":
+        return (
+          <td key={colKey} className={tdCls} data-column={colKey}>
+            <div className={styles.customerIdentity} title={customer.name || "未命名客户"}>
+              <span className={styles.customerAvatar}>{(customer.name || "客").trim().slice(0, 1)}</span>
+              <span className={styles.customerName}>{customer.name || "未命名客户"}</span>
+            </div>
+          </td>
+        );
+      case "intention":
+        return (
+          <td key={colKey} className={`${tdCls} ${styles.centerCell}`} data-column={colKey}>
+            {customer.intention ? (
+              <span className={isStarIntention(customer.intention) ? "font-black text-[#FBCD08]" : undefined}>
+                {customer.intention}
+              </span>
+            ) : emptyText}
+          </td>
+        );
+      case "duplicate":
+        const duplicateCount = phone ? phoneCountMap[phone] || 0 : 0;
+        return (
+          <td key={colKey} className={`${tdCls} ${styles.centerCell}`} data-column={colKey}>
+            {phone && duplicateCount > 1 ? (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setDuplicatePhone(phone);
+                }}
+                className={styles.duplicateBadge}
+                title="查看重复客户"
+              >
+                {duplicateCount - 1}
+              </button>
+            ) : (
+              emptyText
+            )}
+          </td>
+        );
+      case "contact":
+        return (
+          <td key={colKey} className={tdCls} data-column={colKey}>
+            <div className={styles.phoneCell}>
+              <Phone className="h-3.5 w-3.5" />
+              <span className="tabular-nums">{phone || "-"}</span>
+            </div>
+          </td>
+        );
+      case "address":
+        return (
+          <td key={colKey} className={`${tdCls} max-w-[220px]`} data-column={colKey}>
+            <span className="block truncate">{getCustomerRoomDisplay(customer) || "-"}</span>
+          </td>
+        );
+      case "area_size":
+        return (
+          <td key={colKey} className={`${tdCls} ${styles.numberCell}`} data-column={colKey}>
+            {customer.area_size ? `${customer.area_size}㎡` : emptyText}
+          </td>
+        );
+      case "budget":
+        return (
+          <td key={colKey} className={`${tdCls} ${styles.numberCell} ${styles.strongValue}`} data-column={colKey}>
+            {Number.isFinite(budget) && budget > 0 ? formatCurrency(budget) : emptyText}
+          </td>
+        );
+      case "status":
+        return (
+          <td key={colKey} className={`${tdCls} ${styles.centerCell}`} data-column={colKey} title="客户进度由系统根据跟进、量房、定金、报价和合同自动判断">
+            <span className={`${styles.statusTag} ${styles.lifecycleStatusTag} ${lifecycleStatusClassNames[status] || styles.lifecycleStatusDefault}`}>
+              {customerStatusLabels[status] || status}
+            </span>
+          </td>
+        );
+      case "advisor":
+        return (
+          <td key={colKey} className={tdCls} data-column={colKey}>
+            {customer.advisor_name || customer.inviter_name || customer.created_by_name || emptyText}
+          </td>
+        );
+      case "business_department":
+        return (
+          <td key={colKey} className={tdCls} data-column={colKey}>
+            {customer.business_department_name || emptyText}
+          </td>
+        );
+      case "designer":
+        return (
+          <td key={colKey} className={tdCls} data-column={colKey}>
+            {customer.designer_name || emptyText}
+          </td>
+        );
+      case "design_department":
+        return (
+          <td key={colKey} className={tdCls} data-column={colKey}>
+            {customer.design_department_name || emptyText}
+          </td>
+        );
+      case "created_at":
+        return (
+          <td key={colKey} className={`${tdCls} ${styles.monoCell}`} data-column={colKey}>
+            {customer.created_at ? formatDate(customer.created_at) : emptyText}
+          </td>
+        );
+      case "last_followup":
+        return (
+          <td key={colKey} className={`${tdCls} ${styles.monoCell}`} data-column={colKey}>
+            {customer.last_followup_at ? formatDateTime(customer.last_followup_at) : emptyText}
+          </td>
+        );
+      case "next_followup":
+        return (
+          <td key={colKey} className={`${tdCls} ${styles.monoCell}`} data-column={colKey}>
+            {customer.next_followup_at ? formatDate(customer.next_followup_at) : emptyText}
+          </td>
+        );
+      case "service_store":
+        return (
+          <td key={colKey} className={tdCls} data-column={colKey}>
+            {customer.service_store ? (
+              <span className="inline-flex max-w-full items-center gap-1.5">
+                <span className="truncate">{customer.service_store}</span>
+                {Number(customer.service_store_is_active ?? 1) !== 1 && (
+                  <span className="shrink-0 rounded-[8px] bg-amber-50 px-1.5 py-0.5 text-[11px] font-bold text-amber-700 ring-1 ring-amber-100">已停用</span>
+                )}
+              </span>
+            ) : emptyText}
+          </td>
+        );
+      case "followup_status":
+        const followupStatus = getFollowupStatus(customer.next_followup_at, customer.has_overdue_followup, customer.overdue_followup_days);
+        return (
+          <td key={colKey} className={`${tdCls} ${styles.centerCell}`} data-column={colKey}>
+            <span className={`${styles.statusTag} ${followupStatus.className}`}>
+              {followupStatus.label}
+            </span>
+          </td>
+        );
+      default:
+        return (
+          <td key={colKey} className={tdCls} data-column={colKey}>
+            {emptyText}
+          </td>
+        );
+    }
+  };
+
+  const openProfileEditor = (customer: Customer, event?: React.MouseEvent) => {
+    event?.stopPropagation();
+    if (normalizeCustomerStatus(customer.status) === "SIGNED") return;
+    setEditingProfileCustomer(customer);
+  };
+
+  const deleteLostCustomer = async (customer: Customer, event?: React.MouseEvent) => {
+    event?.stopPropagation();
+    if (deletingCustomerId) return;
+    if (normalizeCustomerStatus(customer.status) !== "LOST") {
+      setLoadError("只有失败/流失客户支持删除");
+      return;
+    }
+
+    const customerName = customer.name || "未命名客户";
+    if (!window.confirm(`确定删除失败/流失客户「${customerName}」吗？删除后将从客户列表隐藏，历史业务资料不会被硬删除。`)) return;
+
+    setDeletingCustomerId(customer.id);
+    setLoadError("");
+    try {
+      const token = typeof window !== "undefined" ? localStorage.getItem("zxgj_token") : null;
+      const res = await fetch(`/api/customers/${customer.id}`, {
+        method: "DELETE",
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.message || "删除失败");
+      }
+      await reloadCustomers();
+    } catch (err: any) {
+      setLoadError(err?.message || "删除失败，请稍后重试");
+    } finally {
+      setDeletingCustomerId(null);
+    }
+  };
+
+  const restoreDeletedCustomer = async (customer: Customer, event?: React.MouseEvent) => {
+    event?.stopPropagation();
+    if (restoringCustomerId) return;
+
+    const customerName = customer.name || "未命名客户";
+    if (!window.confirm(`确定恢复客户「${customerName}」吗？恢复后会重新出现在客户列表中。`)) return;
+
+    setRestoringCustomerId(customer.id);
+    setLoadError("");
+    try {
+      const token = typeof window !== "undefined" ? localStorage.getItem("zxgj_token") : null;
+      const res = await fetch(`/api/customers/${customer.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ restore_deleted: true }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.message || "恢复失败");
+      }
+      setListMode("active");
+      setFilter("LOST");
+      setPage(1);
+    } catch (err: any) {
+      setLoadError(err?.message || "恢复失败，请稍后重试");
+    } finally {
+      setRestoringCustomerId(null);
+    }
+  };
+
+  return (
+    <div className={`${pageClass} customer-list-ui`}>
+      <div className={styles.container}>
+        <div className={styles.topArea}>
+            <div className={styles.unifiedToolbar}>
+              {listMode === "active" && (
+                <nav className={styles.statusBar} aria-label="客户状态筛选">
+                  <div className={`${styles.statusBarInner} system-status-segmented`}>
+                    {statusFilter.map((item) => {
+                      const isActive = filter === item.value;
+                      return (
+                        <button
+                          key={item.value}
+                          type="button"
+                          onClick={() => setFilter(item.value)}
+                          className={`${styles.statusBarButton} system-status-option ${isActive ? `${styles.statusBarButtonActive} system-status-option-active` : ""}`}
+                          aria-pressed={isActive}
+                        >
+                          <span>{item.label}</span>
+                          <span className={`${styles.statusBarCount} system-status-count`}>{getStatusCount(item) ?? "…"}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </nav>
+              )}
+
+              <div className={styles.filterToolbar}>
+                <div className={styles.searchTools}>
+                  <div className={styles.searchWrap}>
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#9CA3AF]" />
+                    <input
+                      type="text"
+                      placeholder={listMode === "deleted" ? "搜索已删除客户姓名、手机号、微信或房号" : "搜索姓名、手机号、微信或房号"}
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                      className={`${inputControlClass} w-full pl-9`}
+                    />
+                  </div>
+                  <div className={styles.scopeWrap}>
+                    <div className={styles.scopeTabs}>
+                      {customerOwnerScopes.map((item) => {
+                        const Icon = item.icon;
+                        const isActive = ownerScope === item.value;
+                        return (
+                          <button
+                            key={item.value}
+                            type="button"
+                            className={`${styles.scopeButton} ${isActive ? styles.activeTab : ""}`}
+                            onClick={() => toggleOwnerScope(item.value)}
+                            aria-pressed={isActive}
+                          >
+                            <Icon className="h-4 w-4" />
+                            {item.label}
+                            <span
+                              className={`group/help relative -mr-1 ${styles.helpButton}`}
+                              aria-label={`${item.label}说明`}
+                              onClick={(event) => event.stopPropagation()}
+                            >
+                              <CircleHelp className="h-3.5 w-3.5" />
+                              <span className="pointer-events-none absolute bottom-[calc(100%+8px)] left-1/2 z-[80] hidden w-max max-w-[260px] -translate-x-1/2 rounded-md border border-[#E5E5E5] bg-white px-2.5 py-1.5 text-xs font-medium leading-5 text-[#525252] group-hover/help:block">
+                                {customerOwnerScopeTips[item.value]}
+                              </span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <button
+                    ref={moreFiltersButtonRef}
+                    className={`${filterButtonClass} shrink-0 ${
+                      showMoreFilters || activeMoreFilterCount > 0
+                        ? styles.filterButtonActive
+                        : ""
+                    }`}
+                    onClick={() => {
+                      setShowMoreFilters((value) => !value);
+                    }}
+                    aria-expanded={showMoreFilters}
+                    aria-controls="customer-more-filters"
+                  >
+                    <SlidersHorizontal className="h-4 w-4" />
+                    更多筛选
+                    {activeMoreFilterCount > 0 && (
+                      <span className={styles.filterBadge}>{activeMoreFilterCount}</span>
+                    )}
+                    <ChevronDown className={`h-4 w-4 transition-transform ${showMoreFilters ? "rotate-180" : ""}`} />
+                  </button>
+                  <div className={styles.toolbarActions}>
+                    <button
+                      className={secondaryButtonClass}
+                      onClick={() => setShowImportModal(true)}
+                      disabled={listMode === "deleted"}
+                    >
+                      <Upload className="h-4 w-4" />
+                      导入客户
+                    </button>
+                    <button
+                      className={secondaryButtonClass}
+                      disabled={exporting}
+                      onClick={handleExportCustomers}
+                    >
+                      {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                      {exporting ? "导出中" : listMode === "deleted" ? "导出已删除" : "导出客户"}
+                    </button>
+                    <button
+                      className={primaryButtonClass}
+                      onClick={() => setShowAddModal(true)}
+                      disabled={listMode === "deleted"}
+                    >
+                      <Plus className="h-4 w-4" />
+                      新增客户
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {listMode === "deleted" && (
+                <div className={styles.deletedNotice}>
+                  <Trash2 className="h-4 w-4" />
+                  当前查看的是已删除客户，客户状态列显示删除前的业务进度，恢复后会回到正常客户列表。
+                </div>
+              )}
+            </div>
+
+            {appliedFilterChips.length > 0 && (
+              <div className={styles.appliedFilters} aria-label="已应用筛选">
+                <span className={styles.appliedFiltersLabel}>已筛选</span>
+                {appliedFilterChips.map((item) => (
+                  <button key={item.key} type="button" onClick={item.clear} className={styles.filterChip}>
+                    {item.label}
+                    <X aria-hidden="true" />
+                  </button>
+                ))}
+                <button type="button" onClick={resetMoreFilters} className={styles.clearFiltersButton}>清除全部</button>
+              </div>
+            )}
+
+            <div
+              id="customer-more-filters"
+              ref={moreFiltersPanelRef}
+              className={`${styles.advancedPanel} grid overflow-hidden transition-[grid-template-rows,opacity,border-color] duration-300 ease-out ${
+                showMoreFilters
+                  ? "grid-rows-[1fr] opacity-100"
+                  : "pointer-events-none grid-rows-[0fr] border-t border-transparent opacity-0"
+              }`}
+              aria-hidden={!showMoreFilters}
+            >
+              <div className="min-h-0 overflow-hidden">
+                <div className={styles.advancedInner}>
+                <div className={styles.advancedGrid}>
+                  <FilterField label="创建开始">
+                    <input type="date" value={createdFrom} onChange={(event) => setCreatedFrom(event.target.value)} className={`${inputControlClass} ${styles.advancedControl} w-full`} />
+                  </FilterField>
+                  <FilterField label="创建结束">
+                    <input type="date" value={createdTo} onChange={(event) => setCreatedTo(event.target.value)} className={`${inputControlClass} ${styles.advancedControl} w-full`} />
+                  </FilterField>
+                  <FilterField label="客户来源">
+                    <SystemSelect value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)} className={`${inputControlClass} ${styles.advancedControl} w-full`} menuClassName={styles.filterSelectMenu} optionClassName={styles.filterSelectOption}>
+                      <option value="">全部来源</option>
+                      {sourceOptions.map((item) => <option key={item} value={item}>{item}</option>)}
+                    </SystemSelect>
+                  </FilterField>
+                  <FilterField label="服务门店">
+                    <SystemSelect value={storeFilter} onChange={(event) => setStoreFilter(event.target.value)} className={`${inputControlClass} ${styles.advancedControl} w-full`} menuClassName={styles.filterSelectMenu} optionClassName={styles.filterSelectOption}>
+                      <option value="">全部门店</option>
+                      {storeOptions.map((item) => <option key={item} value={item}>{item}</option>)}
+                    </SystemSelect>
+                  </FilterField>
+                  <FilterField label="家装顾问">
+                    <SystemSelect value={advisorFilter} onChange={(event) => setAdvisorFilter(event.target.value)} className={`${inputControlClass} ${styles.advancedControl} w-full`} menuClassName={styles.filterSelectMenu} optionClassName={styles.filterSelectOption}>
+                      <option value="">全部顾问</option>
+                      {advisorOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                    </SystemSelect>
+                  </FilterField>
+                  <FilterField label="设计师">
+                    <SystemSelect value={designerFilter} onChange={(event) => setDesignerFilter(event.target.value)} className={`${inputControlClass} ${styles.advancedControl} w-full`} menuClassName={styles.filterSelectMenu} optionClassName={styles.filterSelectOption}>
+                      <option value="">全部设计师</option>
+                      {designerOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                    </SystemSelect>
+                  </FilterField>
+                  <FilterField label="意向度">
+                    <SystemSelect value={intentionFilter} onChange={(event) => setIntentionFilter(event.target.value)} className={`${inputControlClass} ${styles.advancedControl} w-full`} menuClassName={styles.filterSelectMenu} optionClassName={styles.filterSelectOption}>
+                      <option value="">全部意向度</option>
+                      {intentionFilterOptions.map((item) => <option key={item} value={item}>{item}</option>)}
+                      <option value="__empty">未设置意向度</option>
+                    </SystemSelect>
+                  </FilterField>
+                  <FilterField label="跟进状态">
+                    <SystemSelect value={followupFilter} onChange={(event) => setFollowupFilter(event.target.value)} className={`${inputControlClass} ${styles.advancedControl} w-full`} menuClassName={styles.filterSelectMenu} optionClassName={styles.filterSelectOption}>
+                      <option value="">全部跟进</option>
+                      <option value="overdue">跟进逾期</option>
+                      <option value="today">今日跟进</option>
+                      <option value="upcoming">后续已安排</option>
+                      <option value="none">未安排跟进</option>
+                    </SystemSelect>
+                  </FilterField>
+                  <FilterField label="重复情况">
+                    <SystemSelect value={duplicateFilter} onChange={(event) => setDuplicateFilter(event.target.value)} className={`${inputControlClass} ${styles.advancedControl} w-full`} menuClassName={styles.filterSelectMenu} optionClassName={styles.filterSelectOption}>
+                      <option value="">全部重复情况</option>
+                      <option value="duplicate">重复客户</option>
+                      <option value="unique">非重复客户</option>
+                    </SystemSelect>
+                  </FilterField>
+                  <div className="flex items-end">
+                    <label className={`${styles.toggleField} ${styles.advancedControl} flex w-full cursor-pointer items-center justify-between gap-3 border px-3 transition`}>
+                      <span>已删除客户</span>
+                      <input
+                        type="checkbox"
+                        checked={listMode === "deleted"}
+                        onChange={(event) => switchListMode(event.target.checked ? "deleted" : "active")}
+                        className={styles.nativeCheckbox}
+                      />
+                    </label>
+                  </div>
+                  <div className="flex items-end">
+                    <button
+                      type="button"
+                      onClick={resetMoreFilters}
+                      className={`${filterButtonClass} ${filterGhostButtonClass} ${styles.advancedButton} w-full`}
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      清空筛选
+                    </button>
+                  </div>
+                  <div className={styles.advancedFullWidth}>
+                    <div className={styles.orgPanel}>
+                      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className={styles.orgHeaderTitle}>部门归属筛选</span>
+                            <span className={styles.infoTag}>
+                              {departmentOrgId ? "已生效" : "选择组织后生效"}
+                            </span>
+                          </div>
+                          <p className={styles.orgHelp}>{departmentFilterTypeTips[departmentType]}</p>
+                        </div>
+                        <div className={styles.orgCurrent}>
+                          当前：{selectedDepartmentTypeLabel}
+                          {selectedDepartmentOrg ? ` · ${selectedDepartmentOrg.name}${departmentIncludeChildren ? "（含下级）" : ""}` : " · 未选择组织"}
+                        </div>
+                      </div>
+                      <div className={styles.orgControls}>
+                        <div className={styles.departmentTypeGrid}>
+                          {departmentFilterTypes.map((item) => {
+                            const active = departmentType === item.value;
+                            return (
+                              <button
+                                key={item.value}
+                                type="button"
+                                onClick={() => setDepartmentType(item.value)}
+                                className={`${filterButtonClass} ${styles.advancedButton} w-full ${active ? filterActiveButtonClass : filterGhostButtonClass}`}
+                              >
+                                {item.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className={styles.orgSelectionRow}>
+                          <OrgUnitFilterPicker options={orgOptions} value={departmentOrgId} onChange={setDepartmentOrgId} />
+                          <button
+                            type="button"
+                            onClick={() => setDepartmentIncludeChildren((value) => !value)}
+                            className={`${styles.includeChildrenButton} ${styles.advancedButton} inline-flex min-h-10 w-full items-center justify-between gap-2 border px-3 py-1.5 transition ${departmentIncludeChildren ? styles.includeChildrenActive : filterGhostButtonClass}`}
+                          >
+                            <span>包含下级</span>
+                            <span className={`${styles.checkboxMark} flex h-4 w-4 items-center justify-center border ${departmentIncludeChildren ? styles.checkboxMarkActive : ""}`}>
+                              <Check className="h-3 w-3" />
+                            </span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              </div>
+            </div>
+
+        </div>
+
+      <section className={`${panelClass} ${styles.tablePanel}`}>
+        {openingCustomerId && (
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-white/70">
+            <div className={`${styles.loadingPill} inline-flex items-center gap-2 border border-[#B9CDF8] bg-white px-4 py-2 text-sm font-semibold text-[#2F6FEB]`}>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              正在打开客户详情...
+            </div>
+          </div>
+        )}
+        <ThinScrollArea className={styles.tableScroll}>
+          <table className={`${styles.table} ${visibleColumnOrder.length <= 10 ? styles.tableFewColumns : ""}`}>
+            <thead>
+              <tr>
+                {visibleColumnOrder.map((colKey) => {
+                  const col = columnDefs.find((definition) => definition.key === colKey);
+                  const numericHeader = colKey === "area_size" || colKey === "budget";
+                  const centeredHeader = colKey === "intention" || colKey === "duplicate" || colKey === "status" || colKey === "followup_status";
+                  return (
+                    <th
+                      key={colKey}
+                      draggable
+                      onDragStart={() => handleColDragStart(colKey)}
+                      onDragOver={(event) => handleColDragOver(event, colKey)}
+                      onDrop={() => handleColDrop(colKey)}
+                      onDragEnd={handleColDragEnd}
+                      data-column={colKey}
+                      className={`${styles.tableHeaderCell} ${numericHeader ? styles.numberCell : centeredHeader ? styles.centerCell : ""} cursor-grab select-none whitespace-nowrap transition-colors active:cursor-grabbing ${
+                        dragOverCol === colKey ? styles.dragOverColumn : ""
+                      }`}
+                    >
+                      {col?.label}
+                    </th>
+                  );
+                })}
+                <th className={`${styles.tableHeaderCell} ${styles.stickyAction} whitespace-nowrap`}>
+                  操作
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {customerList.map((customer) => {
+                const isOpening = openingCustomerId === customer.id;
+                const customerStatus = normalizeCustomerStatus(customer.status);
+                const isDeleting = deletingCustomerId === customer.id;
+                const isRestoring = restoringCustomerId === customer.id;
+                return (
+                  <tr
+                    key={customer.id}
+                    data-status={customerStatus.toLowerCase()}
+                    aria-busy={isOpening}
+                    onMouseEnter={() => listMode === "active" && prefetchCustomerDetail(customer.id)}
+                    onClick={() => listMode === "active" && openCustomerDetail(customer.id)}
+                    className={`${styles.tableRow} group ${listMode === "active" ? "cursor-pointer" : "cursor-default"} ${
+                      isOpening ? "bg-[#edf4ff] ring-1 ring-inset ring-[#cfe1ff]" : "hover:bg-[#f4f8ff]"
+                    }`}
+                  >
+                    {visibleColumnOrder.map((colKey) => renderCell(customer, colKey))}
+                    <td
+                      className={`${styles.tableCell} ${styles.stickyAction} ${
+                        isOpening ? "bg-[#edf4ff]" : "bg-white group-hover:bg-[#f4f8ff]"
+                      }`}
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      {listMode === "deleted" ? (
+                        <button
+                          type="button"
+                          onClick={(event) => restoreDeletedCustomer(customer, event)}
+                          disabled={isRestoring}
+                          className={`${styles.rowAction} disabled:cursor-not-allowed disabled:opacity-60`}
+                          title="恢复客户"
+                        >
+                          {isRestoring ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
+                          {isRestoring ? "恢复中" : "恢复"}
+                        </button>
+                      ) : isOpening ? (
+                        <span className={styles.rowActionQuiet}>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          打开中
+                        </span>
+                      ) : customerStatus === "SIGNED" ? (
+                        <span className={styles.rowActionQuiet} title="签约客户资料不允许编辑">
+                          已签约
+                        </span>
+                      ) : (
+                        <div className="flex items-center justify-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={(event) => openProfileEditor(customer, event)}
+                            disabled={isDeleting}
+                            className={`${styles.rowAction} disabled:cursor-not-allowed disabled:opacity-60`}
+                            title="编辑客户资料"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                            编辑
+                          </button>
+                          {customerStatus === "LOST" && (
+                            <button
+                              type="button"
+                              onClick={(event) => deleteLostCustomer(customer, event)}
+                              disabled={isDeleting}
+                              className={`${styles.rowActionDanger} disabled:cursor-not-allowed disabled:opacity-60`}
+                              title="删除失败/流失客户"
+                            >
+                              {isDeleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                              {isDeleting ? "删除中" : "删除"}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {loadError && (
+                <tr>
+                  <td colSpan={visibleColumnOrder.length + 1} className="px-5 py-16 text-center">
+                    <div className="mx-auto max-w-sm">
+                      <div className={`${styles.stateIcon} ${styles.stateIconError}`}>
+                        <X className="h-4 w-4" />
+                      </div>
+                      <p className={styles.stateTitle}>客户列表加载失败</p>
+                      <p className={styles.stateText}>{loadError}</p>
+                      <button type="button" onClick={reloadCustomers} className={styles.stateButton}>
+                        重新加载
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              )}
+              {!loadError && isLoading && customerList.length === 0 && (
+                <>
+                  {Array.from({ length: 6 }, (_, rowIndex) => (
+                    <tr key={`customer-skeleton-${rowIndex}`} aria-hidden="true">
+                      {visibleColumnOrder.map((columnKey, columnIndex) => (
+                        <td key={columnKey} className={styles.tableCell}>
+                          <span className={`${styles.skeleton} ${(rowIndex + columnIndex) % 3 === 0 ? styles.skeletonWide : ""}`} />
+                        </td>
+                      ))}
+                      <td className={`${styles.tableCell} ${styles.stickyAction}`}>
+                        <span className={styles.skeleton} />
+                      </td>
+                    </tr>
+                  ))}
+                </>
+              )}
+              {!loadError && !isLoading && customerList.length === 0 && (
+                <tr>
+                  <td colSpan={visibleColumnOrder.length + 1} className="px-5 py-16 text-center">
+                    <div className="mx-auto max-w-sm">
+                      <div className={styles.stateIcon}>
+                        <Search className="h-4 w-4" />
+                      </div>
+                      <p className={styles.stateTitle}>{listMode === "deleted" ? "暂无已删除客户" : "暂无匹配客户"}</p>
+                      <p className={styles.stateText}>
+                        {listMode === "deleted" ? "删除失败/流失客户后，会在这里显示并支持恢复。" : "调整筛选条件或新增客户后，这里会显示客户资料。"}
+                      </p>
+                      {listMode === "active" && (search || filter !== "all" || activeMoreFilterCount > 0) && (
+                        <button
+                          type="button"
+                          className={styles.stateButton}
+                          onClick={() => {
+                            setSearch("");
+                            setFilter("all");
+                            resetMoreFilters();
+                          }}
+                        >
+                          清除筛选
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </ThinScrollArea>
+        <DataPagination
+          total={totalCustomers}
+          page={effectivePage}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={setPageSize}
+          itemName="位客户"
+          className={styles.pagination}
+        />
+      </section>
+
+      <AddCustomerModal
+        isOpen={showAddModal}
+        onClose={() => setShowAddModal(false)}
+        onSuccess={() => reloadCustomers()}
+      />
+      <AddCustomerModal
+        isOpen={Boolean(editingProfileCustomer)}
+        onClose={() => setEditingProfileCustomer(null)}
+        onSuccess={() => {
+          setEditingProfileCustomer(null);
+          reloadCustomers();
+        }}
+        customer={editingProfileCustomer}
+      />
+      <ImportCustomersModal
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        onSuccess={() => reloadCustomers()}
+      />
+      <DuplicateCustomersModal
+        phone={duplicatePhone}
+        customers={duplicateCustomers}
+        loading={duplicateLoading}
+        onClose={() => setDuplicatePhone(null)}
+        onOpenCustomer={(customerId) => {
+          setDuplicatePhone(null);
+          openCustomerDetail(customerId);
+        }}
+      />
+      </div>
+    </div>
+  );
+}
+
+function FilterField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="block">
+      <span className={styles.filterFieldLabel}>{label}</span>
+      {children}
+    </div>
+  );
+}
+
+function OrgUnitFilterPicker({ options, value, onChange }: { options: OrgOption[]; value: string; onChange: (value: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [mounted, setMounted] = useState(false);
+  const [menuStyle, setMenuStyle] = useState({ left: 0, top: 0, width: 260, maxHeight: 340 });
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const selected = options.find((option) => option.id === value);
+  const visibleOptions = options.filter((option) => isOrgActive(option) || option.id === value);
+  const filteredOptions = visibleOptions.filter((option) => {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return [option.name, option.path, orgTypeLabels[option.type]]
+      .filter(Boolean)
+      .some((item) => String(item).toLowerCase().includes(q));
+  });
+
+  const updateMenuPosition = () => {
+    const rect = wrapperRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const padding = 12;
+    const width = Math.max(rect.width, 260);
+    const left = Math.max(padding, Math.min(rect.left, window.innerWidth - width - padding));
+    const top = rect.bottom + 6;
+    const maxHeight = Math.max(180, Math.min(360, window.innerHeight - top - padding));
+    setMenuStyle({ left, top, width, maxHeight });
+  };
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    updateMenuPosition();
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (wrapperRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const handleReposition = () => updateMenuPosition();
+    document.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("resize", handleReposition);
+    window.addEventListener("scroll", handleReposition, true);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("resize", handleReposition);
+      window.removeEventListener("scroll", handleReposition, true);
+    };
+  }, [open]);
+
+  const menu = open && mounted ? createPortal(
+    <div
+      ref={menuRef}
+      data-customer-filter-overlay
+      className={`${styles.orgMenu} fixed z-[1200] overflow-hidden border border-[#E5EAF2] bg-white shadow-[0_16px_40px_rgba(27,51,88,0.10)]`}
+      style={menuStyle}
+    >
+      <div className="border-b border-[#E5EAF2] bg-[#F8FAFC] p-2">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#9CA3AF]" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            className={`${styles.inputControl} h-9 w-full px-3 pl-9 text-xs font-medium outline-none transition placeholder:text-[#9CA3AF]`}
+            placeholder="搜索组织名称或路径"
+          />
+        </div>
+      </div>
+      <div className="overflow-y-auto p-1.5" style={{ maxHeight: menuStyle.maxHeight - 54 }}>
+        {value && (
+          <button
+            type="button"
+            onClick={() => {
+              onChange("");
+              setOpen(false);
+              setQuery("");
+            }}
+            className={styles.orgClearButton}
+          >
+            清空组织筛选
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+        {filteredOptions.length > 0 ? filteredOptions.map((option) => {
+          const active = option.id === value;
+          return (
+            <button
+              key={option.id}
+              type="button"
+              onClick={() => {
+                onChange(option.id);
+                setOpen(false);
+                setQuery("");
+              }}
+              className={`${styles.orgOption} ${active ? styles.orgOptionActive : ""}`}
+            >
+              <span className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center" style={{ marginLeft: option.depth * 14 }}>
+                {active ? <Check className={styles.orgCheckIcon} /> : <Building2 className={styles.orgBuildingIcon} />}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="truncate text-xs font-semibold">{option.name}</span>
+                  <span className={styles.orgTypeTag}>
+                    {orgTypeLabels[option.type] || "组织"}
+                  </span>
+                  {!isOrgActive(option) && <span className="shrink-0 border border-amber-100 bg-amber-50 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700">已停用</span>}
+                </span>
+                <span className={styles.orgPath}>
+                  {option.path}
+                </span>
+              </span>
+            </button>
+          );
+        }) : (
+          <div className="px-3 py-8 text-center text-xs font-semibold text-[#8b9aaf]">没有找到匹配的组织</div>
+        )}
+      </div>
+    </div>,
+    document.body
+  ) : null;
+
+  return (
+    <>
+      <div ref={wrapperRef} className="relative">
+        <button
+          type="button"
+          onClick={() => setOpen((current) => !current)}
+          className={`${styles.inputControl} ${open ? styles.orgPickerOpen : ""} flex min-h-9 w-full items-center justify-between gap-2 border bg-white px-3 py-1.5 text-left text-xs font-medium transition`}
+        >
+          <span className="min-w-0">
+            <span className={`${styles.orgPickerValue} ${selected ? styles.orgPickerValueSelected : ""}`}>{selected?.path || "请选择组织"}</span>
+          </span>
+          <ChevronDown className={`h-4 w-4 shrink-0 text-[#9CA3AF] transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+      </div>
+      {menu}
+    </>
+  );
+}
+
+function DuplicateCustomersModal({
+  phone,
+  customers,
+  loading,
+  onClose,
+  onOpenCustomer,
+}: {
+  phone: string | null;
+  customers: Customer[];
+  loading: boolean;
+  onClose: () => void;
+  onOpenCustomer: (customerId: string) => void;
+}) {
+  if (!phone) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#162033]/35 px-8 py-8 backdrop-blur-[2px]">
+      <div className="flex h-[72vh] max-h-[760px] w-[min(1500px,calc(100vw-320px))] min-w-[1080px] flex-col overflow-hidden rounded-[16px] border border-[#d6e2f1] bg-white shadow-[0_18px_44px_rgba(27,51,88,0.12),0_4px_14px_rgba(27,51,88,0.05)]">
+        <div className="flex items-center justify-between border-b border-[#e7eff9] bg-[#f8fbff] px-5 py-4">
+          <div>
+            <h3 className="text-base font-black text-[#162033]">重复客户</h3>
+            <p className="mt-1 text-xs font-semibold text-[#8b9aaf]">
+              手机号 {phone} 共匹配 {customers.length} 位客户
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-[10px] text-[#8b9aaf] transition hover:bg-[#f4f8ff] hover:text-[#162033]"
+            aria-label="关闭"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="overflow-auto">
+          <table className="w-full min-w-[1040px] text-center text-sm">
+            <thead className="bg-[#f8fbff]">
+              <tr className="border-b border-[#dce8f8] text-xs font-black text-[#52647b]">
+                <th className="px-4 py-3 text-center">客户姓名</th>
+                <th className="px-4 py-3 text-center">手机号</th>
+                <th className="px-4 py-3 text-center">房号</th>
+                <th className="px-4 py-3 text-center">客户状态</th>
+                <th className="px-4 py-3 text-center">家装顾问</th>
+                <th className="px-4 py-3 text-center">创建时间</th>
+                <th className="px-4 py-3 text-center">操作</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#e7eff9]">
+              {loading && (
+                <tr>
+                  <td colSpan={7} className="px-4 py-12 text-center text-sm font-semibold text-[#8b9aaf]">
+                    <span className="inline-flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin text-[#407AFF]" />
+                      正在查询重复客户...
+                    </span>
+                  </td>
+                </tr>
+              )}
+              {customers.map((customer) => {
+                const status = normalizeCustomerStatus(customer.status);
+                return (
+                  <tr key={customer.id} className="transition hover:bg-[#f4f8ff]">
+                    <td className="px-4 py-3 text-center font-black text-[#162033]">{customer.name || "未命名客户"}</td>
+                    <td className="px-4 py-3 text-center tabular-nums text-[#34445a]">{customer.phone || "-"}</td>
+                    <td className="max-w-[220px] px-4 py-3 text-center text-[#52647b]">
+                      <span className="block truncate">{getCustomerRoomDisplay(customer) || "-"}</span>
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <StatusBadge status={status.toLowerCase()} label={customerStatusLabels[status] || status} />
+                    </td>
+                    <td className="px-4 py-3 text-center text-[#52647b]">{customer.advisor_name || customer.inviter_name || customer.created_by_name || "-"}</td>
+                    <td className="px-4 py-3 text-center tabular-nums text-[#8b9aaf]">
+                      {customer.created_at ? formatDate(customer.created_at) : "-"}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <button
+                        type="button"
+                        onClick={() => onOpenCustomer(customer.id)}
+                        className="inline-flex min-h-8 items-center justify-center rounded-[10px] border border-[#dce8f8] bg-white px-3 text-xs font-bold text-[#52647b] transition hover:border-[#cfe1ff] hover:bg-[#f4f8ff] hover:text-[#407AFF]"
+                      >
+                        打开详情
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type ImportResult = {
+  created?: number;
+  errors?: { row: number; message: string }[];
+};
+
+function ImportCustomersModal({
+  isOpen,
+  onClose,
+  onSuccess,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [fileName, setFileName] = useState("");
+  const [previewRows, setPreviewRows] = useState<Record<string, string>[]>([]);
+  const [errors, setErrors] = useState<string[]>([]);
+  const [result, setResult] = useState<ImportResult | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  if (!isOpen) return null;
+
+  const reset = () => {
+    setFileName("");
+    setPreviewRows([]);
+    setErrors([]);
+    setResult(null);
+    setSubmitting(false);
+  };
+
+  const close = () => {
+    reset();
+    onClose();
+  };
+
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    setResult(null);
+    setErrors([]);
+    setPreviewRows([]);
+    if (!file) return;
+    setFileName(file.name);
+    const lowerName = file.name.toLowerCase();
+    const parsed = lowerName.endsWith(".xlsx")
+      ? await parseXlsx(file)
+      : lowerName.endsWith(".xls")
+        ? parseExcelTable(await file.text())
+        : parseCsv(await file.text());
+    const validationErrors = validateImportRows(parsed);
+    setPreviewRows(parsed);
+    setErrors(validationErrors);
+  };
+
+  const handleDownloadTemplate = async () => {
+    await downloadXlsxTemplate("客户导入模板.xlsx", [
+      ["客户姓名", "手机号", "微信号", "客户来源", "小区/楼盘", "装修面积", "装修预算", "客户意向", "服务门店", "户型", "装修类型", "是否交房", "装修需求", "备注"],
+      ["张伟", "13800000000", "zhangwei", "转介绍", "中海国际社区", "128", "300000", "★★★", "番禺店", "三室两厅", "半包", "已交房", "准备近期装修", ""],
+    ]);
+  };
+
+  const handleSubmit = async () => {
+    const validationErrors = validateImportRows(previewRows);
+    setErrors(validationErrors);
+    setResult(null);
+    if (validationErrors.length > 0 || previewRows.length === 0) return;
+    setSubmitting(true);
+    try {
+      const token = localStorage.getItem("zxgj_token");
+      const res = await fetch("/api/customers", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          customers: previewRows.map(mapImportRowToPayload),
+        }),
+      });
+      const data = await res.json();
+      setResult(data);
+      if (data.created > 0) onSuccess();
+    } catch (err: any) {
+      setErrors([err.message || "导入失败"]);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto py-8">
+      <div className="fixed inset-0 bg-[#162033]/45" onClick={close} />
+      <div className="relative z-10 flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-[16px] border border-[#d6e2f1] bg-white shadow-[0_18px_44px_rgba(27,51,88,0.12),0_4px_14px_rgba(27,51,88,0.05)]">
+        <div className="flex shrink-0 items-center justify-between border-b border-[#e7eff9] bg-[#f8fbff] px-6 py-4">
+          <div>
+            <h2 className="text-lg font-black text-[#162033]">导入客户</h2>
+            <p className="mt-0.5 text-sm font-semibold text-[#8b9aaf]">支持 CSV / XLSX 模板文件，建议先下载模板再填写。</p>
+          </div>
+          <button onClick={close} className="rounded-[10px] p-1 text-[#8b9aaf] hover:bg-[#f4f8ff] hover:text-[#162033]">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto bg-[#f8fbff] px-6 py-5">
+          <div className="rounded-[12px] border border-[#dce8f8] bg-white px-4 py-3 text-sm font-semibold text-[#52647b]">
+            <p className="font-black text-[#162033]">导入要求</p>
+            <div className="mt-2 grid gap-2 md:grid-cols-2">
+              <p>文件格式：CSV 或下载的 XLSX 模板，第一行必须是表头。</p>
+              <p>必填字段：客户姓名、小区/楼盘、装修面积，手机号和微信号至少填一项。</p>
+              <p>客户进度由系统按跟进、量房、定金、报价、合同自动判断，导入客户默认从新线索开始。</p>
+              <p>装修面积、装修预算只填写数字，不要带“㎡”“元”。</p>
+              <p>是否交房可填：已交房、未交房；留空默认未交房。</p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-[10px] border border-[#407AFF] bg-[#407AFF] px-4 py-2 text-sm font-bold text-white transition hover:bg-[#2F66E8]">
+              <Upload className="h-4 w-4" />
+              选择文件
+              <input type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" className="hidden" onChange={handleFileChange} />
+            </label>
+            <button type="button" onClick={handleDownloadTemplate} className={secondaryButtonClass}>
+              <Download className="h-4 w-4" />
+              下载模板
+            </button>
+            {fileName && <span className="text-sm font-semibold text-[#7c8aa0]">{fileName}</span>}
+          </div>
+
+          {previewRows.length > 0 && (
+            <div className="overflow-hidden rounded-[12px] border border-[#dce8f8] bg-white">
+              <div className="flex items-center justify-between border-b border-[#e7eff9] px-4 py-2">
+                <p className="text-sm font-black text-[#162033]">完整预览</p>
+                <p className="text-xs font-semibold text-[#8b9aaf]">共 {previewRows.length} 行</p>
+              </div>
+              <div className="max-h-[34vh] overflow-auto">
+                <table className="w-full min-w-[1500px] text-left text-xs">
+                  <thead className="sticky top-0 z-10 bg-[#f8fbff] text-[#52647b]">
+                    <tr>
+                      <th className="px-3 py-2 font-black">行号</th>
+                      {["客户姓名", "手机号", "微信号", "客户来源", "小区/楼盘", "装修面积", "装修预算", "客户意向", "服务门店", "户型", "装修类型", "是否交房", "装修需求", "备注"].map((header) => (
+                        <th key={header} className="px-3 py-2 font-black">{header}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#e7eff9]">
+                    {previewRows.map((row, index) => (
+                      <tr key={index}>
+                        <td className="px-3 py-2 text-[#8b9aaf] tabular-nums">{index + 2}</td>
+                        {["客户姓名", "手机号", "微信号", "客户来源", "小区/楼盘", "装修面积", "装修预算", "客户意向", "服务门店", "户型", "装修类型", "是否交房", "装修需求", "备注"].map((header) => (
+                          <td key={header} className="max-w-52 truncate px-3 py-2 font-semibold text-[#52647b]" title={row[header] || ""}>{row[header] || "-"}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {errors.length > 0 && (
+            <div className="rounded-[12px] border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">
+              <div className="flex items-center justify-between gap-3">
+                <p className="font-black">请先修正以下问题</p>
+                <p className="text-xs text-red-500">共 {errors.length} 条</p>
+              </div>
+              <div className="mt-2 max-h-64 space-y-1 overflow-y-auto pr-2">
+                {errors.map((error, index) => <p key={index}>{error}</p>)}
+              </div>
+            </div>
+          )}
+
+          {result && (
+            <div className="rounded-[12px] border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700">
+              已导入 {result.created || 0} 位客户
+              {result.errors?.length ? `，${result.errors.length} 行未导入。` : "。"}
+            </div>
+          )}
+        </div>
+
+        <div className="flex shrink-0 items-center justify-end gap-3 border-t border-[#e7eff9] bg-white px-6 py-4">
+          <button type="button" onClick={close} className={secondaryButtonClass}>取消</button>
+          <button type="button" disabled={submitting || previewRows.length === 0 || errors.length > 0} onClick={handleSubmit} className={`${primaryButtonClass} disabled:opacity-60`}>
+            {submitting ? "导入中..." : "确认导入"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function mapImportRowToPayload(row: Record<string, string>) {
+  return {
+    name: row["客户姓名"]?.trim(),
+    phone: row["手机号"]?.trim(),
+    weixin: row["微信号"]?.trim(),
+    source: row["客户来源"]?.trim(),
+    address: row["小区/楼盘"]?.trim(),
+    area_size: row["装修面积"]?.trim(),
+    budget: row["装修预算"]?.trim(),
+    intention: row["客户意向"]?.trim(),
+    service_store: row["服务门店"]?.trim(),
+    house_type: row["户型"]?.trim(),
+    decoration_type: row["装修类型"]?.trim(),
+    is_delivered: row["是否交房"]?.trim(),
+    requirements: row["装修需求"]?.trim(),
+    remarks: row["备注"]?.trim(),
+  };
+}
+
+function validateImportRows(rows: Record<string, string>[]) {
+  const errors: string[] = [];
+  rows.forEach((row, index) => {
+    const rowNumber = index + 2;
+    if (!row["客户姓名"]?.trim()) errors.push(`第 ${rowNumber} 行：客户姓名为必填项`);
+    if (!row["小区/楼盘"]?.trim()) errors.push(`第 ${rowNumber} 行：小区/楼盘为必填项`);
+    if (!row["手机号"]?.trim() && !row["微信号"]?.trim()) errors.push(`第 ${rowNumber} 行：手机号和微信号至少填一项`);
+    const area = Number(row["装修面积"]);
+    if (!area || Number.isNaN(area) || area <= 0) errors.push(`第 ${rowNumber} 行：装修面积必须是大于 0 的数字`);
+  });
+  return errors;
+}
+
+function parseCsv(text: string) {
+  const rows: string[][] = [];
+  let current = "";
+  let row: string[] = [];
+  let inQuotes = false;
+  const normalized = text.replace(/^\uFEFF/, "");
+
+  for (let i = 0; i < normalized.length; i += 1) {
+    const char = normalized[i];
+    const next = normalized[i + 1];
+    if (char === "\"" && inQuotes && next === "\"") {
+      current += "\"";
+      i += 1;
+    } else if (char === "\"") {
+      inQuotes = !inQuotes;
+    } else if (char === "," && !inQuotes) {
+      row.push(current.trim());
+      current = "";
+    } else if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && next === "\n") i += 1;
+      row.push(current.trim());
+      if (row.some(Boolean)) rows.push(row);
+      row = [];
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  row.push(current.trim());
+  if (row.some(Boolean)) rows.push(row);
+  const headers = rows[0] || [];
+  return rows.slice(1).map((values) => {
+    const item: Record<string, string> = {};
+    headers.forEach((header, index) => {
+      item[header] = values[index] || "";
+    });
+    return item;
+  });
+}
+
+function parseExcelTable(text: string) {
+  const parser = new DOMParser();
+  const isXmlWorkbook = text.includes("urn:schemas-microsoft-com:office:spreadsheet");
+  const doc = parser.parseFromString(text, isXmlWorkbook ? "text/xml" : "text/html");
+  const tableRows = Array.from(doc.getElementsByTagName("Row"));
+  const htmlRows = Array.from(doc.querySelectorAll("tr"));
+  const matrix = (tableRows.length > 0 ? tableRows : htmlRows).map((tr) => {
+    const cells = tableRows.length > 0 ? Array.from(tr.getElementsByTagName("Cell")) : Array.from(tr.querySelectorAll("th,td"));
+    return cells.map((cell) => cell.textContent?.trim() || "");
+  }).filter((row) => row.some(Boolean));
+  const headers = matrix[0] || [];
+  return matrix.slice(1).map((values) => {
+    const item: Record<string, string> = {};
+    headers.forEach((header, index) => {
+      item[header] = values[index] || "";
+    });
+    return item;
+  });
+}
+
+function escapeCsvValue(value: unknown) {
+  const text = String(value ?? "");
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, "\"\"")}"` : text;
+}
+
+function downloadCsv(filename: string, rows: unknown[][]) {
+  const csv = rows.map((row) => row.map(escapeCsvValue).join(",")).join("\n");
+  const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function parseXlsx(file: File) {
+  const ExcelJS = (await import("exceljs")).default;
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(await file.arrayBuffer());
+  const sheet = workbook.worksheets[0];
+  if (!sheet) return [];
+  const headers = (sheet.getRow(1).values as unknown[]).slice(1).map((value) => String(value ?? "").trim());
+  const rows: Record<string, string>[] = [];
+  sheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    const values = (row.values as unknown[]).slice(1);
+    if (!values.some((value) => String(value ?? "").trim())) return;
+    const item: Record<string, string> = {};
+    headers.forEach((header, index) => {
+      item[header] = String(values[index] ?? "").trim();
+    });
+    rows.push(item);
+  });
+  return rows;
+}
+
+async function downloadXlsxTemplate(filename: string, rows: unknown[][]) {
+  const ExcelJS = (await import("exceljs")).default;
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("客户导入模板", {
+    views: [{ state: "frozen", ySplit: 1 }],
+  });
+  sheet.addRows(rows as any[][]);
+  sheet.columns.forEach((column, index) => {
+    const maxLength = Math.max(
+      ...rows.map((row) => String(row[index] ?? "").replace(/[^\x00-\xff]/g, "aa").length)
+    );
+    column.width = Math.min(Math.max(maxLength + 4, 12), 32);
+    column.numFmt = "@";
+  });
+  sheet.getRow(1).eachCell((cell) => {
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE5E7EB" } };
+    cell.font = { name: "Microsoft YaHei", size: 11, bold: true, color: { argb: "FF1F2935" } };
+    cell.alignment = { vertical: "middle", horizontal: "center" };
+  });
+  sheet.eachRow((row) => {
+    row.height = row.number === 1 ? 24 : 22;
+    row.eachCell((cell) => {
+      cell.border = {
+        top: { style: "thin", color: { argb: "FFD1D5DB" } },
+        left: { style: "thin", color: { argb: "FFD1D5DB" } },
+        bottom: { style: "thin", color: { argb: "FFD1D5DB" } },
+        right: { style: "thin", color: { argb: "FFD1D5DB" } },
+      };
+      cell.alignment = { vertical: "middle" };
+    });
+  });
+  const statusOptions = customerStatusFlow.map((item) => item.label).join(",");
+  for (let row = 2; row <= 200; row += 1) {
+    sheet.getCell(`H${row}`).dataValidation = {
+      type: "list",
+      allowBlank: true,
+      formulae: [`"${statusOptions}"`],
+      showErrorMessage: true,
+      errorTitle: "客户状态无效",
+      error: "请从下拉列表中选择客户状态。",
+    };
+  }
+  const buffer = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}

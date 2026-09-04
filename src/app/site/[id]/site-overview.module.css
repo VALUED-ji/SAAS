@@ -1,0 +1,461 @@
+.workspace {
+  --overview-panel: #ffffff;
+  --overview-panel-soft: #f8fbff;
+  --overview-canvas: #f5f7fb;
+  --overview-line: #d6e2f1;
+  --overview-line-soft: #e7eff9;
+  --overview-text: #162033;
+  --overview-text-mid: #34445a;
+  --overview-muted: #718096;
+  --overview-primary: #407aff;
+  --overview-primary-soft: #edf4ff;
+
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.topGrid {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  align-items: stretch;
+  gap: 16px;
+}
+
+.panel {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--overview-line) !important;
+  border-radius: 8px !important;
+  background: var(--overview-panel);
+  box-shadow: none !important;
+}
+
+.panelHeader {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--overview-line-soft);
+  background: var(--overview-panel-soft);
+}
+
+.panelTitle {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  color: var(--overview-text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.panelTitleIcon {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #d6e4ff;
+  border-radius: 6px;
+  background: var(--overview-primary-soft);
+  color: var(--overview-primary);
+}
+
+.panelCount {
+  display: inline-flex;
+  min-width: 44px;
+  height: 24px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  border: 1px solid var(--overview-line);
+  border-radius: 4px;
+  background: #ffffff;
+  color: #52647b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.infoBody {
+  padding: 0 18px 16px;
+}
+
+.infoGrid {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  column-gap: 24px;
+}
+
+.infoField {
+  display: grid;
+  min-width: 0;
+  min-height: 58px;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--overview-line-soft);
+  background: transparent;
+}
+
+.infoIcon {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--overview-primary-soft);
+  color: var(--overview-primary);
+}
+
+.infoLabel {
+  color: var(--overview-muted);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.infoValue {
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  color: var(--overview-text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 19px;
+}
+
+.infoField[data-empty="true"] .infoValue {
+  color: #98a2b3;
+  font-weight: 500;
+}
+
+.infoField[data-wide="true"] {
+  grid-column: span 3;
+}
+
+.contractArea {
+  grid-column: 1 / -1;
+  display: grid;
+  margin-top: 14px;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--overview-line-soft);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fbfcfe 0%, #f7faff 100%);
+}
+
+.contractRow {
+  display: grid;
+  min-width: 0;
+  min-height: 58px;
+  grid-template-columns: 178px minmax(0, 1fr);
+  align-items: center;
+  gap: 18px;
+  padding: 12px 14px;
+  border: 1px solid #e4ebf5;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.contractRow + .contractRow {
+  border-top: 1px solid #e4ebf5;
+}
+
+.contractLabel {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  color: var(--overview-muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.contractLabelIcon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  color: var(--overview-primary);
+}
+
+.contractValues {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  color: var(--overview-text);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 20px;
+}
+
+.contractValue {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  overflow-wrap: anywhere;
+  letter-spacing: 0.01em;
+}
+
+.countTag,
+.latestTag {
+  display: inline-flex;
+  height: 20px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.countTag {
+  border: 1px solid var(--overview-line);
+  background: #ffffff;
+  color: #667085;
+}
+
+.latestTag {
+  border: 1px solid #cfe0ff;
+  background: var(--overview-primary-soft);
+  color: #2f66e8;
+}
+
+.noteBand {
+  position: relative;
+  margin-top: 14px;
+  padding: 16px 18px 16px 20px;
+  border: 1px solid #dbe7ff;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  box-shadow: inset 3px 0 0 #84adff;
+}
+
+.noteLabel {
+  display: inline-flex;
+  align-items: center;
+  color: #52647b;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 18px;
+}
+
+.noteValue {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+  color: var(--overview-text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 23px;
+}
+
+.teamPanel {
+  position: static;
+  order: 2;
+  align-self: stretch;
+}
+
+.teamList {
+  min-width: 0;
+}
+
+.teamRow {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--overview-line-soft);
+  background: #ffffff;
+  transition: background-color 150ms ease;
+}
+
+.teamRow:last-child {
+  border-bottom: 0;
+}
+
+.teamRow:hover {
+  background: #f8fbff;
+}
+
+.teamAvatar {
+  display: flex;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid #dce5ef;
+  border-radius: 999px;
+  background: #f2f5f8;
+  color: #52647b;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.teamAvatar img {
+  border-radius: inherit;
+}
+
+.teamContent {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.teamIdentity {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.teamName {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--overview-text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 19px;
+}
+
+.teamRole {
+  color: #667085;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.teamStatus {
+  display: inline-flex;
+  height: 20px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px;
+  border: 1px solid #cfe0ff;
+  border-radius: 4px;
+  background: var(--overview-primary-soft);
+  color: #2f66e8;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.teamStatus::before {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 5px;
+  border-radius: 9999px;
+  background: currentColor;
+  content: "";
+}
+
+.teamMeta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+  margin-top: 5px;
+  color: var(--overview-muted);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 17px;
+}
+
+.teamMetaItem {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+
+.emptyTeam {
+  display: flex;
+  min-height: 112px;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  color: #98a2b3;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+@media (min-width: 1280px) {
+  .topGrid {
+    grid-template-columns: minmax(0, 1fr) 360px;
+  }
+
+  .teamPanel {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+}
+
+@media (min-width: 1536px) {
+  .topGrid {
+    grid-template-columns: minmax(0, 1fr) 340px;
+  }
+
+  .infoGrid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1023px) {
+  .infoGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .infoField[data-wide="true"] {
+    grid-column: span 2;
+  }
+
+}
+
+@media (max-width: 639px) {
+  .workspace,
+  .topGrid {
+    gap: 12px;
+  }
+
+  .panelHeader {
+    min-height: 48px;
+    padding: 9px 12px;
+  }
+
+  .infoBody {
+    padding: 0 12px 12px;
+  }
+
+  .infoGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .infoField[data-wide="true"] {
+    grid-column: span 1;
+  }
+
+  .contractRow {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+    padding: 10px;
+  }
+}

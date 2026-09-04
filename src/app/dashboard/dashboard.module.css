@@ -1,0 +1,903 @@
+.page {
+  --bg: #f6f7f9;
+  --bg-sunken: #eef3f8;
+  --surface: #ffffff;
+  --surface-soft: #fbfdff;
+  --fg: #111827;
+  --fg-secondary: #334155;
+  --muted: #64748b;
+  --border: #dde6f2;
+  --border-strong: #cbd8e8;
+  --accent: #407aff;
+  --accent-hover: #2f66e8;
+  --accent-active: #2457cc;
+  --accent-soft: #edf4ff;
+  --success: #16875d;
+  --success-soft: #eaf8f2;
+  --warn: #d99717;
+  --warn-soft: #fff7e5;
+  --danger: #d64b4b;
+  --danger-soft: #fff0f0;
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --focus-ring: 0 0 0 3px rgba(64, 122, 255, 0.16);
+  --motion-fast: 150ms;
+  --motion-base: 200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --chart-grid: #e6edf6;
+  --chart-1: var(--accent);
+  --chart-2: #18a058;
+  --chart-3: #f59e0b;
+  --chart-4: #8b5cf6;
+  --chart-5: #06b6d4;
+  --chart-6: #64748b;
+  --funnel-lead: #3b82f6;
+  --funnel-contact: #06b6d4;
+  --funnel-visit: #14b8a6;
+  --funnel-measure: #22c55e;
+  --funnel-deposit: #f59e0b;
+  --funnel-quote: #f97316;
+  --funnel-signed: #16a34a;
+  --funnel-lost: #ef4444;
+  --metric-accent: var(--accent);
+  --ranking-accent: var(--accent);
+
+  min-height: calc(100vh - 72px);
+  margin: -20px;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  letter-spacing: 0;
+}
+
+.container {
+  width: 100%;
+  margin: 0;
+}
+
+.commandPanel {
+  margin-bottom: 16px;
+  padding: 18px 20px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: 0 10px 28px rgba(45, 75, 120, 0.045);
+}
+
+.pageHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 16px;
+}
+
+.pageTitle {
+  margin: 0;
+  color: #0b1730;
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.pageSubtitle {
+  margin: 5px 0 0;
+  color: #687891;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.periodBadge {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid #d6e3f5;
+  border-radius: var(--radius-sm);
+  background: #f2f7ff;
+  color: #295bbd;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 16px;
+  margin-bottom: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.toolbarLabel {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.toolbarLabel svg {
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
+}
+
+.rangeGroup {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.rangeButton,
+.queryButton {
+  min-height: 36px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+
+.rangeButton {
+  padding: 0 13px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.rangeButton:hover {
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.rangeButtonActive {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: white;
+}
+
+.rangeButtonActive:hover {
+  background: var(--accent-hover);
+  color: white;
+}
+
+.rangeButton:focus-visible,
+.queryButton:focus-visible,
+.dateInput:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rangeButton:active,
+.queryButton:active {
+  transform: translateY(1px);
+}
+
+.customRange {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.inlineCustomRange {
+  flex: 0 1 auto;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.dateField {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 8px;
+  padding-left: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dateInput {
+  min-height: 34px;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 0 10px;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+}
+
+.queryButton {
+  padding: 0 14px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+}
+
+.queryButton:hover {
+  background: var(--accent-hover);
+}
+
+.queryButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+  transform: none;
+}
+
+.rangeNotice {
+  color: color-mix(in oklab, var(--warn), var(--fg) 35%);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.kpiGrid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.metric {
+  min-width: 0;
+  min-height: 132px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  border-top: 3px solid color-mix(in oklab, var(--metric-accent), white 18%);
+  box-shadow: 0 8px 22px rgba(45, 75, 120, 0.035);
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+
+.metric:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+
+.metricFocus {
+  border-color: color-mix(in oklab, var(--metric-accent), white 42%);
+  background: linear-gradient(180deg, #f4f8ff 0%, #ffffff 100%);
+}
+
+.metricHead {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.metricIcon {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--metric-accent), white 88%);
+  color: var(--metric-accent);
+}
+
+.metricFocus .metricIcon {
+  background: var(--metric-accent);
+  color: white;
+}
+
+.metricIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.metricLabel {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.metricValue {
+  margin-top: 16px;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+  font-size: 26px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.metricCaption {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 450;
+  line-height: 1.4;
+}
+
+.dashboardGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.column {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.dashboardGrid > .column {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.dashboardGrid > .column > .panel {
+  height: 100%;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: 0 8px 22px rgba(45, 75, 120, 0.03);
+}
+
+.panelHeader {
+  display: flex;
+  min-height: 60px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 18px 13px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-soft);
+}
+
+.panelTitle {
+  margin: 0;
+  color: var(--fg);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.panelSubtitle {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.panelBody {
+  flex: 1;
+  min-width: 0;
+  padding: 18px;
+}
+
+.chart {
+  height: 280px;
+}
+
+.trendStack {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.chartWide {
+  height: 300px;
+}
+
+.sourceLayout {
+  display: grid;
+  min-height: 280px;
+  grid-template-rows: 190px auto;
+  gap: 12px;
+}
+
+.sourceActiveSlice {
+  animation: sourceSliceBounce 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@keyframes sourceSliceBounce {
+  0% {
+    transform: scale(0.985);
+  }
+
+  42% {
+    transform: scale(1.032);
+  }
+
+  68% {
+    transform: scale(0.997);
+  }
+
+  86% {
+    transform: scale(1.01);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes rankingMedalPop {
+  from {
+    opacity: 0.72;
+    transform: scale(0.88);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.legend {
+  display: grid;
+  gap: 8px;
+}
+
+.legendRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px 44px;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.legendName {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-secondary);
+  font-weight: 600;
+}
+
+.legendName span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.legendDot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 9999px;
+}
+
+.number {
+  font-variant-numeric: tabular-nums;
+}
+
+.numberStrong {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  text-align: right;
+}
+
+.numberMuted {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 550;
+  text-align: right;
+}
+
+.funnel {
+  display: grid;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.dashboardGrid > .column:first-child .funnel {
+  height: 100%;
+  align-content: space-between;
+}
+
+.funnelRow {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 56px;
+  align-items: center;
+  gap: 12px;
+}
+
+.funnelRowEmpty .funnelTrack {
+  background: transparent;
+}
+
+.funnelRowEmpty .funnelFill {
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+}
+
+.funnelRowEmpty .funnelFill::after,
+.funnelRowEmpty .funnelStage,
+.funnelRowEmpty .funnelCount {
+  opacity: 0;
+}
+
+.funnelStage {
+  overflow: hidden;
+  min-width: 0;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.funnelTrack {
+  position: relative;
+  display: flex;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 12px;
+  background:
+    linear-gradient(90deg, transparent 0, color-mix(in oklab, var(--funnel-accent, var(--accent)), white 92%) 18%, color-mix(in oklab, var(--funnel-accent, var(--accent)), white 92%) 82%, transparent 100%);
+}
+
+.funnelFill {
+  position: relative;
+  display: flex;
+  width: var(--funnel-width);
+  height: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  overflow: hidden;
+  padding: 0 14px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 9999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    0 8px 18px color-mix(in oklab, var(--funnel-accent, var(--accent)), transparent 82%);
+  transform: scaleX(var(--funnel-scale, 1));
+  transform-origin: center;
+  transition:
+    width 2800ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 3200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.funnelFill::after {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.14), transparent 44%, rgba(15, 23, 42, 0.08));
+  content: "";
+  pointer-events: none;
+}
+
+.funnelCount,
+.funnelRate {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  text-align: right;
+}
+
+.funnelCount {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.funnelRate {
+  color: var(--muted);
+}
+
+.splitGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.rankingList {
+  display: grid;
+}
+
+.rankingRow {
+  display: grid;
+  min-height: 54px;
+  grid-template-columns: 28px 28px minmax(0, 1fr) 72px;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.rankingRow:last-child {
+  border-bottom: 0;
+}
+
+.rank,
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.rank {
+  width: 24px;
+  height: 24px;
+  border-radius: 9999px;
+  background: #eef3f8;
+  color: var(--muted);
+}
+
+.avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--ranking-accent), white 88%);
+  color: var(--ranking-accent);
+}
+
+.rankGold,
+.rankSilver,
+.rankBronze {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  overflow: visible;
+  border: 0;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 3px 8px rgba(33, 45, 66, 0.1);
+  animation: rankingMedalPop 420ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+.rankGold::before,
+.rankSilver::before,
+.rankBronze::before {
+  position: absolute;
+  bottom: -5px;
+  left: 50%;
+  z-index: -1;
+  width: 15px;
+  height: 9px;
+  border-radius: 0 0 4px 4px;
+  clip-path: polygon(0 0, 100% 0, 82% 100%, 50% 70%, 18% 100%);
+  content: "";
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.rankGold::after,
+.rankSilver::after,
+.rankBronze::after {
+  position: absolute;
+  inset: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.58);
+  border-radius: inherit;
+  content: "";
+  pointer-events: none;
+}
+
+.rankGold {
+  background: #f5b83b;
+}
+
+.rankGold::before {
+  background: #d79622;
+}
+
+.rankSilver {
+  background: #aab5c4;
+}
+
+.rankSilver::before {
+  background: #8795a8;
+}
+
+.rankBronze {
+  background: #c9824a;
+}
+
+.rankBronze::before {
+  background: #a86536;
+}
+
+.rankingName {
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rankingMeta {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.rankingValue {
+  color: var(--fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  text-align: right;
+}
+
+.tooltip {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.1);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tooltipLabel {
+  margin: 0 0 4px;
+  color: var(--fg);
+  font-weight: 650;
+}
+
+.tooltipLine {
+  margin: 2px 0 0;
+}
+
+.tooltipValue {
+  color: var(--fg);
+  font-weight: 650;
+}
+
+.emptyState,
+.loadingState {
+  display: flex;
+  min-height: 220px;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.loadingPanel {
+  width: min(100%, 420px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.loadingState svg {
+  width: 18px;
+  height: 18px;
+  margin-right: 8px;
+  color: var(--accent);
+}
+
+@media (max-width: 1359px) {
+  .kpiGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1179px) {
+  .dashboardGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboardGrid > .column:last-child {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 899px) {
+  .pageHeader,
+  .toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .splitGrid,
+  .dashboardGrid > .column:last-child {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 719px) {
+  .page {
+    margin: -20px;
+    padding: 16px;
+  }
+
+  .kpiGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rangeGroup {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 2px;
+  }
+
+  .rangeButton {
+    flex: 0 0 auto;
+  }
+
+  .customRange {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dateField {
+    justify-content: space-between;
+  }
+
+  .funnelRow {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .funnelRate {
+    display: none;
+  }
+
+  .chartWide {
+    height: 240px;
+  }
+}
+
+@media (max-width: 479px) {
+  .kpiGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .metric {
+    min-height: 112px;
+  }
+
+  .pageTitle {
+    font-size: 20px;
+  }
+}

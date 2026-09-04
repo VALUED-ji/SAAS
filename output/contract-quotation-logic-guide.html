@@ -1,0 +1,1623 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>合同报价功能逻辑画板</title>
+  <style>
+    :root {
+      --blue: #407aff;
+      --blue-2: #1f63e9;
+      --blue-soft: #eef4ff;
+      --green: #16a34a;
+      --green-soft: #ecfdf3;
+      --orange: #d97706;
+      --orange-soft: #fff7ed;
+      --red: #dc2626;
+      --red-soft: #fef2f2;
+      --purple: #7c3aed;
+      --purple-soft: #f5f3ff;
+      --gray: #667085;
+      --gray-soft: #f6f7f9;
+      --ink: #121722;
+      --text: #475467;
+      --muted: #8a94a6;
+      --line: #e4e7ec;
+      --line-strong: #cfd6e2;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --shadow: 0 18px 50px rgba(16, 24, 40, 0.08);
+      --radius: 18px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 16% -10%, rgba(64, 122, 255, 0.13), transparent 380px),
+        radial-gradient(circle at 92% 2%, rgba(124, 58, 237, 0.09), transparent 360px),
+        var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      line-height: 1.58;
+    }
+
+    button {
+      font: inherit;
+    }
+
+    .page {
+      min-height: 100vh;
+      padding: 0;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      gap: 0;
+      width: 100%;
+      min-height: 100vh;
+      margin: 0;
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 0;
+      align-self: start;
+      height: 100vh;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-top: 0;
+      border-bottom: 0;
+      border-left: 0;
+      background: rgba(255, 255, 255, 0.82);
+      border-radius: 0;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(16px);
+    }
+
+    .brand {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand-mark {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      color: white;
+      background: var(--blue);
+      border-radius: 14px;
+      font-weight: 850;
+      box-shadow: 0 12px 28px rgba(64, 122, 255, 0.28);
+    }
+
+    .brand-title {
+      color: var(--ink);
+      font-size: 16px;
+      font-weight: 820;
+    }
+
+    .brand-subtitle {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .nav {
+      display: grid;
+      gap: 8px;
+      margin-top: 20px;
+    }
+
+    .nav a {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 38px;
+      padding: 8px 10px;
+      border-radius: 12px;
+      color: #5b6677;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .nav a:hover {
+      color: var(--blue);
+      background: var(--blue-soft);
+    }
+
+    .legend {
+      display: grid;
+      gap: 10px;
+      margin-top: 24px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+    }
+
+    .legend-title {
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 820;
+    }
+
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: #667085;
+      font-size: 12px;
+      font-weight: 680;
+    }
+
+    .legend-line {
+      width: 28px;
+      height: 0;
+      border-top: 3px solid var(--blue);
+      border-radius: 999px;
+    }
+
+    .legend-line.data { border-color: var(--green); }
+    .legend-line.rule { border-color: var(--orange); border-top-style: dashed; }
+    .legend-line.risk { border-color: var(--red); }
+    .legend-line.trace { border-color: #98a2b3; border-top-style: dashed; }
+
+    .main {
+      min-width: 0;
+      padding: 24px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    .hero-card,
+    .inspector,
+    .board-section,
+    .principle-card {
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.88);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+    }
+
+    .hero-card {
+      padding: 32px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+      color: var(--blue);
+      font-size: 13px;
+      font-weight: 830;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--blue);
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1,
+    h2,
+    h3 {
+      color: var(--ink);
+      line-height: 1.22;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      max-width: 980px;
+      font-size: clamp(34px, 4.4vw, 58px);
+      font-weight: 880;
+    }
+
+    h2 {
+      font-size: 25px;
+      font-weight: 850;
+    }
+
+    h3 {
+      font-size: 16px;
+      font-weight: 820;
+    }
+
+    .lead {
+      max-width: 860px;
+      margin-top: 18px;
+      color: #536071;
+      font-size: 17px;
+    }
+
+    .quick-read {
+      display: grid;
+      gap: 10px;
+      padding: 20px;
+    }
+
+    .quick-item {
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 12px;
+      align-items: start;
+      padding: 13px;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 16px;
+    }
+
+    .quick-num {
+      display: grid;
+      width: 30px;
+      height: 30px;
+      place-items: center;
+      color: var(--blue);
+      background: var(--blue-soft);
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 850;
+    }
+
+    .quick-item strong {
+      display: block;
+      color: var(--ink);
+      font-size: 14px;
+    }
+
+    .quick-item span {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.42;
+    }
+
+    .board-section {
+      margin-top: 18px;
+      overflow: hidden;
+    }
+
+    .board-head {
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+      justify-content: space-between;
+      padding: 24px 26px 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.72);
+    }
+
+    .board-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .board-head p {
+      max-width: 860px;
+      margin-top: 8px;
+      color: var(--muted);
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 30px;
+      padding: 4px 11px;
+      border: 1px solid var(--line);
+      color: #657083;
+      background: #fff;
+      border-radius: 999px;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 780;
+    }
+
+    .tool-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 32px;
+      padding: 5px 11px;
+      border: 1px solid var(--line);
+      color: #4d5a6c;
+      background: #fff;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 780;
+      transition: border-color 160ms ease, color 160ms ease, background 160ms ease, transform 160ms ease;
+    }
+
+    .tool-button:hover {
+      transform: translateY(-1px);
+      border-color: #b9cbff;
+      color: var(--blue);
+      background: #f8fbff;
+    }
+
+    .tool-button.primary {
+      border-color: var(--blue);
+      color: #fff;
+      background: var(--blue);
+    }
+
+    .tool-button.danger {
+      border-color: #fecaca;
+      color: var(--red);
+      background: #fff;
+    }
+
+    .board-wrap {
+      overflow: auto;
+      background: #fbfcfe;
+    }
+
+    .canvas {
+      position: relative;
+      width: 1320px;
+      height: 900px;
+      transform-origin: top left;
+    }
+
+    .canvas.compact {
+      height: 620px;
+    }
+
+    .canvas.quote-process {
+      width: 1880px;
+      height: 780px;
+    }
+
+    .canvas-svg {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      overflow: visible;
+    }
+
+    .link {
+      fill: none;
+      stroke: var(--blue);
+      stroke-width: 2.8;
+      marker-end: url(#arrow-blue);
+      opacity: 0.78;
+      transition: opacity 160ms ease, stroke-width 160ms ease, filter 160ms ease;
+    }
+
+    .link.data {
+      stroke: var(--green);
+      marker-end: url(#arrow-green);
+    }
+
+    .link.rule {
+      stroke: var(--orange);
+      stroke-dasharray: 8 8;
+      marker-end: url(#arrow-orange);
+    }
+
+    .link.risk {
+      stroke: var(--red);
+      marker-end: url(#arrow-red);
+    }
+
+    .link.trace {
+      stroke: #98a2b3;
+      stroke-dasharray: 7 8;
+      marker-end: url(#arrow-gray);
+    }
+
+    .link.active {
+      stroke-width: 4.2;
+      opacity: 1;
+      filter: drop-shadow(0 7px 12px rgba(64, 122, 255, 0.28));
+    }
+
+    .link.dimmed {
+      opacity: 0.1;
+    }
+
+    .link-label {
+      fill: #5f6b7d;
+      font-size: 12px;
+      font-weight: 760;
+      paint-order: stroke;
+      stroke: #fbfcfe;
+      stroke-width: 8px;
+      stroke-linejoin: round;
+      transition: opacity 160ms ease, fill 160ms ease;
+    }
+
+    .link-label.active {
+      fill: var(--blue);
+    }
+
+    .link-label.dimmed {
+      opacity: 0.12;
+    }
+
+    .zone {
+      display: none;
+    }
+
+    .zone-title {
+      position: absolute;
+      left: 22px;
+      top: 18px;
+      color: #8a94a6;
+      font-size: 13px;
+      font-weight: 850;
+    }
+
+    .stage-title {
+      position: absolute;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 30px;
+      padding: 5px 10px;
+      color: #526071;
+      background: rgba(255, 255, 255, 0.84);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 850;
+      pointer-events: none;
+      box-shadow: 0 8px 20px rgba(16, 24, 40, 0.06);
+    }
+
+    .stage-title::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--blue);
+    }
+
+    .node {
+      position: absolute;
+      left: var(--x);
+      top: var(--y);
+      width: var(--w, 170px);
+      min-height: var(--h, 92px);
+      padding: 14px 15px;
+      border: 1px solid var(--line-strong);
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.96);
+      border-radius: 18px;
+      box-shadow: 0 16px 32px rgba(16, 24, 40, 0.09);
+      cursor: pointer;
+      text-align: left;
+      transform: translate(-50%, -50%);
+      transition: transform 160ms ease, opacity 160ms ease, border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+      user-select: none;
+      touch-action: none;
+    }
+
+    .node.wide {
+      --w: 220px;
+    }
+
+    .node.tiny {
+      --w: 150px;
+      --h: 78px;
+    }
+
+    .node:hover,
+    .node.active {
+      border-color: var(--blue);
+      background: #f8fbff;
+      box-shadow: 0 22px 44px rgba(64, 122, 255, 0.22);
+      transform: translate(-50%, -50%) scale(1.045);
+    }
+
+    .node.dimmed {
+      opacity: 0.28;
+    }
+
+    .node.dragging {
+      z-index: 20;
+      cursor: grabbing;
+      box-shadow: 0 26px 58px rgba(64, 122, 255, 0.28);
+    }
+
+    .node.core {
+      border-color: #b7caff;
+      background: linear-gradient(180deg, #fff, #f2f6ff);
+    }
+
+    .node.config {
+      border-color: #fed7aa;
+      background: linear-gradient(180deg, #fff, #fff8ed);
+    }
+
+    .node.output {
+      border-color: #bbf7d0;
+      background: linear-gradient(180deg, #fff, #f0fff6);
+    }
+
+    .node.risk {
+      border-color: #fecaca;
+      background: linear-gradient(180deg, #fff, #fff5f5);
+    }
+
+    .node.trace {
+      border-style: dashed;
+      background: #fff;
+    }
+
+    .node-type {
+      display: inline-flex;
+      margin-bottom: 8px;
+      padding: 2px 7px;
+      color: var(--blue);
+      background: var(--blue-soft);
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 850;
+    }
+
+    .node.config .node-type {
+      color: var(--orange);
+      background: var(--orange-soft);
+    }
+
+    .node.output .node-type {
+      color: var(--green);
+      background: var(--green-soft);
+    }
+
+    .node.risk .node-type {
+      color: var(--red);
+      background: var(--red-soft);
+    }
+
+    .node.trace .node-type {
+      color: var(--gray);
+      background: var(--gray-soft);
+    }
+
+    .node strong {
+      display: block;
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.25;
+    }
+
+    .node span {
+      display: block;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.36;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      align-items: stretch;
+    }
+
+    .split .board-wrap {
+      border-right: 1px solid var(--line);
+    }
+
+    .inspector {
+      padding: 22px;
+      border: 0;
+      border-radius: 0;
+      box-shadow: none;
+      background: #fff;
+    }
+
+    .inspector-label {
+      display: inline-flex;
+      margin-bottom: 12px;
+      padding: 4px 9px;
+      color: var(--blue);
+      background: var(--blue-soft);
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 850;
+    }
+
+    .inspector p {
+      margin-top: 10px;
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    .relation-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .relation-list h3 {
+      margin-top: 8px;
+      font-size: 14px;
+    }
+
+    .tag-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 9px;
+      border: 1px solid var(--line);
+      color: #5b6677;
+      background: #fff;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 720;
+    }
+
+    .rule-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      padding: 20px 26px 26px;
+      background: #fff;
+    }
+
+    .principle-card {
+      padding: 18px;
+      box-shadow: none;
+      border-radius: 18px;
+    }
+
+    .principle-card .num {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      margin-bottom: 12px;
+      color: var(--blue);
+      background: var(--blue-soft);
+      border-radius: 11px;
+      font-weight: 880;
+    }
+
+    .principle-card p {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .print-tip {
+      margin-top: 18px;
+      padding: 16px 18px;
+      border: 1px dashed var(--line-strong);
+      color: #5b6677;
+      background: #fff;
+      border-radius: 18px;
+      font-size: 14px;
+    }
+
+    @media (max-width: 1220px) {
+      .shell {
+        grid-template-columns: 1fr;
+      }
+      .sidebar {
+        position: static;
+        height: auto;
+      }
+      .hero,
+      .split {
+        grid-template-columns: 1fr;
+      }
+      .split .board-wrap {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+    }
+
+    @media (max-width: 760px) {
+      .page {
+        padding: 14px;
+      }
+      .hero-card,
+      .quick-read,
+      .board-head,
+      .inspector {
+        padding: 18px;
+      }
+      .rule-grid {
+        grid-template-columns: 1fr;
+        padding: 18px;
+      }
+    }
+
+    @media print {
+      body {
+        background: #fff;
+      }
+      .page {
+        padding: 0;
+      }
+      .shell,
+      .hero,
+      .split {
+        display: block;
+      }
+      .sidebar {
+        display: none;
+      }
+      .board-section,
+      .hero-card {
+        margin-bottom: 18px;
+        break-inside: avoid;
+        box-shadow: none;
+      }
+      .board-wrap {
+        overflow: visible;
+      }
+      .canvas {
+        transform: scale(0.72);
+        transform-origin: top left;
+        margin-bottom: -250px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">图</div>
+          <div>
+            <div class="brand-title">合同报价逻辑画板</div>
+            <div class="brand-subtitle">所有关系用线条说清楚</div>
+          </div>
+        </div>
+        <nav class="nav">
+          <a href="#global">全局关联图 <span>01</span></a>
+          <a href="#quote">报价逻辑图 <span>02</span></a>
+          <a href="#contract">合同逻辑图 <span>03</span></a>
+          <a href="#rules">核心规则 <span>04</span></a>
+        </nav>
+        <div class="legend">
+          <div class="legend-title">线条含义</div>
+          <div class="legend-row"><span class="legend-line"></span>主业务流：下一步怎么走</div>
+          <div class="legend-row"><span class="legend-line data"></span>数据引用：谁给谁提供数据</div>
+          <div class="legend-row"><span class="legend-line rule"></span>配置规则：模板/设置如何影响流程</div>
+          <div class="legend-row"><span class="legend-line risk"></span>风控卡点：不能跳过的验证</div>
+          <div class="legend-row"><span class="legend-line trace"></span>追溯记录：历史如何保留</div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <section class="hero">
+          <div class="hero-card">
+            <div class="eyebrow">重新设计版</div>
+            <h1>合同报价模块不是一个流程表，而是一张业务关系网。</h1>
+            <p class="lead">这版把整份文档改成画板形式：每个功能都是节点，每条线表示真实业务关系。点击任意节点，右侧会显示它的上游、下游、关键规则和用户要注意的点。</p>
+          </div>
+          <div class="hero-card quick-read">
+            <div class="quick-item">
+              <div class="quick-num">1</div>
+              <div><strong>先看中间主链路</strong><span>客户 → 报价单 → 正式报价 → 合同 → 审批/签约。</span></div>
+            </div>
+            <div class="quick-item">
+              <div class="quick-num">2</div>
+              <div><strong>再看上下支撑关系</strong><span>定额模板支撑报价，合同模板和收款方案支撑合同。</span></div>
+            </div>
+            <div class="quick-item">
+              <div class="quick-num">3</div>
+              <div><strong>最后看风控和追溯</strong><span>正式报价、审批、模板快照、操作记录，保证业务不乱。</span></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="board-section" id="global" data-board="global">
+          <div class="board-head">
+            <div>
+              <h2>01｜全局功能关联图</h2>
+              <p>这张图说明整个合同报价模块里，每个功能之间到底怎么关联。中心是“报价单”和“合同资料”，上方是配置，左侧是角色，右侧是输出和追溯。</p>
+            </div>
+            <div class="board-actions">
+              <span class="pill">点击功能块高亮关系</span>
+              <button class="tool-button primary" type="button" data-action="add-node" data-target-board="global">新增功能块</button>
+              <button class="tool-button" type="button" data-action="save-layout" data-target-board="global">保存布局</button>
+              <button class="tool-button danger" type="button" data-action="reset-layout" data-target-board="global">恢复默认</button>
+            </div>
+          </div>
+          <div class="split">
+            <div class="board-wrap">
+              <div class="canvas" data-canvas="global">
+                <div class="zone" style="left:40px; top:60px; width:220px; height:760px;"><div class="zone-title">使用角色</div></div>
+                <div class="zone" style="left:310px; top:46px; width:680px; height:190px;"><div class="zone-title">基础配置</div></div>
+                <div class="zone" style="left:310px; top:284px; width:680px; height:250px;"><div class="zone-title">报价域</div></div>
+                <div class="zone" style="left:310px; top:590px; width:680px; height:250px;"><div class="zone-title">合同域</div></div>
+                <div class="zone" style="left:1040px; top:70px; width:230px; height:760px;"><div class="zone-title">结果与追溯</div></div>
+
+                <svg class="canvas-svg" viewBox="0 0 1320 900" aria-hidden="true" data-editable-links="global">
+                  <defs>
+                    <marker id="arrow-blue" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#407aff"></path></marker>
+                    <marker id="arrow-green" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#16a34a"></path></marker>
+                    <marker id="arrow-orange" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#d97706"></path></marker>
+                    <marker id="arrow-red" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#dc2626"></path></marker>
+                    <marker id="arrow-gray" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#98a2b3"></path></marker>
+                  </defs>
+
+                </svg>
+
+                <button class="node" data-node="customer" style="--x:130px; --y:330px;"><span class="node-type">基础数据</span><strong>客户 / 项目</strong><span>客户、房屋、面积、地址、团队、组织归属。</span></button>
+                <button class="node" data-node="quoter" style="--x:130px; --y:445px;"><span class="node-type">角色</span><strong>报价员</strong><span>制作报价、调整明细、确认金额。</span></button>
+                <button class="node" data-node="designer" style="--x:130px; --y:555px;"><span class="node-type">角色</span><strong>设计师</strong><span>接收报价，只读查看、打印下载。</span></button>
+                <button class="node risk" data-node="manager" style="--x:130px; --y:668px;"><span class="node-type">角色</span><strong>管理者 / 审批人</strong><span>确认风险、处理合同审批。</span></button>
+                <button class="node output" data-node="finance" style="--x:130px; --y:780px;"><span class="node-type">角色</span><strong>财务</strong><span>根据签约合同和收款计划收款。</span></button>
+
+                <button class="node config" data-node="quota-template" style="--x:520px; --y:150px;"><span class="node-type">配置</span><strong>定额模板</strong><span>空间、项目、单位、单价、综合费用、套餐规则。</span></button>
+                <button class="node config" data-node="approval-flow" style="--x:650px; --y:150px;"><span class="node-type">配置</span><strong>合同审批流</strong><span>阈值、节点、审批人来源、驳回规则。</span></button>
+                <button class="node config" data-node="branch-setting" style="--x:820px; --y:150px;"><span class="node-type">配置</span><strong>分公司设置</strong><span>合同模板、打印信息、审批与收款规则。</span></button>
+                <button class="node config" data-node="payment-scheme" style="--x:940px; --y:150px;"><span class="node-type">配置</span><strong>收款方案</strong><span>首期款、中期款、尾款等比例和阶段。</span></button>
+
+                <button class="node core" data-node="quotation" style="--x:505px; --y:420px; --w:190px;"><span class="node-type">核心</span><strong>报价单</strong><span>明细编辑、金额计算、导出打印、复制、删除恢复。</span></button>
+                <button class="node output" data-node="formal-quote" style="--x:850px; --y:420px; --w:180px;"><span class="node-type">业务卡点</span><strong>正式报价</strong><span>定稿预算，是合同金额的唯一有效依据。</span></button>
+
+                <button class="node config" data-node="contract-template" style="--x:650px; --y:680px; --w:180px;"><span class="node-type">配置</span><strong>合同模板</strong><span>固定文案、变量、Word 导入、版本冻结。</span></button>
+                <button class="node core" data-node="contract" style="--x:470px; --y:720px; --w:180px;"><span class="node-type">核心</span><strong>合同资料</strong><span>选择正式报价、模板、定金抵扣、收款方案。</span></button>
+                <button class="node risk" data-node="approval" style="--x:690px; --y:720px; --w:160px;"><span class="node-type">风控</span><strong>合同审批</strong><span>按分公司审批流进入待审批或直接签约。</span></button>
+
+                <button class="node trace" data-node="operation-log" style="--x:1160px; --y:360px;"><span class="node-type">追溯</span><strong>操作记录</strong><span>谁在什么时候创建、修改、确认、删除。</span></button>
+                <button class="node output" data-node="payment" style="--x:1160px; --y:560px;"><span class="node-type">结果</span><strong>收款计划</strong><span>签约后生成，财务按阶段收款。</span></button>
+                <button class="node output" data-node="signed-contract" style="--x:1160px; --y:720px;"><span class="node-type">结果</span><strong>已签合同</strong><span>更新客户和项目状态，进入施工/收款。</span></button>
+                <button class="node trace" data-node="print" style="--x:1160px; --y:850px;"><span class="node-type">输出</span><strong>打印 / 归档</strong><span>报价单、合同文本、历史合同资料。</span></button>
+              </div>
+            </div>
+            <aside class="inspector" data-inspector="global">
+              <div class="inspector-label">当前节点</div>
+              <h3 data-title>报价单</h3>
+              <p data-desc>点击画板上的功能块查看它和其他功能的关系。</p>
+              <div class="relation-list">
+                <h3>上游来源</h3>
+                <div class="tag-list" data-upstream></div>
+                <h3>下游影响</h3>
+                <div class="tag-list" data-downstream></div>
+                <h3>用户要理解</h3>
+                <div class="tag-list" data-points></div>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="board-section" id="quote" data-board="quote">
+          <div class="board-head">
+            <div>
+              <h2>02｜报价制作全过程画板</h2>
+              <p>这张图把报价员真正做报价的过程拆开：从选择客户、选择模板，到生成空间项目、录入数量、调价、算综合费用、核对合计、保存、打印、确认正式报价。</p>
+            </div>
+            <div class="board-actions">
+              <span class="pill">报价员实际操作路径</span>
+              <button class="tool-button primary" type="button" data-action="add-node" data-target-board="quote">新增功能块</button>
+              <button class="tool-button" type="button" data-action="save-layout" data-target-board="quote">保存布局</button>
+              <button class="tool-button danger" type="button" data-action="reset-layout" data-target-board="quote">恢复默认</button>
+            </div>
+          </div>
+          <div class="split">
+            <div class="board-wrap">
+              <div class="canvas quote-process" data-canvas="quote">
+                <div class="zone" style="left:36px; top:58px; width:360px; height:270px;"><div class="zone-title">1. 输入资料</div></div>
+                <div class="zone" style="left:428px; top:58px; width:250px; height:270px;"><div class="zone-title">2. 建草稿</div></div>
+                <div class="zone" style="left:710px; top:58px; width:620px; height:270px;"><div class="zone-title">3. 编辑明细</div></div>
+                <div class="zone" style="left:1362px; top:58px; width:470px; height:270px;"><div class="zone-title">4. 计算金额</div></div>
+                <div class="zone" style="left:428px; top:430px; width:900px; height:220px;"><div class="zone-title">5. 保存定稿</div></div>
+                <div class="zone" style="left:36px; top:430px; width:360px; height:220px;"><div class="zone-title">支线：协作输出</div></div>
+                <div class="zone" style="left:1362px; top:430px; width:470px; height:220px;"><div class="zone-title">结果：合同前置</div></div>
+
+                <div class="stage-title" style="left:86px; top:24px;">主线从左到右读，不交叉</div>
+                <div class="stage-title" style="left:500px; top:394px;">保存后才进入定稿/输出</div>
+
+                <svg class="canvas-svg" viewBox="0 0 1880 780" aria-hidden="true" data-editable-links="quote">
+                  <defs>
+                    <marker id="q-arrow-blue" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#407aff"></path></marker>
+                    <marker id="q-arrow-green" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#16a34a"></path></marker>
+                    <marker id="q-arrow-orange" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#d97706"></path></marker>
+                    <marker id="q-arrow-red" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#dc2626"></path></marker>
+                    <marker id="q-arrow-gray" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#98a2b3"></path></marker>
+                  </defs>
+                </svg>
+
+                <button class="node" data-node="q-customer" style="--x:130px; --y:150px;"><span class="node-type">输入</span><strong>选择客户</strong><span>确定报价属于哪个客户。</span></button>
+                <button class="node" data-node="q-house" style="--x:340px; --y:150px;"><span class="node-type">输入</span><strong>房屋信息</strong><span>地址、面积、户型。</span></button>
+                <button class="node config" data-node="q-template" style="--x:130px; --y:256px;"><span class="node-type">配置</span><strong>选择定额模板</strong><span>带出空间、项目、单价。</span></button>
+                <button class="node config" data-node="q-price-mode" style="--x:340px; --y:256px;"><span class="node-type">配置</span><strong>报价模式</strong><span>清单、套餐、面积阶梯。</span></button>
+                <button class="node core" data-node="q-create" style="--x:550px; --y:150px;"><span class="node-type">动作</span><strong>生成报价草稿</strong><span>自动生成标题和初始明细。</span></button>
+
+                <button class="node core" data-node="q-space" style="--x:790px; --y:150px;"><span class="node-type">结构</span><strong>空间分组</strong><span>客厅、卧室、厨房等。</span></button>
+                <button class="node core" data-node="q-category" style="--x:1030px; --y:150px;"><span class="node-type">结构</span><strong>费用类别</strong><span>基装、主材、扩展、综合费。</span></button>
+                <button class="node core" data-node="q-items" style="--x:1270px; --y:150px;"><span class="node-type">明细</span><strong>报价项目行</strong><span>项目、规格、单位、备注。</span></button>
+                <button class="node core" data-node="q-qty" style="--x:1505px; --y:150px;"><span class="node-type">录入</span><strong>录入工程量</strong><span>填数量和用量。</span></button>
+                <button class="node core" data-node="q-price" style="--x:1740px; --y:150px;"><span class="node-type">录入</span><strong>调整单价/成本</strong><span>人工、材料、单价。</span></button>
+
+                <button class="node trace tiny" data-node="q-keyboard" style="--x:770px; --y:88px;"><span class="node-type">效率</span><strong>方向键移动</strong><span>像 Excel 录入。</span></button>
+                <button class="node trace tiny" data-node="q-color-remark" style="--x:1110px; --y:278px;"><span class="node-type">辅助</span><strong>颜色/备注</strong><span>标识重点。</span></button>
+                <button class="node trace tiny" data-node="q-drag-sort" style="--x:1290px; --y:278px;"><span class="node-type">效率</span><strong>拖动排序</strong><span>调整展示顺序。</span></button>
+
+                <button class="node output" data-node="q-row-total" style="--x:1150px; --y:405px;"><span class="node-type">计算</span><strong>行小计</strong><span>数量 × 单价。</span></button>
+                <button class="node config" data-node="q-fees" style="--x:905px; --y:405px;"><span class="node-type">费用</span><strong>综合费用</strong><span>管理费、搬运费等。</span></button>
+                <button class="node output" data-node="q-summary" style="--x:665px; --y:405px;"><span class="node-type">汇总</span><strong>直接费/综合费</strong><span>按类别汇总。</span></button>
+                <button class="node output" data-node="q-discount-tax" style="--x:425px; --y:405px;"><span class="node-type">调整</span><strong>优惠 / 税费</strong><span>折扣和税率。</span></button>
+                <button class="node output" data-node="q-final" style="--x:185px; --y:405px;"><span class="node-type">结果</span><strong>最终报价金额</strong><span>报价总价。</span></button>
+
+                <button class="node core" data-node="q-save" style="--x:550px; --y:548px;"><span class="node-type">动作</span><strong>保存报价</strong><span>写入明细和金额。</span></button>
+                <button class="node risk" data-node="q-validate" style="--x:805px; --y:548px;"><span class="node-type">校验</span><strong>保存校验</strong><span>过滤无效项目。</span></button>
+                <button class="node output" data-node="q-formal" style="--x:1065px; --y:548px;"><span class="node-type">卡点</span><strong>确认为正式报价</strong><span>预算定稿。</span></button>
+                <button class="node output" data-node="q-contract-ready" style="--x:1430px; --y:548px;"><span class="node-type">结果</span><strong>可创建合同</strong><span>进入合同资料。</span></button>
+                <button class="node risk" data-node="q-delete-lock" style="--x:1685px; --y:548px;"><span class="node-type">保护</span><strong>引用后删除保护</strong><span>保护合同依据。</span></button>
+
+                <button class="node trace tiny" data-node="q-copy" style="--x:222px; --y:674px;"><span class="node-type">版本</span><strong>复制报价</strong><span>生成新草稿。</span></button>
+                <button class="node tiny" data-node="q-send" style="--x:342px; --y:674px;"><span class="node-type">协作</span><strong>发送设计师</strong><span>只读查看。</span></button>
+                <button class="node trace tiny" data-node="q-export" style="--x:462px; --y:674px;"><span class="node-type">输出</span><strong>打印导出</strong><span>客户确认。</span></button>
+              </div>
+            </div>
+            <aside class="inspector" data-inspector="quote">
+              <div class="inspector-label">当前节点</div>
+              <h3 data-title>编辑报价明细</h3>
+              <p data-desc>点击报价图里的节点查看关系。</p>
+              <div class="relation-list">
+                <h3>上游来源</h3>
+                <div class="tag-list" data-upstream></div>
+                <h3>下游影响</h3>
+                <div class="tag-list" data-downstream></div>
+                <h3>用户要理解</h3>
+                <div class="tag-list" data-points></div>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="board-section" id="contract" data-board="contract">
+          <div class="board-head">
+            <div>
+              <h2>03｜合同内部逻辑图</h2>
+              <p>这张图只看合同域：为什么必须有正式报价、模板如何冻结、审批如何分流、签约后为什么会产生收款计划。</p>
+            </div>
+            <div class="board-actions">
+              <span class="pill">合同资料视角</span>
+              <button class="tool-button primary" type="button" data-action="add-node" data-target-board="contract">新增功能块</button>
+              <button class="tool-button" type="button" data-action="save-layout" data-target-board="contract">保存布局</button>
+              <button class="tool-button danger" type="button" data-action="reset-layout" data-target-board="contract">恢复默认</button>
+            </div>
+          </div>
+          <div class="split">
+            <div class="board-wrap">
+              <div class="canvas compact" data-canvas="contract">
+                <svg class="canvas-svg" viewBox="0 0 1320 620" aria-hidden="true" data-editable-links="contract">
+                  <defs>
+                    <marker id="c-arrow-blue" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#407aff"></path></marker>
+                    <marker id="c-arrow-green" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#16a34a"></path></marker>
+                    <marker id="c-arrow-orange" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#d97706"></path></marker>
+                    <marker id="c-arrow-red" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#dc2626"></path></marker>
+                    <marker id="c-arrow-gray" markerWidth="11" markerHeight="11" refX="9" refY="3.5" orient="auto"><path d="M0,0 L0,7 L10,3.5 z" fill="#98a2b3"></path></marker>
+                  </defs>
+                </svg>
+
+                <button class="node output" data-node="c-formal" style="--x:150px; --y:180px;"><span class="node-type">依据</span><strong>正式报价</strong><span>合同金额必须来自正式报价。</span></button>
+                <button class="node config" data-node="c-template" style="--x:150px; --y:360px;"><span class="node-type">配置</span><strong>合同模板</strong><span>固定文案、变量、Word 样式。</span></button>
+                <button class="node config" data-node="c-payment-scheme" style="--x:520px; --y:520px;"><span class="node-type">配置</span><strong>收款方案</strong><span>阶段款比例和名称。</span></button>
+                <button class="node config" data-node="c-approval-flow" style="--x:1040px; --y:80px;"><span class="node-type">配置</span><strong>审批流</strong><span>阈值、节点、审批人。</span></button>
+                <button class="node core" data-node="c-create" style="--x:530px; --y:250px;"><span class="node-type">核心</span><strong>新建合同</strong><span>合同类型、编号、金额、定金抵扣。</span></button>
+                <button class="node" data-node="c-draft" style="--x:830px; --y:250px;"><span class="node-type">状态</span><strong>草稿合同</strong><span>保存不等于签约，可继续编辑。</span></button>
+                <button class="node core" data-node="c-submit" style="--x:1080px; --y:250px;"><span class="node-type">动作</span><strong>提交合同</strong><span>判断是否需要审批。</span></button>
+                <button class="node risk" data-node="c-approval" style="--x:810px; --y:420px;"><span class="node-type">风控</span><strong>待审批</strong><span>审批人通过或驳回。</span></button>
+                <button class="node output" data-node="c-signed" style="--x:1140px; --y:470px;"><span class="node-type">结果</span><strong>已签约</strong><span>更新客户/项目状态。</span></button>
+                <button class="node output" data-node="c-payment-plan" style="--x:620px; --y:530px;"><span class="node-type">结果</span><strong>收款计划</strong><span>按合同金额生成应收款。</span></button>
+                <button class="node trace" data-node="c-snapshot" style="--x:720px; --y:420px;"><span class="node-type">追溯</span><strong>模板快照</strong><span>历史合同不受模板修改影响。</span></button>
+                <button class="node trace" data-node="c-resign" style="--x:920px; --y:560px;"><span class="node-type">变更</span><strong>重签合同</strong><span>已签合同不能直接编辑。</span></button>
+              </div>
+            </div>
+            <aside class="inspector" data-inspector="contract">
+              <div class="inspector-label">当前节点</div>
+              <h3 data-title>新建合同</h3>
+              <p data-desc>点击合同图里的节点查看关系。</p>
+              <div class="relation-list">
+                <h3>上游来源</h3>
+                <div class="tag-list" data-upstream></div>
+                <h3>下游影响</h3>
+                <div class="tag-list" data-downstream></div>
+                <h3>用户要理解</h3>
+                <div class="tag-list" data-points></div>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="board-section" id="rules">
+          <div class="board-head">
+            <div>
+              <h2>04｜必须记住的核心规则</h2>
+              <p>这些不是孤立说明，而是从上面画板关系里抽出来的业务约束。</p>
+            </div>
+          </div>
+          <div class="rule-grid">
+            <div class="principle-card">
+              <div class="num">1</div>
+              <h3>报价负责算钱，正式报价负责定稿</h3>
+              <p>草稿报价可以反复改，但不能直接签合同；正式报价是预算定稿，也是合同金额依据。</p>
+            </div>
+            <div class="principle-card">
+              <div class="num">2</div>
+              <h3>合同不是手写金额，而是引用正式报价</h3>
+              <p>合同金额、定金抵扣、收款方案、审批流共同决定后续财务和工地流程。</p>
+            </div>
+            <div class="principle-card">
+              <div class="num">3</div>
+              <h3>模板会冻结，历史必须可追溯</h3>
+              <p>合同创建时保存模板快照；后续模板修改，不会影响已经创建或签约的历史合同。</p>
+            </div>
+            <div class="principle-card">
+              <div class="num">4</div>
+              <h3>审批是风险卡点，不是装饰流程</h3>
+              <p>启用审批流时，合同要先进入待审批；审批通过才签约，审批驳回可重新编辑。</p>
+            </div>
+            <div class="principle-card">
+              <div class="num">5</div>
+              <h3>已签合同不能直接改</h3>
+              <p>已签合同代表对外生效，不能像草稿一样直接改。需要变更时走重签，保留旧合同历史。</p>
+            </div>
+            <div class="principle-card">
+              <div class="num">6</div>
+              <h3>所有关键动作都要留下记录</h3>
+              <p>报价创建、报价确认、合同创建、审批、删除恢复等动作都要可追溯，方便管理和复盘。</p>
+            </div>
+          </div>
+        </section>
+
+        <div class="print-tip">这份文件可以直接发给同事用浏览器打开。动态高亮只有 HTML 里保留；如果需要静态版，可以浏览器打印并保存为 PDF。</div>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    const editableBoardStorageKey = "contractQuotationLogicEditableBoardsV1";
+    const editableBoards = {
+      global: {
+        width: 1320,
+        height: 900,
+        links: [
+          ["customer", "quotation", "data"],
+          ["quota-template", "quotation", "rule"],
+          ["branch-setting", "contract-template", "rule"],
+          ["approval-flow", "approval", "rule"],
+          ["payment-scheme", "payment", "rule"],
+          ["quotation", "formal-quote", ""],
+          ["formal-quote", "contract", "risk"],
+          ["contract-template", "contract", "rule"],
+          ["contract", "approval", ""],
+          ["approval", "signed-contract", ""],
+          ["signed-contract", "payment", "data"],
+          ["signed-contract", "print", "data"],
+          ["quotation", "operation-log", "trace"],
+          ["contract", "operation-log", "trace"],
+          ["quoter", "quotation", "data"],
+          ["designer", "quotation", "data"],
+          ["manager", "approval", "data"],
+          ["finance", "payment", "data"]
+        ]
+      },
+      quote: {
+        width: 1880,
+        height: 780,
+        links: [
+          ["q-customer", "q-house", "data"],
+          ["q-house", "q-create", "data"],
+          ["q-template", "q-create", "rule"],
+          ["q-price-mode", "q-create", "rule"],
+          ["q-create", "q-space", ""],
+          ["q-space", "q-category", ""],
+          ["q-category", "q-items", ""],
+          ["q-items", "q-qty", ""],
+          ["q-qty", "q-price", ""],
+          ["q-price", "q-row-total", ""],
+          ["q-row-total", "q-fees", "data"],
+          ["q-fees", "q-summary", "rule"],
+          ["q-summary", "q-discount-tax", "data"],
+          ["q-discount-tax", "q-final", "data"],
+          ["q-final", "q-save", ""],
+          ["q-save", "q-validate", "risk"],
+          ["q-validate", "q-formal", ""],
+          ["q-formal", "q-contract-ready", "risk"],
+          ["q-contract-ready", "q-delete-lock", "risk"],
+          ["q-save", "q-copy", "trace"],
+          ["q-save", "q-send", "trace"],
+          ["q-save", "q-export", "trace"],
+          ["q-items", "q-keyboard", "trace"],
+          ["q-items", "q-color-remark", "trace"],
+          ["q-items", "q-drag-sort", "trace"]
+        ]
+      },
+      contract: {
+        width: 1320,
+        height: 620,
+        links: [
+          ["c-formal", "c-create", "risk"],
+          ["c-template", "c-create", "rule"],
+          ["c-payment-scheme", "c-create", "rule"],
+          ["c-create", "c-draft", ""],
+          ["c-draft", "c-submit", ""],
+          ["c-approval-flow", "c-submit", "rule"],
+          ["c-submit", "c-approval", "risk"],
+          ["c-submit", "c-signed", ""],
+          ["c-approval", "c-signed", ""],
+          ["c-signed", "c-payment-plan", "data"],
+          ["c-create", "c-snapshot", "trace"],
+          ["c-signed", "c-resign", "trace"]
+        ]
+      }
+    };
+
+    const boards = {
+      global: {
+        defaultNode: "quotation",
+        nodes: {
+          customer: {
+            title: "客户 / 项目",
+            desc: "客户和项目是整个模块的数据起点。客户属于哪个分公司，会影响可用合同模板、审批流和收款规则。",
+            points: ["客户信息带入报价和合同", "项目地址/面积会进入合同变量", "分公司归属决定配置范围"]
+          },
+          quoter: {
+            title: "报价员",
+            desc: "报价员负责把客户需求转化成可计算的报价明细，并确认金额是否准确。",
+            points: ["选择客户和模板", "维护数量、单价、备注", "保存后由系统重算金额"]
+          },
+          designer: {
+            title: "设计师",
+            desc: "设计师收到报价后主要查看、打印、下载，系统限制其修改报价，避免版本混乱。",
+            points: ["接收报价待办", "只读查看报价内容", "可打印或下载给客户沟通"]
+          },
+          manager: {
+            title: "管理者 / 审批人",
+            desc: "管理者负责报价定稿和合同审批风险控制，特别是金额、条款和签约风险。",
+            points: ["确认正式报价", "处理合同审批", "审批通过或驳回"]
+          },
+          finance: {
+            title: "财务",
+            desc: "财务不从报价草稿收款，而是根据已签合同产生的收款计划处理后续收款。",
+            points: ["读取收款计划", "跟进阶段款", "合同金额是财务依据"]
+          },
+          "quota-template": {
+            title: "定额模板",
+            desc: "定额模板负责给报价单提供项目结构和价格规则，减少从零录入。",
+            points: ["生成空间和项目", "带出综合费用", "支持套餐和面积规则"]
+          },
+          "approval-flow": {
+            title: "合同审批流",
+            desc: "审批流是合同提交后的风控规则，决定谁审批、按什么顺序审批、能否驳回。",
+            points: ["来自分公司设置", "按金额阈值匹配", "找不到审批人会阻止提交"]
+          },
+          "branch-setting": {
+            title: "分公司设置",
+            desc: "分公司设置提供合同模板、打印信息、审批流、收款方案等本地化规则。",
+            points: ["不同分公司可不同配置", "合同模板按分公司隔离", "审批和收款都受它影响"]
+          },
+          "payment-scheme": {
+            title: "收款方案",
+            desc: "收款方案定义合同签约后如何拆分阶段款，例如首期、中期、尾款。",
+            points: ["合同创建时选择", "签约后生成收款计划", "财务按计划收款"]
+          },
+          quotation: {
+            title: "报价单",
+            desc: "报价单是模块中心之一：接收客户和定额模板数据，经过编辑计算后，确认成正式报价。",
+            points: ["负责算金额", "可以打印/导出/分享", "可以复制、发送、删除恢复"]
+          },
+          "formal-quote": {
+            title: "正式报价",
+            desc: "正式报价是预算定稿。合同必须引用正式报价，不能拿草稿报价直接签约。",
+            points: ["合同金额依据", "避免草稿误签", "已被签约引用后受保护"]
+          },
+          "contract-template": {
+            title: "合同模板",
+            desc: "合同模板提供固定文案和变量。合同创建时会冻结模板快照，保护历史合同。",
+            points: ["支持多套模板", "已发布才可使用", "创建合同时冻结版本"]
+          },
+          contract: {
+            title: "合同资料",
+            desc: "合同资料是从报价进入签约的核心节点，绑定正式报价、模板、定金抵扣、收款方案和审批流。",
+            points: ["选择正式报价", "选择合同模板", "提交后进入审批或签约"]
+          },
+          approval: {
+            title: "合同审批",
+            desc: "合同审批是风险卡点。启用审批时，合同先待审批；通过后才成为已签合同。",
+            points: ["审批通过才签约", "驳回后可重新编辑", "审批动作会留痕"]
+          },
+          "operation-log": {
+            title: "操作记录",
+            desc: "操作记录保存关键动作，让管理者能追溯谁在什么时候做了什么。",
+            points: ["报价动作留痕", "合同动作留痕", "删除恢复可追溯"]
+          },
+          payment: {
+            title: "收款计划",
+            desc: "收款计划来自已签合同和收款方案，是财务后续应收款的依据。",
+            points: ["签约后生成", "按阶段收款", "服务财务中心"]
+          },
+          "signed-contract": {
+            title: "已签合同",
+            desc: "已签合同代表对外签约生效，会更新客户和项目状态，并推动后续工地/财务流程。",
+            points: ["不可直接编辑", "变更走重签", "生成收款计划"]
+          },
+          print: {
+            title: "打印 / 归档",
+            desc: "打印和归档用于对外签字、客户确认和历史查阅。",
+            points: ["报价单可打印分享", "合同文本可打印", "历史资料可追溯"]
+          }
+        }
+      },
+      quote: {
+        defaultNode: "q-create",
+        nodes: {
+          "q-customer": { title: "选择客户", desc: "报价第一步必须先确定客户。系统后续会用客户归属、服务团队和项目关系来控制权限与流转。", points: ["报价不能脱离客户存在", "客户归属影响可用模板", "后续操作会写入客户操作记录"] },
+          "q-house": { title: "房屋信息", desc: "房屋地址和面积会影响报价标题、项目名称、套餐面积计算，也会进入后续合同变量。", points: ["地址用于默认报价标题", "面积影响套餐报价", "合同里会引用项目信息"] },
+          "q-template": { title: "选择定额模板", desc: "定额模板是报价草稿的来源。它会带出空间、项目、单位、单价、综合费用等基础内容。", points: ["减少从零录入", "模板可按组织范围适用", "模板不等于最终报价"] },
+          "q-price-mode": { title: "报价模式", desc: "系统支持普通清单报价，也支持套餐报价、面积阶梯等规则。不同模式会影响初始金额和项目生成方式。", points: ["清单模式按明细计算", "套餐模式按面积/阶梯计算", "模式来自模板配置"] },
+          "q-create": { title: "生成报价草稿", desc: "选择客户和模板后，系统生成一份草稿报价。此时还不是正式预算，只是可编辑的起点。", points: ["生成默认标题", "初始化空间和项目", "状态默认为草稿报价"] },
+          "q-space": { title: "空间分组", desc: "报价明细按空间组织，方便报价员逐个区域核对施工项目。", points: ["客厅、卧室、厨房等", "可按空间筛选查看", "提升客户阅读清晰度"] },
+          "q-category": { title: "费用类别", desc: "项目会归到基装、主材、自定义扩展项、综合费用等类别。类别影响汇总和综合费用计算基数。", points: ["基装单独汇总", "主材/扩展参与直接费", "综合费用按规则计算"] },
+          "q-items": { title: "报价项目行", desc: "项目行是报价最小颗粒度，包括项目名称、规格、型号、单位、数量、单价、备注等。", points: ["每一行都影响金额或说明", "支持新增/删除/拖动", "普通项目数量为 0 不进入有效报价"] },
+          "q-qty": { title: "录入工程量", desc: "报价员根据现场量房和方案，把每个项目的数量录入系统。数量直接影响行小计。", points: ["数量必须非负", "数量为 0 通常表示暂不计入", "定制柜等项目有特殊面积换算"] },
+          "q-price": { title: "调整单价/成本", desc: "单价可来自模板，也可根据实际项目调整；基装项目还会拆成人工、材料等成本信息。", points: ["单价影响行小计", "人工材料影响成本视角", "定制柜按面积和单价计算"] },
+          "q-row-total": { title: "行小计", desc: "每个有效项目行会算出小计，后续汇总成基装、主材、扩展项和直接费。", points: ["普通项目 = 数量 × 单价", "特殊项目按对应规则计算", "综合费用会引用这些金额"] },
+          "q-color-remark": { title: "颜色/备注", desc: "颜色和备注是报价编辑的辅助信息，用来标注重点、说明材质或施工要求。", points: ["帮助内部识别重点", "备注可给客户解释", "不直接改变金额"] },
+          "q-keyboard": { title: "方向键移动", desc: "报价编辑器支持方向键在输入格之间移动，让报价员像 Excel 一样快速录入。", points: ["提高连续录入效率", "减少鼠标切换", "适合大报价表"] },
+          "q-drag-sort": { title: "拖动排序", desc: "报价员可以调整项目顺序，让报价单展示顺序更符合施工或沟通习惯。", points: ["改变展示顺序", "不改变业务含义", "便于客户阅读"] },
+          "q-fees": { title: "综合费用", desc: "综合费用包含管理费、搬运费、成品保护等，可以是固定金额，也可以按比例或引用基数计算。", points: ["可固定金额", "可按直接费比例", "可引用基装/主材/扩展金额"] },
+          "q-summary": { title: "直接费/综合费汇总", desc: "系统把项目行按类别汇总，形成基装、主材、扩展、综合费用等金额。", points: ["形成总价基础", "为折扣税费提供基数", "也用于打印摘要"] },
+          "q-discount-tax": { title: "优惠 / 税费", desc: "优惠会从应税前金额扣减，税费按设置的税率计算，最终影响报价总价。", points: ["优惠减少最终价", "税费按比例计算", "保存时统一重算"] },
+          "q-final": { title: "最终报价金额", desc: "最终金额是报价员需要重点核对的结果，后续正式报价和合同都会以它为依据。", points: ["保存到报价单", "打印和列表展示", "正式报价后进入合同"] },
+          "q-save": { title: "保存报价", desc: "保存时系统会写入报价标题、明细、设置、折扣、税费和最终金额，并同步客户进度。", points: ["不是只保存页面", "会重新计算金额", "会更新项目报价状态"] },
+          "q-validate": { title: "保存校验", desc: "保存时系统会规范数据，过滤无效项目，校验类别、费用计算方式和金额。", points: ["过滤空项目", "规范费用规则", "避免脏数据进入报价"] },
+          "q-formal": { title: "确认为正式报价", desc: "正式报价代表预算定稿。只有正式报价才会出现在合同资料中供用户选择。", points: ["合同只能引用正式报价", "避免草稿误签", "正式报价是业务卡点"] },
+          "q-contract-ready": { title: "可创建合同", desc: "报价确认为正式后，客户详情的合同资料里才能选择它来创建合同。", points: ["进入合同前置列表", "合同金额引用此报价", "后续签约会保护该报价"] },
+          "q-delete-lock": { title: "引用后删除保护", desc: "如果正式报价已经被已签合同引用，系统会限制删除或撤销，避免合同依据被破坏。", points: ["保护历史合同", "防止金额依据丢失", "需要保留业务追溯"] },
+          "q-send": { title: "发送设计师", desc: "报价可以发送给客户团队里的设计师。设计师主要查看和确认，不能修改报价内容。", points: ["生成设计师待办", "设计师只读", "可撤销待发送"] },
+          "q-export": { title: "打印 / 导出 / 分享", desc: "报价单可以打印、导出或生成分享链接，用于给客户沟通和内部流转。", points: ["客户确认", "内部归档", "对外沟通资料"] },
+          "q-copy": { title: "复制报价", desc: "复制报价用于快速生成新方案或新版本，不破坏原报价。", points: ["保留旧报价", "新副本为草稿", "适合多方案对比"] }
+        }
+      },
+      contract: {
+        defaultNode: "c-create",
+        nodes: {
+          "c-formal": { title: "正式报价", desc: "合同金额来源必须是正式报价。", points: ["预算定稿", "合同金额依据", "草稿报价不能签约"] },
+          "c-template": { title: "合同模板", desc: "合同模板负责固定文案、变量和打印版式。", points: ["已发布才可使用", "类型必须匹配", "创建时冻结快照"] },
+          "c-payment-scheme": { title: "收款方案", desc: "合同需要选择收款方案，签约后生成收款计划。", points: ["阶段款名称", "阶段款比例", "财务收款依据"] },
+          "c-approval-flow": { title: "审批流", desc: "审批流决定合同提交后是直接签约还是进入待审批。", points: ["分公司配置", "金额阈值匹配", "审批人自动解析"] },
+          "c-create": { title: "新建合同", desc: "创建合同时汇总正式报价、合同模板、定金抵扣、收款方案和合同基础信息。", points: ["可保存草稿", "可提交创建", "绑定正式报价"] },
+          "c-draft": { title: "草稿合同", desc: "草稿只是暂存，方便没写完时继续编辑。", points: ["保存不等于签约", "可继续编辑", "未生成正式收款计划"] },
+          "c-submit": { title: "提交合同", desc: "提交时系统检查必填信息、报价、模板、审批规则。", points: ["校验正式报价", "校验模板类型", "判断是否进入审批"] },
+          "c-approval": { title: "待审批", desc: "有审批流时，合同进入待审批，审批通过后才签约。", points: ["审批人处理", "可通过或驳回", "驳回后可重新编辑"] },
+          "c-signed": { title: "已签约", desc: "已签约合同代表业务生效，推动客户、项目、财务流程。", points: ["更新客户状态", "更新项目状态", "不能直接编辑"] },
+          "c-payment-plan": { title: "收款计划", desc: "已签约合同按收款方案生成分期应收款。", points: ["财务后续收款", "合同金额拆分", "跟踪剩余应收"] },
+          "c-snapshot": { title: "模板快照", desc: "合同创建时冻结模板版本，保护历史合同。", points: ["模板改版不影响历史", "合同打印内容稳定", "方便追溯"] },
+          "c-resign": { title: "重签合同", desc: "已签合同如需变更，不直接编辑，而是生成新合同并保留旧合同历史。", points: ["旧合同标记已重签", "新合同重新生效", "历史关系保留"] }
+        }
+      }
+    };
+
+    function getConnectedKeys(section, nodeKey) {
+      const links = Array.from(section.querySelectorAll(".link"));
+      const upstream = [];
+      const downstream = [];
+      links.forEach((link) => {
+        const from = link.dataset.from;
+        const to = link.dataset.to;
+        if (to === nodeKey && from) upstream.push(from);
+        if (from === nodeKey && to) downstream.push(to);
+      });
+      return { upstream: Array.from(new Set(upstream)), downstream: Array.from(new Set(downstream)) };
+    }
+
+    function renderTags(container, keys, boardData) {
+      container.innerHTML = "";
+      if (!keys.length) {
+        const empty = document.createElement("span");
+        empty.className = "tag";
+        empty.textContent = "无直接关联";
+        container.appendChild(empty);
+        return;
+      }
+      keys.forEach((key) => {
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        tag.textContent = boardData.nodes[key]?.title || key;
+        container.appendChild(tag);
+      });
+    }
+
+    function renderPointTags(container, points) {
+      container.innerHTML = "";
+      points.forEach((point) => {
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        tag.textContent = point;
+        container.appendChild(tag);
+      });
+    }
+
+    function setActiveNode(section, boardName, nodeKey) {
+      const boardData = boards[boardName];
+      const { upstream, downstream } = getConnectedKeys(section, nodeKey);
+      const connected = new Set([nodeKey, ...upstream, ...downstream]);
+      const links = Array.from(section.querySelectorAll(".link"));
+      const labels = Array.from(section.querySelectorAll(".link-label"));
+      const nodes = Array.from(section.querySelectorAll(".node"));
+
+      nodes.forEach((node) => {
+        const key = node.dataset.node;
+        node.classList.toggle("active", key === nodeKey);
+        node.classList.toggle("dimmed", !connected.has(key));
+      });
+      links.forEach((link) => {
+        const isActive = link.dataset.from === nodeKey || link.dataset.to === nodeKey;
+        link.classList.toggle("active", isActive);
+        link.classList.toggle("dimmed", !isActive);
+      });
+      labels.forEach((label) => {
+        const isActive = label.dataset.from === nodeKey || label.dataset.to === nodeKey;
+        label.classList.toggle("active", isActive);
+        label.classList.toggle("dimmed", !isActive);
+      });
+
+      const inspector = section.querySelector("[data-inspector]");
+      const data = boardData.nodes[nodeKey];
+      inspector.querySelector("[data-title]").textContent = data.title;
+      inspector.querySelector("[data-desc]").textContent = data.desc;
+      renderTags(inspector.querySelector("[data-upstream]"), upstream, boardData);
+      renderTags(inspector.querySelector("[data-downstream]"), downstream, boardData);
+      renderPointTags(inspector.querySelector("[data-points]"), data.points || []);
+    }
+
+    function getNodeCenter(node) {
+      const x = Number(String(node.style.getPropertyValue("--x")).replace("px", "")) || node.offsetLeft;
+      const y = Number(String(node.style.getPropertyValue("--y")).replace("px", "")) || node.offsetTop;
+      return { x, y };
+    }
+
+    function getMarkerPrefix(boardName) {
+      if (boardName === "quote") return "q";
+      if (boardName === "contract") return "c";
+      return "";
+    }
+
+    function getMarkerForType(type, boardName) {
+      const prefix = getMarkerPrefix(boardName);
+      const markerName = (color) => prefix ? `${prefix}-arrow-${color}` : `arrow-${color}`;
+      if (type === "data") return `url(#${markerName("green")})`;
+      if (type === "rule") return `url(#${markerName("orange")})`;
+      if (type === "risk") return `url(#${markerName("red")})`;
+      if (type === "trace") return `url(#${markerName("gray")})`;
+      return `url(#${markerName("blue")})`;
+    }
+
+    function makeSmoothPath(from, to) {
+      const dx = Math.abs(to.x - from.x);
+      const mid = Math.max(70, dx * 0.42);
+      if (dx < 36) {
+        const bend = from.y < to.y ? 52 : -52;
+        return `M${from.x} ${from.y} C${from.x + bend} ${from.y} ${to.x + bend} ${to.y} ${to.x} ${to.y}`;
+      }
+      return `M${from.x} ${from.y} C${from.x + mid} ${from.y} ${to.x - mid} ${to.y} ${to.x} ${to.y}`;
+    }
+
+    function renderEditableLinks(boardName) {
+      const section = document.querySelector(`[data-board="${boardName}"]`);
+      const svg = section?.querySelector(`[data-editable-links="${boardName}"]`);
+      const config = editableBoards[boardName];
+      if (!section || !svg || !config) return;
+      Array.from(svg.querySelectorAll(".link, .link-label")).forEach((item) => item.remove());
+      config.links.forEach(([fromKey, toKey, type]) => {
+        const fromNode = section.querySelector(`.node[data-node="${fromKey}"]`);
+        const toNode = section.querySelector(`.node[data-node="${toKey}"]`);
+        if (!fromNode || !toNode) return;
+        const from = getNodeCenter(fromNode);
+        const to = getNodeCenter(toNode);
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("class", `link ${type || ""}`.trim());
+        path.dataset.from = fromKey;
+        path.dataset.to = toKey;
+        path.setAttribute("d", makeSmoothPath(from, to));
+        path.setAttribute("marker-end", getMarkerForType(type, boardName));
+        svg.appendChild(path);
+      });
+    }
+
+    function getStoredBoardState() {
+      try {
+        return JSON.parse(localStorage.getItem(editableBoardStorageKey) || "{}");
+      } catch {
+        return {};
+      }
+    }
+
+    function saveBoardState(boardName) {
+      const section = document.querySelector(`[data-board="${boardName}"]`);
+      if (!section) return;
+      const state = getStoredBoardState();
+      state[boardName] = {
+        positions: {},
+        customNodes: Array.from(section.querySelectorAll(".node[data-custom-node='true']")).map((node) => ({
+          key: node.dataset.node,
+          title: node.querySelector("strong")?.textContent || "自定义功能",
+          desc: node.querySelector("span:last-child")?.textContent || "",
+          x: Number(String(node.style.getPropertyValue("--x")).replace("px", "")) || 0,
+          y: Number(String(node.style.getPropertyValue("--y")).replace("px", "")) || 0,
+        })),
+        links: editableBoards[boardName]?.links || [],
+      };
+      section.querySelectorAll(".node").forEach((node) => {
+        state[boardName].positions[node.dataset.node] = getNodeCenter(node);
+      });
+      localStorage.setItem(editableBoardStorageKey, JSON.stringify(state));
+    }
+
+    function applyStoredBoardState(boardName) {
+      const section = document.querySelector(`[data-board="${boardName}"]`);
+      const boardData = boards[boardName];
+      if (!section || !boardData) return;
+      const state = getStoredBoardState()[boardName];
+      if (!state) return;
+
+      if (Array.isArray(state.customNodes)) {
+        state.customNodes.forEach((item) => {
+          if (!item?.key || section.querySelector(`.node[data-node="${item.key}"]`)) return;
+          createCustomNode(boardName, item.title, item.desc, item.x, item.y, item.key, false);
+        });
+      }
+      if (Array.isArray(state.links) && editableBoards[boardName]) {
+        editableBoards[boardName].links = state.links;
+      }
+      Object.entries(state.positions || {}).forEach(([key, pos]) => {
+        const node = section.querySelector(`.node[data-node="${key}"]`);
+        if (!node) return;
+        node.style.setProperty("--x", `${pos.x}px`);
+        node.style.setProperty("--y", `${pos.y}px`);
+      });
+    }
+
+    function createCustomNode(boardName, title, desc, x, y, key, shouldSave = true) {
+      const section = document.querySelector(`[data-board="${boardName}"]`);
+      const canvas = section?.querySelector(`[data-canvas="${boardName}"]`);
+      if (!section || !canvas) return null;
+      const nodeKey = key || `custom-${Date.now()}`;
+      const node = document.createElement("button");
+      node.type = "button";
+      node.className = "node trace";
+      node.dataset.node = nodeKey;
+      node.dataset.customNode = "true";
+      node.style.setProperty("--x", `${x}px`);
+      node.style.setProperty("--y", `${y}px`);
+      node.innerHTML = `<span class="node-type">自定义</span><strong>${title}</strong><span>${desc || "用户新增功能块"}</span>`;
+      canvas.appendChild(node);
+      boards[boardName].nodes[nodeKey] = {
+        title,
+        desc: desc || "这是用户手动新增的功能块，可以拖动整理位置。",
+        points: ["手动新增", "可拖动调整", "布局可保存到本机浏览器"]
+      };
+      bindNodeInteractions(section, boardName, node);
+      if (shouldSave) saveBoardState(boardName);
+      renderEditableLinks(boardName);
+      return node;
+    }
+
+    function bindNodeInteractions(section, boardName, node) {
+      node.addEventListener("click", () => setActiveNode(section, boardName, node.dataset.node));
+      if (!editableBoards[boardName]) return;
+      node.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        const canvas = section.querySelector(`[data-canvas="${boardName}"]`);
+        const start = getNodeCenter(node);
+        const startX = event.clientX;
+        const startY = event.clientY;
+        let moved = false;
+        node.setPointerCapture(event.pointerId);
+        node.classList.add("dragging");
+
+        const onMove = (moveEvent) => {
+          const dx = moveEvent.clientX - startX;
+          const dy = moveEvent.clientY - startY;
+          if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
+          const nextX = Math.max(80, Math.min((editableBoards[boardName].width || canvas.clientWidth) - 80, start.x + dx));
+          const nextY = Math.max(60, Math.min((editableBoards[boardName].height || canvas.clientHeight) - 60, start.y + dy));
+          node.style.setProperty("--x", `${Math.round(nextX)}px`);
+          node.style.setProperty("--y", `${Math.round(nextY)}px`);
+          renderEditableLinks(boardName);
+        };
+
+        const onUp = () => {
+          node.classList.remove("dragging");
+          node.removeEventListener("pointermove", onMove);
+          node.removeEventListener("pointerup", onUp);
+          node.removeEventListener("pointercancel", onUp);
+          if (moved) saveBoardState(boardName);
+        };
+
+        node.addEventListener("pointermove", onMove);
+        node.addEventListener("pointerup", onUp);
+        node.addEventListener("pointercancel", onUp);
+      });
+    }
+
+    document.querySelectorAll("[data-board]").forEach((section) => {
+      const boardName = section.dataset.board;
+      const boardData = boards[boardName];
+      if (!boardData) return;
+      applyStoredBoardState(boardName);
+      section.querySelectorAll(".node").forEach((node) => bindNodeInteractions(section, boardName, node));
+      renderEditableLinks(boardName);
+      setActiveNode(section, boardName, boardData.defaultNode);
+    });
+
+    document.querySelectorAll("[data-action]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const boardName = button.dataset.targetBoard;
+        const action = button.dataset.action;
+        if (!boardName) return;
+        const section = document.querySelector(`[data-board="${boardName}"]`);
+        const active = section?.querySelector(".node.active");
+        if (action === "add-node") {
+          const title = prompt("请输入新增功能块名称", "新增功能");
+          if (!title) return;
+          const desc = prompt("请输入这个功能块的说明", "补充说明这个功能与当前节点的关系") || "";
+          const sourceKey = active?.dataset.node || editableBoards[boardName]?.links?.at(-1)?.[1] || boards[boardName].defaultNode;
+          const source = active ? getNodeCenter(active) : { x: 700, y: 548 };
+          const node = createCustomNode(boardName, title.trim(), desc.trim(), source.x + 220, source.y + 90);
+          if (node && sourceKey && editableBoards[boardName]) {
+            editableBoards[boardName].links.push([sourceKey, node.dataset.node, "trace"]);
+            saveBoardState(boardName);
+            renderEditableLinks(boardName);
+            setActiveNode(section, boardName, node.dataset.node);
+          }
+        }
+        if (action === "save-layout") {
+          saveBoardState(boardName);
+          alert("已保存到当前浏览器。下次打开这份 HTML 会保留拖动位置和新增功能块。");
+        }
+        if (action === "reset-layout") {
+          if (!confirm("确定恢复默认布局吗？手动新增的功能块也会清除。")) return;
+          const state = getStoredBoardState();
+          delete state[boardName];
+          localStorage.setItem(editableBoardStorageKey, JSON.stringify(state));
+          location.reload();
+        }
+      });
+    });
+  </script>
+</body>
+</html>

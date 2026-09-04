@@ -1,0 +1,256 @@
+.dateInputRoot {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
+.dateInputButton {
+  position: relative;
+  display: inline-flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 12px;
+  border: 1px solid #d9e1ec;
+  border-radius: 10px !important;
+  background: #ffffff;
+  color: #182230;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  text-align: left;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
+}
+
+.dateInputButton:hover {
+  border-color: #b8c4d6;
+  background: #fbfdff;
+}
+
+.dateInputButton:focus-visible,
+.dateInputButtonOpen {
+  outline: none;
+  border-color: #2f6feb !important;
+  box-shadow: 0 0 0 3px rgb(47 111 235 / 14%) !important;
+}
+
+.dateInputButton:disabled {
+  cursor: not-allowed;
+  border-color: #e2e7ee;
+  background: #f5f7fa;
+  color: #98a2b3;
+}
+
+.dateInputValue {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dateInputPlaceholder {
+  color: #98a2b3;
+  font-weight: 500;
+}
+
+.dateInputIcon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  color: #667085;
+}
+
+.calendarPopover {
+  position: fixed;
+  z-index: 10000;
+  width: 292px;
+  overflow: hidden;
+  border: 1px solid #d9e1ec;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 18px 46px rgb(16 24 40 / 16%), 0 4px 14px rgb(16 24 40 / 8%);
+  animation: calendarEnter 150ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+@keyframes calendarEnter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.calendarHeader {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px 6px 14px;
+  border-bottom: 1px solid #eef2f6;
+  background: linear-gradient(180deg, #fbfdff 0%, #ffffff 100%);
+}
+
+.calendarMonthButton {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #182230;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.calendarMonthButton:hover {
+  background: #f2f5f9;
+}
+
+.calendarNav {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.calendarIconButton {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #475467;
+}
+
+.calendarIconButton:hover {
+  background: #f2f5f9;
+  color: #182230;
+}
+
+.calendarBody {
+  padding: 10px 12px 8px;
+}
+
+.weekdayGrid,
+.dateGrid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.weekdayGrid {
+  margin-bottom: 4px;
+}
+
+.weekdayCell {
+  display: flex;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.dateCell {
+  display: flex;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #182230;
+  font-size: 12px;
+  font-weight: 600;
+  transition: background-color 140ms ease, color 140ms ease, transform 140ms ease;
+}
+
+.dateCell:hover {
+  background: #edf4ff;
+  color: #2f6feb;
+}
+
+.dateCellOutside {
+  color: #98a2b3;
+  font-weight: 500;
+}
+
+.dateCellToday {
+  color: #2f6feb;
+}
+
+.dateCellToday::after {
+  position: absolute;
+}
+
+.dateCellSelected {
+  background: #2f6feb !important;
+  color: #ffffff !important;
+  box-shadow: 0 6px 14px rgb(47 111 235 / 22%);
+}
+
+.timeRow {
+  display: grid;
+  grid-template-columns: 60px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px 10px 0;
+  border-top: 1px solid #eef2f6;
+}
+
+.timeLabel {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.timeInput {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid #d9e1ec;
+  border-radius: 9px;
+  background: #ffffff;
+  color: #182230;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.timeInput:focus {
+  outline: none;
+  border-color: #2f6feb;
+  box-shadow: 0 0 0 3px rgb(47 111 235 / 12%);
+}
+
+.calendarFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px 12px;
+}
+
+.calendarFooterButton {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #2f6feb;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.calendarFooterButton:hover {
+  background: #edf4ff;
+}
