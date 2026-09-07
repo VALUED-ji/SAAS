@@ -67,21 +67,74 @@ function normalizeQuotaPayload(value: any) {
   };
 }
 
-function getActiveStoreNames(db: Db, companyId: string) {
-  const rows = db.prepare(`
-    SELECT name
-    FROM org_units
-    WHERE company_id = ?
-      AND type = 'store'
-      AND deleted_at IS NULL
-      AND COALESCE(is_active, 1) = 1
-  `).all(companyId) as Array<{ name?: string | null }>;
-  return new Set(rows.map((row) => String(row.name || "").trim()).filter(Boolean));
+function cleanText(value: unknown) {
+  return String(value ?? "").trim();
 }
 
-function filterItemsByActiveStore(items: any[], activeStoreNames: Set<string>) {
-  if (activeStoreNames.size === 0) return items;
-  return items.filter((item) => activeStoreNames.has(String(item?.scope || "").trim()));
+type OrgOption = {
+  id: string;
+  name: string;
+  type: string;
+  parent_id?: string | null;
+  ancestorIds: string[];
+};
+
+function getActiveOrgOptions(db: Db, companyId: string) {
+  const rows = db.prepare(`
+    SELECT id, name, type, parent_id
+    FROM org_units
+    WHERE company_id = ?
+      AND deleted_at IS NULL
+      AND COALESCE(is_active, 1) = 1
+  `).all(companyId) as Array<{ id?: string | null; name?: string | null; type?: string | null; parent_id?: string | null }>;
+  const map = new Map<string, OrgOption>();
+  rows.forEach((row) => {
+    const id = cleanText(row.id);
+    if (!id) return;
+    map.set(id, {
+      id,
+      name: cleanText(row.name),
+      type: cleanText(row.type),
+      parent_id: cleanText(row.parent_id) || null,
+      ancestorIds: [],
+    });
+  });
+  const getAncestorIds = (org: OrgOption) => {
+    const ids: string[] = [];
+    let current = org.parent_id ? map.get(org.parent_id) : null;
+    let guard = 0;
+    while (current && guard < 30) {
+      ids.push(current.id);
+      current = current.parent_id ? map.get(current.parent_id) : null;
+      guard += 1;
+    }
+    return ids;
+  };
+  map.forEach((org) => {
+    org.ancestorIds = getAncestorIds(org);
+  });
+  return Array.from(map.values());
+}
+
+function getManageableStoreNames(db: Db, auth: NonNullable<ReturnType<typeof getAuthContext>>) {
+  const orgOptions = getActiveOrgOptions(db, auth.companyId);
+  const stores = orgOptions.filter((option) => option.type === "store" && option.name);
+  const currentOrgUnitId = cleanText(auth.orgUnitId);
+  if (!currentOrgUnitId) return new Set(stores.map((store) => store.name));
+
+  const currentOrg = orgOptions.find((option) => option.id === currentOrgUnitId);
+  if (!currentOrg) return new Set<string>();
+  if (currentOrg.type === "store") return new Set(currentOrg.name ? [currentOrg.name] : []);
+  if (currentOrg.type === "company" || currentOrg.type === "region" || currentOrg.type === "group") {
+    return new Set(stores.filter((store) => store.ancestorIds.includes(currentOrg.id)).map((store) => store.name));
+  }
+  const parentStore = stores.find((store) => currentOrg.ancestorIds.includes(store.id));
+  return new Set(parentStore?.name ? [parentStore.name] : []);
+}
+
+function filterItemsByManageableStore(items: any[], storeNames: Set<string>) {
+  if (storeNames.size === 0) return [];
+  return items.filter((item) => storeNames.has(cleanText(item?.scope)));
 }
 
 export async function GET(req: NextRequest) {
@@ -100,8 +153,8 @@ export async function GET(req: NextRequest) {
   const items = rows
     .map((row) => safeJsonParse(row.payload, null))
     .filter(Boolean);
-  const activeStoreNames = getActiveStoreNames(db, auth.companyId);
-  return NextResponse.json({ items: filterItemsByActiveStore(items, activeStoreNames) });
+  const manageableStoreNames = getManageableStoreNames(db, auth);
+  return NextResponse.json({ items: filterItemsByManageableStore(items, manageableStoreNames) });
 }
 
 export async function POST(req: NextRequest) {
@@ -113,27 +166,30 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const db = getDb();
   ensureStandardQuotaItemsTable(db);
-  const activeStoreNames = getActiveStoreNames(db, auth.companyId);
-  const items = filterItemsByActiveStore(
+  const manageableStoreNames = getManageableStoreNames(db, auth);
+  const items = filterItemsByManageableStore(
     Array.isArray(body?.items) ? body.items.map(normalizeQuotaPayload) : [],
-    activeStoreNames,
+    manageableStoreNames,
   );
 
   const tx = (db as any).transaction(() => {
     const activeIds = items.map((item: any) => String(item.id));
+    const manageableStores = Array.from(manageableStoreNames);
+    const manageableStorePlaceholders = manageableStores.map(() => "?").join(",");
+    if (manageableStores.length === 0) return;
     if (activeIds.length > 0) {
       const placeholders = activeIds.map(() => "?").join(",");
       db.prepare(`
         UPDATE standard_quota_items
         SET deleted_at = datetime('now'), updated_at = datetime('now')
-        WHERE company_id = ? AND quota_item_id NOT IN (${placeholders}) AND deleted_at IS NULL
-      `).run(auth.companyId, ...activeIds);
+        WHERE company_id = ? AND quota_item_id NOT IN (${placeholders}) AND scope IN (${manageableStorePlaceholders}) AND deleted_at IS NULL
+      `).run(auth.companyId, ...activeIds, ...manageableStores);
     } else {
       db.prepare(`
         UPDATE standard_quota_items
         SET deleted_at = datetime('now'), updated_at = datetime('now')
-        WHERE company_id = ? AND deleted_at IS NULL
-      `).run(auth.companyId);
+        WHERE company_id = ? AND scope IN (${manageableStorePlaceholders}) AND deleted_at IS NULL
+      `).run(auth.companyId, ...manageableStores);
     }
 
     const upsert = db.prepare(`

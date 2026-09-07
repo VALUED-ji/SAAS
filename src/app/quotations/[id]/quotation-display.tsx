@@ -5,7 +5,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { X } from "lucide-react";
+import { Hammer, Layers, X } from "lucide-react";
 import SystemSelect from "@/components/ui/SystemSelect";
 import {
   DictionaryOption,
@@ -13,11 +13,39 @@ import {
   formatQuoteAmount,
 } from "./quotation-shared";
 export function NumberField({ label, suffix, value, onChange, readOnly }: { label: string; suffix: string; value: number; onChange: (value: number) => void; readOnly?: boolean }) {
+  const [textValue, setTextValue] = useState(String(value || 0));
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (focused) return;
+    setTextValue(String(value || 0));
+  }, [focused, value]);
+
   return (
     <label className="block text-sm">
       <span className="mb-1 block font-medium text-surface-700">{label}</span>
       <div className="relative">
-        <input type="number" value={value} readOnly={readOnly} onChange={(event) => onChange(Number(event.target.value || 0))} className="input-field w-full pr-10 read-only:cursor-default" />
+        <input
+          type="text"
+          inputMode="decimal"
+          value={focused && value === 0 && textValue === "0" ? "" : textValue}
+          readOnly={readOnly}
+          onFocus={() => {
+            setFocused(true);
+            if (value === 0) setTextValue("");
+          }}
+          onBlur={() => {
+            setFocused(false);
+            if (!textValue) setTextValue("0");
+          }}
+          onChange={(event) => {
+            const nextValue = event.target.value;
+            if (!/^\d*\.?\d*$/.test(nextValue)) return;
+            setTextValue(nextValue);
+            onChange(Number(nextValue || 0));
+          }}
+          className="input-field w-full pr-10 read-only:cursor-default"
+        />
         <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-surface-400">{suffix}</span>
       </div>
     </label>
@@ -52,6 +80,102 @@ export function CostCompositionBlock({ title, rows, emptyText }: { title: string
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function MaterialCategoryPanel({
+  options,
+  value,
+  onChange,
+}: {
+  options: DictionaryOption[];
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const groups = useMemo(() => {
+    const parentRows = new Map<string, DictionaryOption>();
+    const childRows = new Map<string, DictionaryOption[]>();
+    const order: string[] = [];
+
+    options.forEach((option) => {
+      const parentName = option.parentName?.trim();
+      const groupName = parentName || option.name.trim() || "未分类材料";
+      if (!order.includes(groupName)) order.push(groupName);
+      if (parentName) {
+        childRows.set(groupName, [...(childRows.get(groupName) || []), option]);
+      } else {
+        parentRows.set(groupName, option);
+      }
+    });
+
+    return order.map((name) => {
+      const children = childRows.get(name) || [];
+      const parentOption = parentRows.get(name);
+      return {
+        name,
+        parentOption,
+        children: children.length > 0 ? children : parentOption ? [parentOption] : [],
+      };
+    });
+  }, [options]);
+
+  const selectedOption = useMemo(() => options.find((option) => option.id === value), [options, value]);
+  const selectedParentName = selectedOption ? (selectedOption.parentName?.trim() || selectedOption.name.trim()) : "";
+  const [parentName, setParentName] = useState("");
+
+  useEffect(() => {
+    setParentName(selectedParentName);
+  }, [selectedParentName]);
+
+  const activeGroup = groups.find((group) => group.name === parentName);
+  const childOptions = activeGroup?.children.filter((option) => option.parentName?.trim()) || [];
+  const childValue = selectedOption?.parentName ? selectedOption.id : "";
+
+  return (
+    <div className="grid grid-cols-2 gap-3">
+        <label className="block">
+          <span className="mb-1.5 block text-sm font-semibold text-surface-700">一级分类</span>
+          <SystemSelect
+            value={parentName}
+            onChange={(event) => {
+              const nextParentName = event.target.value;
+              setParentName(nextParentName);
+              const nextGroup = groups.find((group) => group.name === nextParentName);
+              onChange(nextGroup?.parentOption?.id || "");
+            }}
+            className="input-field h-10 w-full py-0"
+            menuClassName="quote-system-select-menu"
+            optionClassName="quote-system-select-option"
+          >
+            <option value="">未分类材料</option>
+            {groups.map((group) => <option key={group.name} value={group.name}>{group.name}</option>)}
+          </SystemSelect>
+        </label>
+        <label className="block">
+          <div className="mb-1.5 flex items-center justify-between gap-3">
+            <span className="block text-sm font-semibold text-surface-700">二级分类</span>
+            <span className="text-xs text-surface-400">可选</span>
+          </div>
+          <SystemSelect
+            value={childValue}
+            onChange={(event) => {
+              const nextChildId = event.target.value;
+              if (nextChildId) {
+                onChange(nextChildId);
+                return;
+              }
+              onChange(activeGroup?.parentOption?.id || "");
+            }}
+            className="input-field h-10 w-full py-0"
+            menuClassName="quote-system-select-menu"
+            optionClassName="quote-system-select-option"
+            disabled={!activeGroup || childOptions.length === 0}
+          >
+            <option value="">{activeGroup ? "不选择二级分类" : "请先选择一级分类"}</option>
+            {childOptions.map((option) => <option key={option.id} value={option.id}>{option.name.replace(`${option.parentName || ""} / `, "")}</option>)}
+          </SystemSelect>
+        </label>
     </div>
   );
 }
@@ -112,10 +236,10 @@ export function AttributionDialog({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-[520px] overflow-hidden rounded-[18px] border border-surface-200 bg-white shadow-[0_24px_60px_rgba(15,23,42,0.18)]"
+        className="w-full max-w-[720px] overflow-hidden rounded-xl border border-surface-200 bg-white shadow-[0_24px_60px_rgba(15,23,42,0.18)]"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-4 border-b border-surface-100 px-5 py-4">
+        <div className="flex items-start justify-between gap-4 border-b border-surface-100 bg-white px-5 py-4">
           <div className="min-w-0">
             <div className="text-base font-semibold text-surface-900">设置费用归属</div>
             <div className="mt-1 truncate text-sm text-surface-500">{titleText}</div>
@@ -129,38 +253,52 @@ export function AttributionDialog({
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div className="space-y-4 px-5 py-5">
-          <div className="rounded-xl border border-surface-100 bg-surface-50/70 px-4 py-3 text-sm text-surface-600">
-            费用构成只用于汇总分析：人工金额按工种统计，材料金额按材料分类统计；综合费用不参与这里的归属。
+        <div className="space-y-5 bg-white px-5 py-5">
+          <div className="rounded-lg bg-surface-50 px-4 py-3 text-sm leading-6 text-surface-600">
+            费用构成用于汇总分析：人工金额按工种统计，材料金额按材料分类统计；综合费用不参与这里的归属。
           </div>
-          <label className="block">
-            <span className="mb-1.5 block text-sm font-semibold text-surface-700">工种</span>
-            <SystemSelect
-              value={workTypeId}
-              onChange={(event) => setWorkTypeId(event.target.value)}
-              className="input-field h-11 w-full py-0"
-              menuClassName="quote-system-select-menu"
-              optionClassName="quote-system-select-option"
-            >
-              <option value="">未指定工种</option>
-              {availableWorkTypes.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}
-            </SystemSelect>
-          </label>
-          <label className="block">
-            <span className="mb-1.5 block text-sm font-semibold text-surface-700">材料分类</span>
-            <SystemSelect
+          <div>
+            <div className="mb-3 flex items-center gap-3">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary-50 text-primary-600">
+                <Hammer className="h-4 w-4" />
+              </div>
+              <div>
+                <div className="text-sm font-semibold text-surface-900">人工归属</div>
+                <div className="mt-1 text-xs text-surface-500">用于人工金额按工种汇总。</div>
+              </div>
+            </div>
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-semibold text-surface-700">工种</span>
+              <SystemSelect
+                value={workTypeId}
+                onChange={(event) => setWorkTypeId(event.target.value)}
+                className="input-field h-10 w-full py-0"
+                menuClassName="quote-system-select-menu"
+                optionClassName="quote-system-select-option"
+              >
+                <option value="">未指定工种</option>
+                {availableWorkTypes.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}
+              </SystemSelect>
+            </label>
+          </div>
+          <div className="border-t border-surface-100 pt-5">
+            <div className="mb-3 flex items-center gap-3">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
+                <Layers className="h-4 w-4" />
+              </div>
+              <div>
+                <div className="text-sm font-semibold text-surface-900">材料归属</div>
+                <div className="mt-1 text-xs text-surface-500">一级可直接保存，二级用于更细统计。</div>
+              </div>
+            </div>
+            <MaterialCategoryPanel
               value={materialCategoryId}
-              onChange={(event) => setMaterialCategoryId(event.target.value)}
-              className="input-field h-11 w-full py-0"
-              menuClassName="quote-system-select-menu"
-              optionClassName="quote-system-select-option"
-            >
-              <option value="">未分类材料</option>
-              {availableMaterialCategories.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}
-            </SystemSelect>
-          </label>
+              onChange={setMaterialCategoryId}
+              options={availableMaterialCategories}
+            />
+          </div>
         </div>
-        <div className="flex items-center justify-end gap-2 border-t border-surface-100 bg-surface-50/70 px-5 py-4">
+        <div className="flex items-center justify-end gap-2 border-t border-surface-100 bg-white px-5 py-4">
           <button type="button" onClick={onClose} className="btn-secondary h-10 px-4">取消</button>
           <button type="button" onClick={() => onSave(workTypeId, materialCategoryId)} className="btn-primary h-10 px-4">保存</button>
         </div>
@@ -169,4 +307,3 @@ export function AttributionDialog({
     document.body,
   );
 }
-

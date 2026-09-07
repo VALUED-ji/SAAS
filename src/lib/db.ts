@@ -382,6 +382,8 @@ CREATE TABLE IF NOT EXISTS quotation_items (
   fee_calc_method TEXT,
   fee_calc_base TEXT,
   fee_rate REAL,
+  quota_source_id TEXT,
+  quota_source_type TEXT,
   sort_order INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now'))
 );
@@ -805,6 +807,34 @@ CREATE TABLE IF NOT EXISTS operation_logs (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS quotation_change_logs (
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES companies(id),
+  quotation_id TEXT NOT NULL REFERENCES quotations(id),
+  user_id TEXT REFERENCES users(id),
+  user_name TEXT,
+  action TEXT NOT NULL,
+  summary TEXT,
+  change_count INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS quotation_change_log_items (
+  id TEXT PRIMARY KEY,
+  log_id TEXT NOT NULL REFERENCES quotation_change_logs(id),
+  quotation_id TEXT NOT NULL REFERENCES quotations(id),
+  quotation_item_id TEXT,
+  item_name TEXT,
+  space TEXT,
+  category TEXT,
+  change_type TEXT NOT NULL,
+  field_key TEXT,
+  field_label TEXT,
+  old_value TEXT,
+  new_value TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS payroll_records (
   id TEXT PRIMARY KEY,
   company_id TEXT NOT NULL REFERENCES companies(id),
@@ -867,6 +897,10 @@ CREATE INDEX IF NOT EXISTS idx_quotation_receipt_todos_designer ON quotation_rec
 CREATE INDEX IF NOT EXISTS idx_quotation_receipt_todos_quotation ON quotation_receipt_todos(quotation_id, designer_id, status);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_user ON operation_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_entity ON operation_logs(entity, entity_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_quotation_change_logs_company ON quotation_change_logs(company_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_quotation_change_logs_quotation ON quotation_change_logs(quotation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_quotation_change_log_items_log ON quotation_change_log_items(log_id);
+CREATE INDEX IF NOT EXISTS idx_quotation_change_log_items_quotation ON quotation_change_log_items(quotation_id, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_branch_settings_org ON branch_settings(org_unit_id);
 `;
 
@@ -948,6 +982,8 @@ function ensureDatabaseSchema(database: Database.Database): void {
   ensureColumn(database, "quotation_items", "fee_calc_method", "TEXT");
   ensureColumn(database, "quotation_items", "fee_calc_base", "TEXT");
   ensureColumn(database, "quotation_items", "fee_rate", "REAL");
+  ensureColumn(database, "quotation_items", "quota_source_id", "TEXT");
+  ensureColumn(database, "quotation_items", "quota_source_type", "TEXT");
   ensureColumn(database, "custom_quota_items", "work_type_id", "TEXT");
   ensureColumn(database, "custom_quota_items", "work_type_name", "TEXT");
   ensureColumn(database, "custom_quota_items", "material_category_id", "TEXT");

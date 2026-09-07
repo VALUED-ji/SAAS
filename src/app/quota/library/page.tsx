@@ -156,13 +156,36 @@ export default function QuotaLibraryPage() {
     return store && isOrgActive(store) ? store : null;
   }, [orgUnits, user?.org_unit_id]);
   const activeStoreScopeOptions = useMemo(() => {
+    const activeUnits = orgUnits.filter(isOrgActive);
+    const unitMap = new Map(activeUnits.map((unit) => [unit.id, unit]));
+    const getAncestorIds = (unit: OrgUnit) => {
+      const ids: string[] = [];
+      let current = unit.parent_id ? unitMap.get(unit.parent_id) : undefined;
+      let guard = 0;
+      while (current && guard < 30) {
+        ids.push(current.id);
+        current = current.parent_id ? unitMap.get(current.parent_id) : undefined;
+        guard += 1;
+      }
+      return ids;
+    };
+    const currentOrgUnitId = String(user?.org_unit_id || "").trim();
+    const currentOrg = currentOrgUnitId ? unitMap.get(currentOrgUnitId) : null;
+    const stores = activeUnits.filter((unit) => unit.type === "store");
+    const scopedStores = !currentOrg
+      ? stores
+      : currentOrg.type === "store"
+        ? stores.filter((unit) => unit.id === currentOrg.id)
+        : currentOrg.type === "company" || currentOrg.type === "region" || currentOrg.type === "group"
+          ? stores.filter((unit) => getAncestorIds(unit).includes(currentOrg.id))
+          : stores.filter((unit) => getAncestorIds(currentOrg).includes(unit.id));
     const scopes = new Set<string>();
-    orgUnits.filter((unit) => unit.type === "store" && isOrgActive(unit)).forEach((unit) => {
+    scopedStores.forEach((unit) => {
       if (unit.name?.trim()) scopes.add(unit.name.trim());
     });
     if (orgUnitsLoaded && orgUnits.length === 0 && scopes.size === 0) FALLBACK_STORE_SCOPES.forEach((scope) => scopes.add(scope));
     return Array.from(scopes).filter((scope) => !isDisallowedQuotaScope(scope));
-  }, [orgUnits, orgUnitsLoaded]);
+  }, [orgUnits, orgUnitsLoaded, user?.org_unit_id]);
   const storeScopeOptions = useMemo(() => {
     const scopes = new Set<string>(activeStoreScopeOptions);
     return Array.from(scopes).filter((scope) => !isDisallowedQuotaScope(scope));
@@ -186,16 +209,13 @@ export default function QuotaLibraryPage() {
         const serverItems = Array.isArray(data?.items)
           ? data.items.map(normalizeQuotaItem).filter((item: QuotaItem | null): item is QuotaItem => Boolean(item))
           : [];
-        const loadedItems = serverItems.length > 0 ? serverItems : localItems;
+        const loadedItems = serverItems;
         if (cancelled) return;
         if (recoveredItems.length > 0) {
           window.localStorage.setItem(QUOTA_LIBRARY_STORAGE_KEY, JSON.stringify(localItems));
         }
         setQuotaItems(loadedItems);
         setQuotaItemsLoaded(true);
-        if (serverItems.length === 0 && localItems.length > 0) {
-          saveQuotaItemsToServer(localItems);
-        }
       } catch {
         if (cancelled) return;
         if (recoveredItems.length > 0) {
@@ -251,8 +271,39 @@ export default function QuotaLibraryPage() {
     storeScopeOptions,
   ), [quotaItems, storeScopeOptions]);
   const getDefaultCreateScope = () => currentUserStore?.name || storeFilterOptions[0] || "";
+  const validateCustomQuotaForPromote = (item: CustomQuotaItem, targetScope: string) => {
+    if (isDisallowedQuotaScope(targetScope)) {
+      window.alert("该自定义项目缺少所属门店，无法转正为标准定额");
+      return false;
+    }
+    if (!activeStoreScopeOptions.includes(targetScope)) {
+      window.alert("该门店已停用或不在当前账号可管理范围内，不能转正为标准定额");
+      return false;
+    }
+    if (!item.name.trim()) {
+      window.alert("请填写项目名称后再转正");
+      return false;
+    }
+    if (!item.unit.trim()) {
+      window.alert("请填写单位后再转正");
+      return false;
+    }
+    const laborPrice = Number(item.laborPrice || 0);
+    const materialPrice = Number(item.materialPrice || 0);
+    if (!Number.isFinite(laborPrice) || laborPrice < 0) {
+      window.alert("人工单价不能为负数");
+      return false;
+    }
+    if (!Number.isFinite(materialPrice) || materialPrice < 0) {
+      window.alert("材料单价不能为负数");
+      return false;
+    }
+    return true;
+  };
   const executePromoteCustomQuotaItem = async (item: CustomQuotaItem, targetScope: string) => {
     const code = makeCodeForScope(targetScope);
+    const laborPrice = Number(item.laborPrice || 0);
+    const materialPrice = Number(item.materialPrice || 0);
     await requestCustomQuotaLibrary("", {
       method: "POST",
       body: JSON.stringify({ action: "promote", id: item.id, promotedQuotaCode: code }),
@@ -261,20 +312,20 @@ export default function QuotaLibraryPage() {
       id: `quota-promoted-${item.id}-${Date.now()}`,
       code,
       scope: targetScope,
-      category: item.category || "未分类",
+      category: item.category.trim() || "未分类",
       workTypeId: item.workTypeId || "",
       workTypeName: item.workTypeName || "",
       materialCategoryId: item.materialCategoryId || "",
       materialCategoryName: item.materialCategoryName || "",
-      name: item.name,
-      constructionDescription: item.constructionDescription,
-      unit: item.unit,
-      laborPrice: Number(item.laborPrice || 0),
-      materialPrice: Number(item.materialPrice || 0),
+      name: item.name.trim(),
+      constructionDescription: item.constructionDescription.trim(),
+      unit: item.unit.trim(),
+      laborPrice,
+      materialPrice,
       internalLaborCost: 0,
       internalMaterialCost: 0,
       costLossRate: 0,
-      totalPrice: Number(item.totalPrice || 0) || Number(item.laborPrice || 0) + Number(item.materialPrice || 0),
+      totalPrice: laborPrice + materialPrice,
       isSpecialPrice: Boolean(item.isSpecialPrice),
       status: "enabled",
       updatedAt: todayText(),
@@ -285,15 +336,17 @@ export default function QuotaLibraryPage() {
 
   const promoteCustomQuotaItem = async (item: CustomQuotaItem) => {
     const targetScope = item.storeName?.trim() || item.scope?.trim() || currentUserStore?.name || storeFilterOptions[0] || "";
-    if (isDisallowedQuotaScope(targetScope)) {
-      window.alert("该自定义项目缺少所属门店，无法转正为标准定额");
+    if (!validateCustomQuotaForPromote(item, targetScope)) {
       return;
     }
+    const nextCategory = item.category.trim() || "未分类";
+    const nextName = item.name.trim();
+    const nextUnit = item.unit.trim();
     const duplicate = quotaItems.find((quota) =>
       quota.scope === targetScope &&
-      quota.category === item.category &&
-      quota.name === item.name &&
-      quota.unit === item.unit
+      quota.category === nextCategory &&
+      quota.name === nextName &&
+      quota.unit === nextUnit
     );
     return new Promise<void>((resolve, reject) => {
       setPromoteConfirm({
@@ -696,12 +749,12 @@ export default function QuotaLibraryPage() {
                       aria-label={`选择定额${item.name}`}
                     />
                   </td>
-                  <td className="quota-code-cell px-3 py-3 text-center font-mono text-xs font-semibold text-surface-800">{item.code}</td>
-                  <td className="px-3 py-3 text-center text-surface-700">{item.category}</td>
+	                  <td className="quota-code-cell px-3 py-3 text-center">{item.code}</td>
+	                  <td className="quota-category-cell px-3 py-3 text-center">{item.category}</td>
                   <td className="quota-primary-cell px-3 py-3">
                     <p className="quota-item-name">{item.name}</p>
                   </td>
-                  <td className="px-3 py-3 text-center text-surface-700">{item.unit}</td>
+                  <td className="quota-unit-cell px-3 py-3 text-center text-surface-700">{item.unit}</td>
                   <td className="quota-money-cell px-3 py-3 text-center tabular-nums text-surface-700">{formatAmount(item.laborPrice)}</td>
                   <td className="quota-money-cell px-3 py-3 text-center tabular-nums text-surface-700">{formatAmount(item.materialPrice)}</td>
                   <td className="quota-money-cell quota-total-price relative px-3 py-3 text-center font-semibold tabular-nums text-red-600">
@@ -715,7 +768,7 @@ export default function QuotaLibraryPage() {
                   <td className="quota-description-cell px-3 py-3 text-left text-surface-700">
                     <p className="line-clamp-2 leading-5" title={item.constructionDescription || undefined}>{item.constructionDescription || "-"}</p>
                   </td>
-                  <td className="px-3 py-3 text-center text-surface-700">{item.scope || DEFAULT_QUOTA_SCOPE}</td>
+                  <td className="quota-scope-cell px-3 py-3 text-center text-surface-700">{item.scope || DEFAULT_QUOTA_SCOPE}</td>
                   <td className="px-3 py-3 text-center">
                     <span className={item.status === "enabled" ? "quota-status-tag quota-status-tag-enabled bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700" : "quota-status-tag quota-status-tag-disabled bg-surface-100 px-2 py-1 text-xs font-semibold text-surface-500"}>
                       {item.status === "enabled" ? "启用" : "停用"}

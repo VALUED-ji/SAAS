@@ -56,6 +56,7 @@ export type QuotaTemplateOption = {
   spaces: QuotaTemplateSpace[];
   comprehensiveFees: QuotaTemplateComprehensiveFee[];
   appendixNote?: string;
+  budgetCompilationHtml?: string;
 };
 
 export function formatRecordAmount(value: number) {
@@ -257,6 +258,7 @@ export function normalizeQuotaTemplate(value: any): QuotaTemplateOption | null {
     spaces,
     comprehensiveFees,
     appendixNote: String(value.appendixNote || value.quotationNote || "").trim(),
+    budgetCompilationHtml: String(value.budgetCompilationHtml || value.budgetCompilation || "").trim(),
   };
 }
 

@@ -371,6 +371,10 @@ export interface QuotationData {
   updated_at?: string | null;
   deleted_at?: string | null;
   item_count?: number;
+  latest_change_at?: string | null;
+  latest_change_user_name?: string | null;
+  latest_change_summary?: string | null;
+  latest_change_count?: number;
 }
 
 export function useQuotations() {

@@ -16,6 +16,7 @@ import { calculatePackageQuotePrice, formatPricingAmount, toPricingAmount } from
 import { getAuthContext, hasPermission } from "@/lib/security/authorization";
 import { ensureQuotationSchema } from "@/lib/quotationSchema";
 import { ensureProjectCostControlSchema } from "@/lib/projectCostControl";
+import { ensureQuotationChangeLogSchema, getLatestQuotationChangeSummary } from "@/lib/quotationChangeLogs";
 
 function ensureQuotationColumns(db: any) {
   ensureQuotationSchema(db);
@@ -64,6 +65,11 @@ function ensureQuotationReceiptTodoTable(db: any) {
     );
     CREATE INDEX IF NOT EXISTS idx_quotation_receipt_todos_quotation ON quotation_receipt_todos(quotation_id, designer_id, status);
   `);
+}
+
+function tableExists(db: any, tableName: string) {
+  const row = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1").get(tableName) as any;
+  return Boolean(row?.name);
 }
 
 function makeId(prefix: string) {
@@ -475,6 +481,7 @@ export async function GET(req: NextRequest) {
   ensureQuotationColumns(db);
   ensureCustomerManualDesignerColumn(db);
   ensureQuotationReceiptTodoTable(db);
+  ensureQuotationChangeLogSchema(db);
   const url = new URL(req.url);
   const deletedOnly = url.searchParams.get("deleted") === "1";
   const customerId = String(url.searchParams.get("customer_id") || url.searchParams.get("customerId") || "").trim();
@@ -587,6 +594,30 @@ export async function GET(req: NextRequest) {
     GROUP BY quotation_id
   `).all(...quotationIds) as any[];
   const receiptCountByQuotation = new Map(receiptRows.map((row: any) => [String(row.quotation_id || ""), Number(row.count || 0)]));
+  const latestChangeByQuotation = getLatestQuotationChangeSummary(db, quotationIds);
+  const settingsByQuotation = new Map<string, Record<string, any>>();
+  list.forEach((quotation) => {
+    settingsByQuotation.set(String(quotation.id || ""), parseQuotationSettings(quotation.settings));
+  });
+  const templateIds = uniqueValues(
+    Array.from(settingsByQuotation.values()).map((settings) => String(settings.quotaTemplateId || "").trim()).filter(Boolean),
+  );
+  const templateNameById = new Map<string, string>();
+  if (templateIds.length > 0 && tableExists(db, "quota_templates")) {
+    const templatePlaceholders = templateIds.map(() => "?").join(",");
+    const templateRows = db.prepare(`
+      SELECT template_id, name
+      FROM quota_templates
+      WHERE company_id = ?
+        AND template_id IN (${templatePlaceholders})
+        AND deleted_at IS NULL
+    `).all(auth.companyId, ...templateIds) as any[];
+    templateRows.forEach((row) => {
+      const templateId = String(row.template_id || "").trim();
+      const templateName = String(row.name || "").trim();
+      if (templateId && templateName) templateNameById.set(templateId, templateName);
+    });
+  }
 
   const signedQuotationCountById = new Map<string, number>();
   if (!summaryOnly) {
@@ -610,17 +641,28 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  const normalizedList = list.map((quotation) => ({
-    ...quotation,
-    designer_name: designerByCustomer.get(String(quotation.customer_id || "")) || "",
-    customer_created_from_quotation: quotationCreatedCustomerIds.has(String(quotation.customer_id || "")) ? 1 : 0,
-    signed_contract_count: signedByCustomer.get(String(quotation.customer_id || ""))?.count || 0,
-    signed_contract_amount: signedByCustomer.get(String(quotation.customer_id || ""))?.amount || 0,
-    signed_quotation_contract_count: signedQuotationCountById.get(String(quotation.id || "")) || 0,
-    quotation_receipt_todo_count: receiptCountByQuotation.get(String(quotation.id || "")) || 0,
-    item_count: itemsByQuotation.get(String(quotation.id || ""))?.length || 0,
-    ...calculateQuotationRecordCostSummary(itemsByQuotation.get(String(quotation.id || "")) || [], quotation.settings),
-  }));
+  const normalizedList = list.map((quotation) => {
+    const settings = settingsByQuotation.get(String(quotation.id || "")) || {};
+    const quotaTemplateId = String(settings.quotaTemplateId || "").trim();
+    const quotaTemplateName = String(settings.quotaTemplateName || templateNameById.get(quotaTemplateId) || "").trim();
+    return {
+      ...quotation,
+      quota_template_id: quotaTemplateId,
+      quota_template_name: quotaTemplateName,
+      designer_name: designerByCustomer.get(String(quotation.customer_id || "")) || "",
+      customer_created_from_quotation: quotationCreatedCustomerIds.has(String(quotation.customer_id || "")) ? 1 : 0,
+      signed_contract_count: signedByCustomer.get(String(quotation.customer_id || ""))?.count || 0,
+      signed_contract_amount: signedByCustomer.get(String(quotation.customer_id || ""))?.amount || 0,
+      signed_quotation_contract_count: signedQuotationCountById.get(String(quotation.id || "")) || 0,
+      quotation_receipt_todo_count: receiptCountByQuotation.get(String(quotation.id || "")) || 0,
+      latest_change_at: latestChangeByQuotation.get(String(quotation.id || ""))?.created_at || null,
+      latest_change_user_name: latestChangeByQuotation.get(String(quotation.id || ""))?.user_name || null,
+      latest_change_summary: latestChangeByQuotation.get(String(quotation.id || ""))?.summary || null,
+      latest_change_count: latestChangeByQuotation.get(String(quotation.id || ""))?.change_count || 0,
+      item_count: itemsByQuotation.get(String(quotation.id || ""))?.length || 0,
+      ...calculateQuotationRecordCostSummary(itemsByQuotation.get(String(quotation.id || "")) || [], quotation.settings),
+    };
+  });
   return NextResponse.json(normalizedList);
 }
 
@@ -735,6 +777,7 @@ export async function POST(req: NextRequest) {
     const templateSpaces = getTemplateSpaceNames(body.template);
     const templateCategories = orderQuoteCategories(pricedTemplateItems.map((item) => String(item.category || "").trim()));
     const templateAppendixNote = String(body.template?.appendixNote || body.template?.quotationNote || "").trim();
+    const templateBudgetCompilationHtml = String(body.template?.budgetCompilationHtml || body.template?.budgetCompilation || "").trim();
     const customerVisibleNote = String(body.customer_visible_note || "").trim();
     const settings = {
 	      managementFeeRate: 0,
@@ -749,8 +792,11 @@ export async function POST(req: NextRequest) {
 	      excludeSpecificDiscountAmount: 0,
 	      excludeSpecialDiscountItems: false,
 	      excludeLaborOnlyDiscountItems: false,
-	      warrantyMonths: Number(body.warrantyMonths ?? 24),
+      warrantyMonths: Number(body.warrantyMonths ?? 24),
+      quotaTemplateId: String(body.template?.id || "").trim(),
+      quotaTemplateName: String(body.template?.name || "").trim(),
       appendixNote: templateAppendixNote,
+      budgetCompilationHtml: templateBudgetCompilationHtml,
       quoteSpaces: templateSpaces,
       quoteCategories: templateCategories,
       templatePricing: packagePricingItem ? {

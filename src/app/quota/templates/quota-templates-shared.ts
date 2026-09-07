@@ -173,6 +173,7 @@ export type QuotaTemplate = {
   projectGroups: TemplateProjectGroup[];
   comprehensiveFees: TemplateComprehensiveFee[];
   appendixNote: string;
+  budgetCompilationHtml: string;
   spaces: TemplateSpace[];
   updatedAt: string;
 };
@@ -935,6 +936,7 @@ export function makeEmptyTemplate(): QuotaTemplate {
     projectGroups: [],
     comprehensiveFees: makeDefaultComprehensiveFees(),
     appendixNote: "",
+    budgetCompilationHtml: "",
     spaces: [],
     updatedAt: todayText(),
   };
@@ -959,6 +961,7 @@ export function normalizeTemplate(value: any, index: number): QuotaTemplate | nu
     projectGroups: normalizeTemplateProjectGroups(value.projectGroups, spaces),
     comprehensiveFees: normalizeComprehensiveFees(value.comprehensiveFees, !hasComprehensiveFees),
     appendixNote: String(value.appendixNote || value.quotationNote || "").trim(),
+    budgetCompilationHtml: String(value.budgetCompilationHtml || value.budgetCompilation || "").trim(),
     spaces,
     updatedAt: String(value.updatedAt || todayText()),
   };
@@ -993,6 +996,7 @@ export function getTemplateAutoSavePayload(template: QuotaTemplate | null, mode:
       projectGroups: template.projectGroups,
       comprehensiveFees: template.comprehensiveFees,
       appendixNote: template.appendixNote,
+      budgetCompilationHtml: template.budgetCompilationHtml,
       spaces: template.spaces,
     });
   }
@@ -1010,6 +1014,7 @@ export function hasTemplateDraftContent(template: QuotaTemplate) {
     || template.projectGroups.some((group) => group.name.trim())
     || hasComprehensiveFeeContent
     || template.appendixNote.trim()
+    || template.budgetCompilationHtml.trim()
     || template.spaces.some((space) => space.name.trim() || space.quotaItems.length > 0)
   );
 }

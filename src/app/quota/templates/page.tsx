@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent as ReactChangeEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { Building2, ChevronDown, Copy, GripVertical, LayoutTemplate, Loader2, Pencil, Plus, Power, Search, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent as ReactChangeEvent, type ClipboardEvent as ReactClipboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { AlignCenter, AlignLeft, Bold, Building2, ChevronDown, Copy, Eraser, GripVertical, Italic, LayoutTemplate, List, ListOrdered, Loader2, Pencil, Plus, Power, Search, SlidersHorizontal, Trash2, Underline, X } from "lucide-react";
 import DataPagination, { useDataPagination } from "@/components/ui/DataPagination";
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
 import { useAuth } from "@/lib/auth";
@@ -16,6 +16,9 @@ import { formatAlphaSequence } from "@/lib/quotationSequence";
 import SystemSelect from "@/components/ui/SystemSelect";
 import {
   getQuotaTemplateApplicabilityTags,
+  getQuotaTemplateScopeLabel,
+  getQuotaTemplateScopePath,
+  type QuotaTemplateAutoScope,
 } from "@/lib/quotaTemplateScope";
 
 
@@ -125,6 +128,7 @@ export default function QuotaTemplatesPage() {
   const [activeQuotaScope, setActiveQuotaScope] = useState<TemplateSpaceQuotaScope>("foundation");
   const [quotaLibraryItems, setQuotaLibraryItems] = useState<QuotaLibraryItem[]>([]);
   const [constructionTemplateOptions, setConstructionTemplateOptions] = useState<ConstructionTemplateOption[]>([]);
+  const [templateScopeOptions, setTemplateScopeOptions] = useState<Array<{ id: string; name: string; path: string; type: string }>>([]);
   const [constructionTemplateLoading, setConstructionTemplateLoading] = useState(false);
   const [constructionTemplateError, setConstructionTemplateError] = useState("");
   const [constructionTemplatePickerOpen, setConstructionTemplatePickerOpen] = useState(false);
@@ -161,6 +165,7 @@ export default function QuotaTemplatesPage() {
   const spaceAutoSaveTimerRef = useRef<number | null>(null);
   const spaceAutoSaveRunRef = useRef(0);
   const lastSpaceAutoSavePayloadRef = useRef("");
+  const budgetCompilationEditorRef = useRef<HTMLDivElement | null>(null);
 
   const saveTemplatesToServer = useCallback((nextTemplates: QuotaTemplate[]) => {
     fetch("/api/quota/templates", {
@@ -170,6 +175,106 @@ export default function QuotaTemplatesPage() {
     }).catch(() => {
       // 本地缓存保底，避免网络瞬断时编辑内容丢失。
     });
+  }, []);
+
+  const makeGlobalTemplateScope = useCallback((source?: QuotaTemplateAutoScope | null): QuotaTemplateAutoScope => ({
+    scopeType: "global",
+    branchOrgUnitId: "",
+    branchOrgUnitName: "",
+    branchOrgUnitPath: "",
+    orgUnitId: "",
+    orgUnitName: "",
+    orgUnitPath: "",
+    orgUnitType: "",
+    companyName: source?.companyName || "",
+    createdByUserId: source?.createdByUserId || user?.id || "",
+    createdByName: source?.createdByName || currentCreatorName,
+  }), [currentCreatorName, user?.id]);
+
+  const makeBranchTemplateScope = useCallback((branchId: string, source?: QuotaTemplateAutoScope | null): QuotaTemplateAutoScope | null => {
+    const branch = templateScopeOptions.find((option) => option.id === branchId);
+    if (!branch) return null;
+    return {
+      scopeType: "branch",
+      branchOrgUnitId: branch.id,
+      branchOrgUnitName: branch.name,
+      branchOrgUnitPath: branch.path,
+      orgUnitId: branch.id,
+      orgUnitName: branch.name,
+      orgUnitPath: branch.path,
+      orgUnitType: branch.type || "company",
+      companyName: source?.companyName || "",
+      createdByUserId: source?.createdByUserId || user?.id || "",
+      createdByName: source?.createdByName || currentCreatorName,
+    };
+  }, [currentCreatorName, templateScopeOptions, user?.id]);
+
+  const normalizeEditableTemplateScope = useCallback((template: QuotaTemplate): QuotaTemplateAutoScope => {
+    if (template.autoScope?.scopeType === "branch" && template.autoScope.orgUnitId) {
+      return makeBranchTemplateScope(template.autoScope.orgUnitId, template.autoScope) || template.autoScope;
+    }
+    return makeGlobalTemplateScope(template.autoScope);
+  }, [makeBranchTemplateScope, makeGlobalTemplateScope]);
+
+  const loadTemplateScopeOptionsFallback = useCallback(async () => {
+    try {
+      const response = await fetch("/api/org", { cache: "no-store" });
+      const data = await response.json().catch(() => []);
+      if (!response.ok || !Array.isArray(data)) return;
+      const unitMap = new Map<string, any>();
+      data.forEach((unit: any) => {
+        const id = String(unit?.id || "").trim();
+        if (id) unitMap.set(id, unit);
+      });
+      const getPath = (unit: any) => {
+        const names: string[] = [];
+        let current = unit;
+        let guard = 0;
+        while (current && guard < 20) {
+          const name = String(current?.name || "").trim();
+          if (name) names.unshift(name);
+          current = current?.parent_id ? unitMap.get(String(current.parent_id)) : null;
+          guard += 1;
+        }
+        return names.join(" / ");
+      };
+      const currentOrgUnitId = String((user as any)?.org_unit_id || (user as any)?.orgUnitId || "").trim();
+      const currentOrg = currentOrgUnitId ? unitMap.get(currentOrgUnitId) : null;
+      const getAncestorIds = (unit: any) => {
+        const ids: string[] = [];
+        let current = unit?.parent_id ? unitMap.get(String(unit.parent_id)) : null;
+        let guard = 0;
+        while (current && guard < 20) {
+          const id = String(current?.id || "").trim();
+          if (id) ids.push(id);
+          current = current?.parent_id ? unitMap.get(String(current.parent_id)) : null;
+          guard += 1;
+        }
+        return ids;
+      };
+      const isBranchInUserScope = (branch: any) => {
+        if (!currentOrgUnitId || !currentOrg) return true;
+        const currentType = String(currentOrg?.type || "").trim();
+        if (currentType === "company") return String(branch?.id || "").trim() === currentOrgUnitId;
+        const branchAncestorIds = getAncestorIds(branch);
+        if (currentType === "group" || currentType === "region") {
+          return String(branch?.id || "").trim() === currentOrgUnitId || branchAncestorIds.includes(currentOrgUnitId);
+        }
+        return getAncestorIds(currentOrg).includes(String(branch?.id || "").trim());
+      };
+      const options = data
+        .filter((unit: any) => String(unit?.type || "").trim() === "company" && Number(unit?.is_active ?? 1) !== 0 && isBranchInUserScope(unit))
+        .map((unit: any) => ({
+          id: String(unit.id || "").trim(),
+          name: String(unit.name || "").trim(),
+          path: getPath(unit) || String(unit.name || "").trim(),
+          type: "company",
+        }))
+        .filter((option: { id: string; name: string; path: string; type: string }) => option.id && option.name);
+      if (options.length > 0) setTemplateScopeOptions(options);
+    } catch {
+      // 分公司范围由主接口提供；这里仅作为旧数据或热更新异常时的兜底。
+    }
   }, []);
 
   const loadConstructionTemplateOptions = useCallback(async () => {
@@ -191,6 +296,39 @@ export default function QuotaTemplatesPage() {
     }
   }, []);
 
+  const loadQuotaLibraryOptions = useCallback(async () => {
+    try {
+      const response = await fetch("/api/quota/library", { cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data?.message || "读取基装定额失败");
+      const items = Array.isArray(data?.items)
+        ? data.items
+          .map((item: any): QuotaLibraryItem | null => {
+            if (!item || typeof item !== "object") return null;
+            const laborPrice = Number(item.laborPrice || 0);
+            const materialPrice = Number(item.materialPrice || 0);
+            return {
+              id: String(item.id || ""),
+              code: String(item.code || ""),
+              category: String(item.category || ""),
+              name: String(item.name || ""),
+              constructionDescription: String(item.constructionDescription || ""),
+              unit: String(item.unit || ""),
+              laborPrice: Number.isFinite(laborPrice) ? Math.max(0, laborPrice) : 0,
+              materialPrice: Number.isFinite(materialPrice) ? Math.max(0, materialPrice) : 0,
+              totalPrice: Number.isFinite(Number(item.totalPrice)) ? Math.max(0, Number(item.totalPrice)) : Math.max(0, laborPrice + materialPrice),
+              isSpecialPrice: Boolean(item.isSpecialPrice),
+              status: String(item.status || ""),
+            };
+          })
+          .filter((item: QuotaLibraryItem | null): item is QuotaLibraryItem => Boolean(item?.id && item.name && item.status !== "disabled"))
+        : [];
+      setQuotaLibraryItems(items);
+    } catch {
+      setQuotaLibraryItems(loadQuotaLibraryItems());
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     const loadTemplates = async () => {
@@ -199,31 +337,41 @@ export default function QuotaTemplatesPage() {
         const response = await fetch("/api/quota/templates", { cache: "no-store" });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data?.message || "读取预算模板失败");
-        const serverTemplates = Array.isArray(data?.templates)
-          ? data.templates.map(normalizeTemplate).filter(Boolean) as QuotaTemplate[]
+	        const serverTemplates = Array.isArray(data?.templates)
+	          ? data.templates.map(normalizeTemplate).filter(Boolean) as QuotaTemplate[]
+	          : [];
+        const nextScopeOptions = Array.isArray(data?.scopeOptions)
+          ? data.scopeOptions
+            .map((option: any) => ({
+              id: String(option?.id || "").trim(),
+              name: String(option?.name || "").trim(),
+              path: String(option?.path || option?.name || "").trim(),
+              type: String(option?.type || "company").trim() || "company",
+            }))
+            .filter((option: { id: string; name: string; path: string; type: string }) => option.id && option.name)
           : [];
-        const loadedTemplates = serverTemplates.length > 0 ? serverTemplates : localTemplates;
-        if (cancelled) return;
-        setTemplates(loadedTemplates);
+	        const loadedTemplates = serverTemplates;
+	        if (cancelled) return;
+        setTemplateScopeOptions(nextScopeOptions);
+        if (nextScopeOptions.length === 0) void loadTemplateScopeOptionsFallback();
+	        setTemplates(loadedTemplates);
         setSelectedId(loadedTemplates[0]?.id || "");
-        setQuotaLibraryItems(loadQuotaLibraryItems());
+        void loadQuotaLibraryOptions();
         setTemplatesLoaded(true);
-        if (serverTemplates.length === 0 && localTemplates.length > 0) {
-          saveTemplatesToServer(localTemplates);
-        }
       } catch {
         if (cancelled) return;
-        setTemplates(localTemplates);
-        setSelectedId(localTemplates[0]?.id || "");
-        setQuotaLibraryItems(loadQuotaLibraryItems());
-        setTemplatesLoaded(true);
+	        setTemplates(localTemplates);
+	        setSelectedId(localTemplates[0]?.id || "");
+	        void loadQuotaLibraryOptions();
+        void loadTemplateScopeOptionsFallback();
+	        setTemplatesLoaded(true);
       }
     };
     loadTemplates();
     return () => {
       cancelled = true;
     };
-  }, [saveTemplatesToServer]);
+  }, [loadQuotaLibraryOptions, loadTemplateScopeOptionsFallback, saveTemplatesToServer]);
 
   useEffect(() => {
     loadConstructionTemplateOptions();
@@ -243,6 +391,14 @@ export default function QuotaTemplatesPage() {
     setNumberInputDrafts({});
   }, [editingTemplate?.id]);
 
+  useEffect(() => {
+    if (!budgetCompilationEditorRef.current) return;
+    const html = editingTemplate?.budgetCompilationHtml || "";
+    if (budgetCompilationEditorRef.current.innerHTML !== html) {
+      budgetCompilationEditorRef.current.innerHTML = html;
+    }
+  }, [editingTemplate?.id, editingTemplate?.budgetCompilationHtml]);
+
   const visibleTemplates = templates;
   const filteredTemplates = useMemo(() => {
     const keyword = search.trim().toLowerCase();
@@ -251,15 +407,17 @@ export default function QuotaTemplatesPage() {
       const matchesKeyword = !keyword || [
         template.name,
         template.remark,
-        template.createdByName,
-        getTemplateStatusLabel(template.status),
-        getPricingModeLabel(template.quoteConfig.mode),
-        ...applicabilityTags,
-      ].some((value) => value.toLowerCase().includes(keyword));
+	        template.createdByName,
+	        getTemplateStatusLabel(template.status),
+	        getPricingModeLabel(template.quoteConfig.mode),
+        getQuotaTemplateScopeLabel(template, templateScopeOptions as any),
+        getQuotaTemplateScopePath(template, templateScopeOptions as any),
+	        ...applicabilityTags,
+	      ].some((value) => value.toLowerCase().includes(keyword));
       const matchesPricingMode = !pricingModeFilter || template.quoteConfig.mode === pricingModeFilter;
       return matchesKeyword && matchesPricingMode;
     });
-  }, [pricingModeFilter, search, visibleTemplates]);
+  }, [pricingModeFilter, search, templateScopeOptions, visibleTemplates]);
 
   const pagination = useDataPagination(filteredTemplates, [search, pricingModeFilter].join("|"));
   const selectedTemplate = visibleTemplates.find((template) => template.id === selectedId) || filteredTemplates[0] || visibleTemplates[0];
@@ -345,6 +503,27 @@ export default function QuotaTemplatesPage() {
     };
   };
 
+  const syncBudgetCompilationHtml = () => {
+    if (!editingTemplate || !budgetCompilationEditorRef.current) return;
+    setEditingTemplate({
+      ...editingTemplate,
+      budgetCompilationHtml: budgetCompilationEditorRef.current.innerHTML,
+    });
+  };
+
+  const runBudgetCompilationCommand = (command: string, value?: string) => {
+    budgetCompilationEditorRef.current?.focus();
+    document.execCommand(command, false, value);
+    syncBudgetCompilationHtml();
+  };
+
+  const handleBudgetCompilationPaste = (event: ReactClipboardEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const text = event.clipboardData.getData("text/plain");
+    document.execCommand("insertText", false, text);
+    syncBudgetCompilationHtml();
+  };
+
   const resetCustomQuotaDraft = (hideForm = true) => {
     setCustomQuotaDraft(makeCustomQuotaDraft());
     if (hideForm) setShowCustomQuotaForm(false);
@@ -363,6 +542,7 @@ export default function QuotaTemplatesPage() {
         projectGroups: template.projectGroups,
         comprehensiveFees: template.comprehensiveFees,
         appendixNote: template.appendixNote,
+        budgetCompilationHtml: template.budgetCompilationHtml,
         spaces: template.spaces,
         updatedAt: nextUpdatedAt,
       } : item);
@@ -386,8 +566,8 @@ export default function QuotaTemplatesPage() {
   const openCreateTemplate = () => {
     const draftTemplate = loadTemplateDraftFromStorage();
     const template = draftTemplate
-      ? { ...draftTemplate, createdByName: draftTemplate.createdByName || currentCreatorName, autoScope: null }
-      : { ...makeEmptyTemplate(), createdByName: currentCreatorName, autoScope: null };
+      ? { ...draftTemplate, createdByName: draftTemplate.createdByName || currentCreatorName, autoScope: normalizeEditableTemplateScope(draftTemplate) }
+      : { ...makeEmptyTemplate(), createdByName: currentCreatorName, autoScope: makeGlobalTemplateScope() };
     setEditingMode("create");
     setEditingTemplate(template);
     setActiveSpaceId(template.spaces[0]?.id || "");
@@ -423,7 +603,7 @@ export default function QuotaTemplatesPage() {
       name,
       status: "enabled",
       createdByName: currentCreatorName,
-      autoScope: null,
+      autoScope: normalizeEditableTemplateScope(template),
       comprehensiveFees: template.comprehensiveFees.map((fee, feeIndex) => ({ ...fee, id: `fee-copy-${copySeed}-${feeIndex}` })),
       spaces: template.spaces.map((space, spaceIndex) => ({
         ...space,
@@ -1394,10 +1574,14 @@ export default function QuotaTemplatesPage() {
     setSpaceAutoSaveStatus("idle");
   };
 
-  const saveEditingTemplate = () => {
-    if (!editingTemplate) return;
-    if (!editingTemplate.name.trim()) {
-      window.alert("请填写模板名称");
+	  const saveEditingTemplate = () => {
+	    if (!editingTemplate) return;
+	    if (!editingTemplate.name.trim()) {
+	      window.alert("请填写模板名称");
+	      return;
+	    }
+    if (editingTemplate.autoScope?.scopeType === "branch" && !editingTemplate.autoScope.orgUnitId) {
+      window.alert("请选择模板适用的分公司");
       return;
     }
     const nextConstructionTemplateConfig = makeDefaultConstructionTemplateConfig({
@@ -1412,7 +1596,7 @@ export default function QuotaTemplatesPage() {
       ...editingTemplate,
       name: editingTemplate.name.trim(),
       remark: editingTemplate.remark.trim(),
-      autoScope: null,
+      autoScope: normalizeEditableTemplateScope(editingTemplate),
       constructionTemplateConfig: nextConstructionTemplateConfig.name ? nextConstructionTemplateConfig : makeDefaultConstructionTemplateConfig(),
       quoteConfig: {
         ...editingTemplate.quoteConfig,
@@ -1460,6 +1644,7 @@ export default function QuotaTemplatesPage() {
         }))
         .filter((fee) => fee.name),
       appendixNote: editingTemplate.appendixNote.trim(),
+      budgetCompilationHtml: editingTemplate.budgetCompilationHtml.trim(),
       spaces: editingTemplate.spaces
         .map((space) => ({
           ...space,
@@ -1525,24 +1710,26 @@ export default function QuotaTemplatesPage() {
 
       <section className="table-shell quota-list-shell flex min-h-0 flex-1 flex-col">
         <ThinScrollArea className="quota-list-scroll min-h-0 flex-1" scrollClassName="h-full overflow-y-auto">
-          <table className="quota-list-table w-full min-w-[1380px] table-fixed text-sm">
-            <colgroup>
-              <col className="w-[5%]" />
-              <col className="w-[22%]" />
-              <col className="w-[12%]" />
-              <col className="w-[10%]" />
-              <col className="w-[23%]" />
-              <col className="w-[10%]" />
-              <col className="w-[8%]" />
-              <col className="w-[10%]" />
+	          <table className="quota-list-table w-full min-w-[1480px] table-fixed text-sm">
+	            <colgroup>
+	              <col className="w-[5%]" />
+	              <col className="w-[20%]" />
+	              <col className="w-[11%]" />
+	              <col className="w-[12%]" />
+	              <col className="w-[9%]" />
+	              <col className="w-[21%]" />
+	              <col className="w-[10%]" />
+	              <col className="w-[8%]" />
+	              <col className="w-[10%]" />
             </colgroup>
             <thead className="bg-surface-100 text-xs font-semibold text-surface-700">
               <tr className="border-b border-surface-300">
                 <th className="px-3 py-3 text-center">序号</th>
-                <th className="px-3 py-3 text-left">模板名称</th>
-                <th className="px-3 py-3 text-center">报价模式</th>
-                <th className="px-3 py-3 text-center">创建人</th>
-                <th className="px-3 py-3 text-left">备注说明</th>
+	                <th className="px-3 py-3 text-left">模板名称</th>
+	                <th className="px-3 py-3 text-center">报价模式</th>
+	                <th className="px-3 py-3 text-center">适用范围</th>
+	                <th className="px-3 py-3 text-center">创建人</th>
+	                <th className="px-3 py-3 text-left">备注说明</th>
                 <th className="px-3 py-3 text-center">更新时间</th>
                 <th className="px-3 py-3 text-center">状态</th>
                 <th className="px-3 py-3 text-center">操作</th>
@@ -1551,7 +1738,7 @@ export default function QuotaTemplatesPage() {
             <tbody className="divide-y divide-surface-200">
               {pagination.pageItems.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="quota-template-empty-cell px-3 py-10 text-center">
+	                  <td colSpan={9} className="quota-template-empty-cell px-3 py-10 text-center">
                     <div className="quota-template-empty-state mx-auto flex max-w-sm flex-col items-center text-center">
                       <span className="quota-template-empty-icon inline-flex items-center justify-center" aria-hidden="true">
                         <LayoutTemplate className="h-6 w-6" />
@@ -1585,11 +1772,16 @@ export default function QuotaTemplatesPage() {
                     <td className="quota-template-name-cell px-3 py-3">
                       <p className="truncate font-semibold text-surface-900" title={template.name}>{template.name}</p>
                     </td>
-                    <td className="px-3 py-3 text-center text-surface-700">
-                      <span className="inline-flex min-h-6 items-center rounded-md border border-surface-200 bg-white px-2 text-xs font-semibold text-surface-700">
-                        {getPricingModeLabel(template.quoteConfig.mode) || "-"}
-                      </span>
-                    </td>
+	                    <td className="px-3 py-3 text-center text-surface-700">
+	                      <span className="inline-flex min-h-6 items-center rounded-md bg-transparent px-2 text-xs font-semibold text-surface-700">
+	                        {getPricingModeLabel(template.quoteConfig.mode) || "-"}
+	                      </span>
+	                    </td>
+	                    <td className="px-3 py-3 text-center text-surface-700">
+	                      <span className="inline-flex max-w-full items-center rounded-md bg-transparent px-2 py-1 text-xs font-medium text-surface-700" title={getQuotaTemplateScopePath(template, templateScopeOptions as any)}>
+	                        <span className="truncate">{getQuotaTemplateScopeLabel(template, templateScopeOptions as any)}</span>
+	                      </span>
+	                    </td>
                     <td className="px-3 py-3 text-center text-surface-700">
                       <span className="block truncate" title={template.createdByName || DEFAULT_TEMPLATE_CREATOR}>{template.createdByName || DEFAULT_TEMPLATE_CREATOR}</span>
                     </td>
@@ -1651,25 +1843,63 @@ export default function QuotaTemplatesPage() {
               </button>
             </div>
             <div className="quota-template-editor-body min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
-              <div className="grid gap-4 lg:grid-cols-2">
+              <div className="quota-template-top-config-grid grid items-stretch gap-4 lg:grid-cols-2">
                 <section className="quota-template-editor-section flex h-full flex-col rounded-lg border border-surface-200 bg-white">
                   <div className="border-b border-surface-200 bg-surface-100 px-4 py-2.5 text-sm font-semibold text-surface-900">基础配置</div>
                   <div className="grid gap-3 p-3">
-                    <label className="space-y-1.5">
-                      <span className="text-xs font-semibold text-surface-600">模板名称 <span className="text-red-500">*</span></span>
-                      <input value={editingTemplate.name} onChange={(event) => setEditingTemplate({ ...editingTemplate, name: event.target.value })} className="input-field" placeholder="如：番禺店标准半包模板" />
-                    </label>
-                    <label className="space-y-1.5">
-                      <span className="text-xs font-semibold text-surface-600">备注说明</span>
-                      <textarea value={editingTemplate.remark} onChange={(event) => setEditingTemplate({ ...editingTemplate, remark: event.target.value })} className="input-field min-h-16 resize-none leading-5" placeholder="填写模板适用场景、使用说明或注意事项" />
+	                    <label className="space-y-1.5">
+	                      <span className="text-xs font-semibold text-surface-600">模板名称 <span className="text-red-500">*</span></span>
+	                      <input value={editingTemplate.name} onChange={(event) => setEditingTemplate({ ...editingTemplate, name: event.target.value })} className="input-field" placeholder="如：番禺店标准半包模板" />
+	                    </label>
+	                    <div className="grid gap-3 md:grid-cols-[160px_minmax(0,1fr)]">
+	                      <label className="space-y-1.5">
+	                        <span className="text-xs font-semibold text-surface-600">适用范围</span>
+	                        <SystemSelect
+	                          value={editingTemplate.autoScope?.scopeType === "branch" ? "branch" : "global"}
+	                          onChange={(event) => {
+	                            const nextType = event.target.value;
+	                            const nextScope = nextType === "branch"
+	                              ? makeBranchTemplateScope(templateScopeOptions[0]?.id || "", editingTemplate.autoScope)
+	                              : makeGlobalTemplateScope(editingTemplate.autoScope);
+	                            if (!nextScope) return;
+	                            setEditingTemplate({ ...editingTemplate, autoScope: nextScope });
+	                          }}
+	                          className="input-field h-10 py-0"
+	                        >
+	                          <option value="global">总部通用</option>
+	                          <option value="branch" disabled={templateScopeOptions.length === 0}>指定分公司</option>
+	                        </SystemSelect>
+	                      </label>
+	                      <label className="space-y-1.5">
+	                        <span className="text-xs font-semibold text-surface-600">分公司</span>
+	                        <SystemSelect
+	                          value={editingTemplate.autoScope?.scopeType === "branch" ? editingTemplate.autoScope.orgUnitId : ""}
+	                          onChange={(event) => {
+	                            const nextScope = makeBranchTemplateScope(event.target.value, editingTemplate.autoScope);
+	                            if (!nextScope) return;
+	                            setEditingTemplate({ ...editingTemplate, autoScope: nextScope });
+	                          }}
+	                          disabled={editingTemplate.autoScope?.scopeType !== "branch" || templateScopeOptions.length === 0}
+	                          className="input-field h-10 py-0 disabled:cursor-not-allowed disabled:bg-surface-100 disabled:text-surface-400"
+	                        >
+	                          <option value="">{templateScopeOptions.length > 0 ? "选择分公司" : "暂无可选分公司"}</option>
+	                          {templateScopeOptions.map((option) => (
+	                            <option key={option.id} value={option.id}>{option.path || option.name}</option>
+	                          ))}
+	                        </SystemSelect>
+	                      </label>
+	                    </div>
+	                    <label className="space-y-1.5">
+	                      <span className="text-xs font-semibold text-surface-600">备注说明</span>
+	                      <textarea value={editingTemplate.remark} onChange={(event) => setEditingTemplate({ ...editingTemplate, remark: event.target.value })} className="input-field min-h-16 resize-none leading-5" placeholder="填写模板适用场景、使用说明或注意事项" />
                     </label>
                   </div>
                 </section>
-                <section className="quota-template-editor-section flex h-full flex-col rounded-lg border border-surface-200 bg-white">
+                <section className="quota-template-editor-section quota-template-construction-section flex h-full flex-col rounded-lg border border-surface-200 bg-white">
                   <div className="border-b border-surface-200 bg-surface-100 px-4 py-2.5 text-sm font-semibold text-surface-900">施工模板配置</div>
-                  <div className={selectedConstructionTemplateConfig.name ? "flex flex-1 items-center p-4" : "flex flex-1 items-center p-3"}>
+                  <div className={selectedConstructionTemplateConfig.name ? "quota-template-construction-body flex min-h-0 flex-1 items-stretch p-4" : "quota-template-construction-body flex min-h-0 flex-1 items-stretch p-3"}>
                     {selectedConstructionTemplateConfig.name ? (
-                      <div className="relative min-h-28 w-full rounded-lg border border-primary-100 bg-primary-50/40 px-3 py-4 text-center">
+                      <div className="quota-template-construction-card relative flex min-h-28 w-full flex-1 rounded-lg border border-primary-100 bg-primary-50/40 px-3 py-4 text-center">
                         <button
                           type="button"
                           onClick={() => {
@@ -1678,7 +1908,7 @@ export default function QuotaTemplatesPage() {
                               void loadConstructionTemplateOptions();
                             }
                           }}
-                          className="flex w-full flex-col items-center justify-center rounded-md px-10 py-2 transition hover:text-primary-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-200"
+                          className="flex min-h-full w-full flex-col items-center justify-center rounded-md px-10 py-2 transition hover:text-primary-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-200"
                           aria-label="更换施工模板"
                         >
                           <span className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-primary-100 bg-primary-50 text-primary-600">
@@ -1716,7 +1946,7 @@ export default function QuotaTemplatesPage() {
                             void loadConstructionTemplateOptions();
                           }
                         }}
-                        className="flex min-h-28 w-full flex-col items-center justify-center rounded-lg border border-dashed border-surface-300 bg-white px-3 py-4 text-center transition hover:border-primary-200 hover:bg-primary-50/40"
+                        className="quota-template-construction-card flex min-h-28 w-full flex-1 flex-col items-center justify-center rounded-lg border border-dashed border-surface-300 bg-white px-3 py-4 text-center transition hover:border-primary-200 hover:bg-primary-50/40"
                       >
                         <span className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-surface-200 bg-surface-50 text-surface-500">
                           <Building2 className="h-4 w-4" />
@@ -2062,8 +2292,8 @@ export default function QuotaTemplatesPage() {
                                   onClick={() => setActiveSpaceId(space.id)}
                                   onChange={(event) => updateSpace(space.id, { name: event.target.value })}
                                   className={isActive
-                                    ? "h-full min-w-0 flex-1 bg-transparent text-center text-xs font-semibold text-white outline-none placeholder:text-primary-100"
-                                    : "h-full min-w-0 flex-1 bg-transparent text-center text-xs font-semibold text-surface-500 outline-none placeholder:text-surface-400"
+	                                    ? "h-full min-w-0 flex-1 bg-transparent text-center text-xs font-medium text-white outline-none placeholder:text-primary-100"
+	                                    : "h-full min-w-0 flex-1 bg-transparent text-center text-xs font-medium text-surface-500 outline-none placeholder:text-surface-400"
                                   }
                                   placeholder={`空间${spaceIndex + 1}`}
                                 />
@@ -2172,8 +2402,8 @@ export default function QuotaTemplatesPage() {
                                           data-template-project-group-tab
                                           data-project-group-id={section.scope}
                                           className={isActive
-                                            ? `inline-flex h-8 min-w-28 items-center rounded px-1.5 text-xs font-semibold text-white shadow-sm transition bg-primary-600 ${isDragging ? "scale-[0.98] opacity-55" : ""} ${recentlyMoved ? "template-project-group-tab-moved" : ""} ${dropBefore ? "template-project-group-drop-before" : ""} ${dropAfter ? "template-project-group-drop-after" : ""}`
-                                            : `inline-flex h-8 min-w-28 items-center rounded px-1.5 text-xs font-semibold text-surface-600 transition hover:bg-surface-50 hover:text-surface-900 ${isDragging ? "scale-[0.98] opacity-55" : ""} ${recentlyMoved ? "template-project-group-tab-moved" : ""} ${dropBefore ? "template-project-group-drop-before" : ""} ${dropAfter ? "template-project-group-drop-after" : ""}`
+	                                            ? `inline-flex h-8 min-w-28 items-center rounded px-1.5 text-xs font-medium text-white shadow-sm transition bg-primary-600 ${isDragging ? "scale-[0.98] opacity-55" : ""} ${recentlyMoved ? "template-project-group-tab-moved" : ""} ${dropBefore ? "template-project-group-drop-before" : ""} ${dropAfter ? "template-project-group-drop-after" : ""}`
+	                                            : `inline-flex h-8 min-w-28 items-center rounded px-1.5 text-xs font-medium text-surface-600 transition hover:bg-surface-50 hover:text-surface-900 ${isDragging ? "scale-[0.98] opacity-55" : ""} ${recentlyMoved ? "template-project-group-tab-moved" : ""} ${dropBefore ? "template-project-group-drop-before" : ""} ${dropAfter ? "template-project-group-drop-after" : ""}`
                                           }
                                           title={section.title}
                                         >
@@ -2193,15 +2423,15 @@ export default function QuotaTemplatesPage() {
                                             type="button"
                                             onClick={() => setActiveQuotaScope(section.scope)}
                                             className={isActive
-                                              ? "h-full min-w-0 flex-1 truncate bg-transparent px-1 text-left text-xs font-semibold text-white outline-none"
-                                              : "h-full min-w-0 flex-1 truncate bg-transparent px-1 text-left text-xs font-semibold text-surface-600 outline-none"
+	                                              ? "h-full min-w-0 flex-1 truncate bg-transparent px-1 text-left text-xs font-medium text-white outline-none"
+	                                              : "h-full min-w-0 flex-1 truncate bg-transparent px-1 text-left text-xs font-medium text-surface-600 outline-none"
                                             }
                                           >
                                             {section.title}
                                           </button>
                                           <span className={isActive
-                                            ? "ml-1 shrink-0 rounded-full bg-white/20 px-1.5 py-0.5 text-[11px] font-semibold text-white"
-                                            : "ml-1 shrink-0 rounded-full bg-surface-100 px-1.5 py-0.5 text-[11px] font-semibold text-surface-500"
+	                                            ? "ml-1 shrink-0 rounded-full bg-white/20 px-1.5 py-0.5 text-[11px] font-medium text-white"
+	                                            : "ml-1 shrink-0 rounded-full bg-surface-100 px-1.5 py-0.5 text-[11px] font-medium text-surface-500"
                                           }>
                                             {sectionCount}
                                           </span>
@@ -2311,7 +2541,7 @@ export default function QuotaTemplatesPage() {
                                           <GripVertical className="h-4 w-4" />
                                         </button>
                                       </td>
-                                      <td className="px-3 py-2 font-mono text-xs font-semibold text-surface-700">
+	                                      <td className="px-3 py-2 font-mono text-xs font-medium text-surface-700">
                                         {item.code ? (
                                           <span className="block truncate" title={item.code}>{item.code}</span>
                                         ) : (
@@ -2322,7 +2552,7 @@ export default function QuotaTemplatesPage() {
                                         <span
                                           contentEditable
                                           suppressContentEditableWarning
-                                          className="quota-template-project-alias block truncate text-xs font-semibold text-[#111827]"
+	                                          className="quota-template-project-alias block truncate text-xs font-medium text-[#111827]"
                                           title="点击修改当前模板中的项目别名，不影响基装定额库"
                                           role="textbox"
                                           aria-label="项目别名"
@@ -2558,6 +2788,56 @@ export default function QuotaTemplatesPage() {
                     className="min-h-[108px] w-full resize-y rounded-lg border border-surface-200 bg-white px-3 py-2.5 text-sm leading-6 text-surface-900 outline-none transition placeholder:text-surface-400 focus:border-primary-300 focus:ring-2 focus:ring-primary-100"
                     placeholder="填写报价清单底部附注内容"
                   />
+                </div>
+              </section>
+              <section className="quota-template-editor-section rounded-lg border border-surface-200 bg-white">
+                <div className="flex items-center justify-between border-b border-surface-200 bg-surface-100 px-4 py-3">
+                  <div>
+                    <p className="text-sm font-semibold text-surface-900">预算编制</p>
+                    <span className="mt-0.5 block text-xs text-surface-500">保存后会跟随报价书输出，打印时默认从新页面开始。</span>
+                  </div>
+                  <span className="text-xs text-surface-400">富文本</span>
+                </div>
+                <div className="p-4">
+                  <div className="quota-template-rich-editor overflow-hidden rounded-lg border border-surface-200 bg-white">
+                    <div className="quota-template-rich-toolbar flex flex-wrap items-center gap-1 border-b border-surface-200 bg-[#F8FAFC] px-2 py-2">
+                      {[
+                        { label: "加粗", command: "bold", icon: Bold },
+                        { label: "斜体", command: "italic", icon: Italic },
+                        { label: "下划线", command: "underline", icon: Underline },
+                        { label: "无序列表", command: "insertUnorderedList", icon: List },
+                        { label: "有序列表", command: "insertOrderedList", icon: ListOrdered },
+                        { label: "左对齐", command: "justifyLeft", icon: AlignLeft },
+                        { label: "居中", command: "justifyCenter", icon: AlignCenter },
+                        { label: "清除格式", command: "removeFormat", icon: Eraser },
+                      ].map((tool) => {
+                        const Icon = tool.icon;
+                        return (
+                          <button
+                            key={tool.command}
+                            type="button"
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => runBudgetCompilationCommand(tool.command)}
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-surface-600 transition hover:bg-white hover:text-surface-900"
+                            title={tool.label}
+                            aria-label={tool.label}
+                          >
+                            <Icon className="h-4 w-4" />
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div
+                      ref={budgetCompilationEditorRef}
+                      className="quota-template-rich-content min-h-[180px] px-4 py-3 text-sm leading-7 text-surface-900 outline-none empty:before:text-surface-400 empty:before:content-[attr(data-placeholder)]"
+                      contentEditable
+                      suppressContentEditableWarning
+                      data-placeholder="填写预算编制说明、计价口径、施工边界或需要随报价书输出的说明内容"
+                      onInput={syncBudgetCompilationHtml}
+                      onBlur={syncBudgetCompilationHtml}
+                      onPaste={handleBudgetCompilationPaste}
+                    />
+                  </div>
                 </div>
               </section>
             </div>
@@ -3950,6 +4230,30 @@ export default function QuotaTemplatesPage() {
         }
         .quote-item-row-drop-after > td {
           box-shadow: inset 0 -2px 0 rgba(64, 122, 255, 0.95) !important;
+        }
+        .quota-template-rich-editor {
+          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+        }
+        .quota-template-rich-toolbar button {
+          border: 1px solid transparent;
+        }
+        .quota-template-rich-toolbar button:hover {
+          border-color: #dce4ef;
+        }
+        .quota-template-rich-content p {
+          margin: 0 0 8px;
+        }
+        .quota-template-rich-content ul,
+        .quota-template-rich-content ol {
+          margin: 0 0 8px 20px;
+          padding: 0;
+        }
+        .quota-template-rich-content li {
+          margin: 0 0 4px;
+        }
+        .quota-template-rich-content b,
+        .quota-template-rich-content strong {
+          font-weight: 600;
         }
         @keyframes quote-item-settle {
           0% { transform: translateY(-8px); }

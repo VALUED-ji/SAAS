@@ -27,7 +27,7 @@ import {
 
 
 
-import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -40,6 +40,7 @@ import { calculatePackageQuotePrice, formatPricingAmount, toPricingAmount } from
 import DataPagination, { useDataPagination } from "@/components/ui/DataPagination";
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
 import SystemSelect from "@/components/ui/SystemSelect";
+import NativeImage from "@/components/ui/NativeImage";
 import AddCustomerModal, { AmapLocationPicker, type LocationPick } from "@/components/ui/AddCustomerModal";
 import { createQuotationPrintPreviewUrl, createQuotationShareUrl } from "@/lib/quotationShareClient";
 import {
@@ -66,6 +67,34 @@ type CreateCustomerSnapshot = {
 
 type CreateQuotationMode = "customer" | "new_customer" | "temporary";
 type CopyQuotationTargetMode = "current" | "other";
+type CopyQuotationContentMode = "full" | "items_only";
+
+type QuotationChangeItem = {
+  id: string;
+  quotation_item_id?: string | null;
+  item_name?: string | null;
+  space?: string | null;
+  category?: string | null;
+  change_type: "created" | "updated" | "deleted";
+  field_key?: string | null;
+  field_label?: string | null;
+  old_value?: string | null;
+  new_value?: string | null;
+};
+
+type QuotationChangeDisplayItem =
+  | { kind: "replacement"; id: string; oldName: string; newName: string; space?: string | null; category?: string | null }
+  | { kind: "change"; id: string; change: QuotationChangeItem };
+
+type QuotationChangeLog = {
+  id: string;
+  user_name?: string | null;
+  user_avatar?: string | null;
+  summary?: string | null;
+  change_count?: number;
+  created_at: string;
+  changes: QuotationChangeItem[];
+};
 
 type QuickCustomerDraft = {
   name: string;
@@ -267,18 +296,27 @@ function getCompareDiscountAmount(record: any, totals: any) {
   if (Number.isFinite(fromTotals) && Math.abs(fromTotals) >= 0.005) return fromTotals;
   const fromRecord = Number(record?.discount);
   if (Number.isFinite(fromRecord) && Math.abs(fromRecord) >= 0.005) return fromRecord;
-  const rawSettings = record?.settings;
-  const settings = typeof rawSettings === "string"
-    ? (() => {
-      try {
-        return JSON.parse(rawSettings);
-      } catch {
-        return {};
-      }
-    })()
-    : rawSettings || {};
+  const settings = getRecordSettings(record);
   const fromSettings = Number(settings?.discount);
   return Number.isFinite(fromSettings) ? fromSettings : 0;
+}
+
+function getRecordSettings(record: any) {
+  const rawSettings = record?.settings;
+  if (typeof rawSettings === "string") {
+    try {
+      const parsed = JSON.parse(rawSettings);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return rawSettings && typeof rawSettings === "object" ? rawSettings : {};
+}
+
+function getRecordQuotaTemplateName(record: any) {
+  const settings = getRecordSettings(record);
+  return String(settings?.quotaTemplateName || record?.quota_template_name || "").trim();
 }
 
 function buildQuotationCompareSummary(record: any) {
@@ -402,6 +440,16 @@ function waitForQuotationSaveCheck(delay = 300) {
   return new Promise((resolve) => window.setTimeout(resolve, delay));
 }
 
+function clearQuotationReturnParams(params: URLSearchParams) {
+  params.delete("openRecords");
+  params.delete("refreshRecords");
+  params.delete("customerId");
+  params.delete("fromQuotationId");
+  params.delete("t");
+  const nextQuery = params.toString();
+  window.history.replaceState(null, "", nextQuery ? `/quotations?${nextQuery}` : "/quotations");
+}
+
 export default function QuotationsPage() {
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -460,12 +508,18 @@ export default function QuotationsPage() {
   const [bindingCustomer, setBindingCustomer] = useState(false);
   const [copyQuotationDialog, setCopyQuotationDialog] = useState<any | null>(null);
   const [copyTargetMode, setCopyTargetMode] = useState<CopyQuotationTargetMode>("current");
+  const [copyContentMode, setCopyContentMode] = useState<CopyQuotationContentMode>("full");
   const [copyCustomerSearch, setCopyCustomerSearch] = useState("");
   const [copyCustomerOptions, setCopyCustomerOptions] = useState<any[]>([]);
   const [copyCustomerLoading, setCopyCustomerLoading] = useState(false);
   const [copyCustomerMore, setCopyCustomerMore] = useState(false);
   const [selectedCopyCustomer, setSelectedCopyCustomer] = useState<any | null>(null);
   const [copyingQuotation, setCopyingQuotation] = useState(false);
+  const [changeLogRecord, setChangeLogRecord] = useState<any | null>(null);
+  const [changeLogs, setChangeLogs] = useState<QuotationChangeLog[]>([]);
+  const [changeLogsLoading, setChangeLogsLoading] = useState(false);
+  const [changeLogsError, setChangeLogsError] = useState("");
+  const openRecordsRequestRef = useRef("");
   const router = useRouter();
   const { data: quotations, isLoading, refetch } = useQuotations();
   const { data: deletedQuotations, refetch: refetchDeletedQuotations } = useDeletedQuotations();
@@ -508,6 +562,7 @@ export default function QuotationsPage() {
     if (!showCreate) return;
     let cancelled = false;
     const localTemplates = loadQuotaTemplatesFromStorage();
+    setQuotaTemplates([]);
     const loadTemplates = async () => {
       try {
         const response = await fetch("/api/quota/templates", { cache: "no-store" });
@@ -516,14 +571,7 @@ export default function QuotationsPage() {
         const serverTemplates = Array.isArray(data?.templates)
           ? data.templates.map(normalizeQuotaTemplate).filter((template: QuotaTemplateOption | null): template is QuotaTemplateOption => Boolean(template && template.status !== "disabled"))
           : [];
-        if (!cancelled) setQuotaTemplates(serverTemplates.length > 0 ? serverTemplates : localTemplates);
-        if (serverTemplates.length === 0 && localTemplates.length > 0) {
-          fetch("/api/quota/templates", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ templates: localTemplates }),
-          }).catch(() => {});
-        }
+	        if (!cancelled) setQuotaTemplates(serverTemplates);
       } catch {
         if (!cancelled) setQuotaTemplates(localTemplates);
       }
@@ -795,6 +843,106 @@ export default function QuotationsPage() {
     return getTimeValue(getLatestQuoteDate(b)) - getTimeValue(getLatestQuoteDate(a));
   };
   const formatQuoteDateTime = (value: any) => formatDateTime(value);
+  const formatChangeLogDateTime = (value: any) => {
+    const date = parseAppDate(value);
+    if (!date) return "-";
+    return new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).format(date);
+  };
+  const formatChangeValue = (value: unknown) => {
+    const text = String(value ?? "").trim();
+    return text || "空";
+  };
+  const getChangeGroupKey = (change: QuotationChangeItem) => {
+    return String(change.quotation_item_id || change.item_name || change.id || "").trim();
+  };
+  const isQuotaReplacementGroup = (group: QuotationChangeItem[]) => {
+    if (group.length < 2 || group.some((change) => change.change_type !== "updated")) return false;
+    const fields = new Set(group.map((change) => String(change.field_key || "").trim()).filter(Boolean));
+    if (!fields.has("name")) return false;
+    return ["spec", "remark", "material_cost", "labor_cost", "unit_price", "unit"].some((field) => fields.has(field));
+  };
+  const getQuotationChangeDisplayItems = (changes: QuotationChangeItem[]): QuotationChangeDisplayItem[] => {
+    const grouped = new Map<string, QuotationChangeItem[]>();
+    changes.forEach((change) => {
+      const key = getChangeGroupKey(change);
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key)?.push(change);
+    });
+
+    const displayItems: QuotationChangeDisplayItem[] = [];
+    const handledIds = new Set<string>();
+    grouped.forEach((group, key) => {
+      if (!isQuotaReplacementGroup(group)) return;
+      group.forEach((change) => handledIds.add(change.id));
+      const nameChange = group.find((change) => change.field_key === "name");
+      const sample = nameChange || group[0];
+      displayItems.push({
+        kind: "replacement",
+        id: `replacement-${key || sample.id}`,
+        oldName: formatChangeValue(nameChange?.old_value || ""),
+        newName: formatChangeValue(nameChange?.new_value || sample.item_name),
+        space: sample.space,
+        category: sample.category,
+      });
+    });
+
+    changes.forEach((change) => {
+      if (handledIds.has(change.id)) return;
+      displayItems.push({ kind: "change", id: change.id, change });
+    });
+    return displayItems;
+  };
+  const getChangeLogDisplaySummary = (log: QuotationChangeLog, displayItems: QuotationChangeDisplayItem[]) => {
+    const replacementCount = displayItems.filter((item) => item.kind === "replacement").length;
+    if (replacementCount > 0 && displayItems.length === replacementCount) {
+      return replacementCount === 1 ? "替换定额" : `替换 ${replacementCount} 项定额`;
+    }
+    return log.summary || `修改 ${log.change_count || log.changes.length} 项内容`;
+  };
+  const getChangeActionText = (change: QuotationChangeItem) => {
+    const itemName = change.item_name || "未命名项目";
+    if (change.change_type === "created") return `新增了「${itemName}」`;
+    if (change.change_type === "deleted") return `删除了「${itemName}」`;
+    return `修改了「${itemName}」的${change.field_label || "内容"}`;
+  };
+  const getChangeCategoryLabel = (value: unknown) => {
+    const category = String(value || "").trim();
+    if (!category) return "";
+    if (category === "base" || category === "基装" || category === "基装项目") return "基装";
+    if (category === "main_material" || category === "产品" || category === "产品项目") return "产品";
+    if (category === "custom_cabinet" || category === "定制柜" || category === "定制柜项目") return "定制柜";
+    if (category === "other" || category === "综合费用") return "综合费用";
+    return category;
+  };
+  const openQuotationChangeLogs = async (record: any) => {
+    setChangeLogRecord(record);
+    setChangeLogs([]);
+    setChangeLogsError("");
+    setChangeLogsLoading(true);
+    try {
+      const result = await api.get<{ logs: QuotationChangeLog[] }>(`/api/quotations/${record.id}/change-logs`);
+      setChangeLogs(Array.isArray(result.logs) ? result.logs : []);
+    } catch (err: any) {
+      setChangeLogsError(err.message || "读取报价变更记录失败");
+    } finally {
+      setChangeLogsLoading(false);
+    }
+  };
+  const closeQuotationChangeLogs = () => {
+    setChangeLogRecord(null);
+    setChangeLogs([]);
+    setChangeLogsError("");
+    setChangeLogsLoading(false);
+  };
   const filtered = (quotations ?? []).filter(
     (q: any) => [q.project_name, getHouseText(q), q.customer_name, q.customer_phone, q.customer_weixin, q.designer_name, q.customer_decoration_type].some((value) => String(value || "").includes(search))
   );
@@ -847,21 +995,63 @@ export default function QuotationsPage() {
   const visibleRecordTotalAmount = visibleRecordRows.reduce((sum: number, record: any) => sum + getRecordAmount(record), 0);
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (!quotations && !deletedQuotations) return;
     const params = new URLSearchParams(window.location.search);
-    if (params.get("openRecords") !== "1") return;
+    const shouldOpenRecords = params.get("openRecords") === "1";
+    const shouldRefreshRecords = params.get("refreshRecords") === "1";
+    if (!shouldOpenRecords && !shouldRefreshRecords) return;
+    const fromQuotationId = String(params.get("fromQuotationId") || "").trim();
     const targetCustomerId = String(params.get("customerId") || "").trim();
-    if (!targetCustomerId) return;
-    const targetRecord = [...(quotations || []), ...(deletedQuotations || [])].find((record: any) => String(record?.customer_id || "").trim() === targetCustomerId);
-    const targetKey = targetRecord ? getCustomerKey(targetRecord) : "";
-    if (!targetKey) return;
-    setRecordCustomerKey(targetKey);
-    setShowRecycleBin(false);
-    params.delete("openRecords");
-    params.delete("customerId");
-    const nextQuery = params.toString();
-    window.history.replaceState(null, "", nextQuery ? `/quotations?${nextQuery}` : "/quotations");
-  }, [deletedQuotations, quotations]);
+    const requestKey = [
+      shouldOpenRecords ? "open" : "refresh",
+      targetCustomerId,
+      fromQuotationId,
+      params.get("t") || "",
+    ].join(":");
+    clearQuotationReturnParams(params);
+    if (!fromQuotationId) {
+      return;
+    }
+    if (shouldOpenRecords && !targetCustomerId) return;
+    if (openRecordsRequestRef.current === requestKey) return;
+    openRecordsRequestRef.current = requestKey;
+
+    let cancelled = false;
+    const handleReturnRefresh = async () => {
+      let activeRows = quotations || [];
+      let deletedRows = deletedQuotations || [];
+      if (shouldRefreshRecords) {
+        try {
+          const [activeResult, deletedResult] = await Promise.all([refetch(), refetchDeletedQuotations()]);
+          if (Array.isArray(activeResult.data)) activeRows = activeResult.data;
+          if (Array.isArray(deletedResult.data)) deletedRows = deletedResult.data;
+        } catch {
+          // Existing query state is still usable if a background refresh fails.
+        }
+      } else if (!quotations && !deletedQuotations) {
+        openRecordsRequestRef.current = "";
+        return;
+      }
+      if (cancelled) return;
+
+      if (shouldOpenRecords) {
+        const rows = [...activeRows, ...deletedRows];
+        const returnedRecord = rows.find((record: any) => String(record?.id || "").trim() === fromQuotationId);
+        const matchedCustomerId = String(returnedRecord?.customer_id || "").trim();
+        if (!returnedRecord || matchedCustomerId !== targetCustomerId) return;
+        const targetRecord = rows.find((record: any) => String(record?.customer_id || "").trim() === targetCustomerId);
+        const targetKey = targetRecord ? getCustomerKey(targetRecord) : "";
+        if (targetKey) {
+          setRecordCustomerKey(targetKey);
+          setShowRecycleBin(false);
+        }
+      }
+    };
+
+    void handleReturnRefresh();
+    return () => {
+      cancelled = true;
+    };
+  }, [deletedQuotations, quotations, refetch, refetchDeletedQuotations]);
   const quickCustomerSnapshot = useMemo<CreateCustomerSnapshot>(() => ({
     phone: quickCustomer.phone,
     address: quickCustomer.address,
@@ -1149,6 +1339,7 @@ export default function QuotationsPage() {
   const copyQuotation = (record: any) => {
     setCopyQuotationDialog(record);
     setCopyTargetMode("current");
+    setCopyContentMode("full");
     setCopyCustomerSearch("");
     setCopyCustomerOptions([]);
     setSelectedCopyCustomer(null);
@@ -1160,6 +1351,7 @@ export default function QuotationsPage() {
     if (copyingQuotation) return;
     setCopyQuotationDialog(null);
     setCopyTargetMode("current");
+    setCopyContentMode("full");
     setCopyCustomerSearch("");
     setCopyCustomerOptions([]);
     setSelectedCopyCustomer(null);
@@ -1176,15 +1368,28 @@ export default function QuotationsPage() {
     setRecordActionId(copyQuotationDialog.id);
     setMessage("");
     try {
-      await api.post<{ id: string }>(`/api/quotations/${copyQuotationDialog.id}`, {
+      const result = await api.post<{ id: string; customerId?: string | null; projectId?: string | null }>(`/api/quotations/${copyQuotationDialog.id}`, {
         action: "copy",
         target_customer_id: copyTargetMode === "other" ? selectedCopyCustomer?.id : undefined,
+        copy_content_mode: copyContentMode,
       });
-      await refetch();
+      const activeResult = await refetch();
       await refetchDeletedQuotations();
+      const copiedCustomerId = String(result.customerId || "").trim();
+      if (typeof window !== "undefined") {
+        clearQuotationReturnParams(new URLSearchParams(window.location.search));
+      }
+      if (copiedCustomerId) {
+        const nextRows = Array.isArray(activeResult.data) ? activeResult.data : quotations || [];
+        const copiedRecord = nextRows.find((record: any) => String(record?.id || "") === String(result.id || ""))
+          || nextRows.find((record: any) => String(record?.customer_id || "").trim() === copiedCustomerId);
+        setRecordCustomerKey(copiedRecord ? getCustomerKey(copiedRecord) : copiedCustomerId);
+        setShowRecycleBin(false);
+      }
       setMessage(copyTargetMode === "other" ? "已复制到其他客户" : "已复制报价副本");
       setCopyQuotationDialog(null);
       setCopyTargetMode("current");
+      setCopyContentMode("full");
       setCopyCustomerSearch("");
       setCopyCustomerOptions([]);
       setSelectedCopyCustomer(null);
@@ -1654,8 +1859,9 @@ export default function QuotationsPage() {
 
       {recordCustomerKey && (
         <div className="fixed bottom-0 right-0 top-0 z-50 flex items-center justify-center bg-[#111827]/28 p-4 md:left-[var(--active-sidebar-width)] md:p-6 max-md:left-0">
-          <div className="quotation-record-modal-v2 flex min-h-[520px] max-h-[min(760px,calc(100dvh-72px))] w-full max-w-[1440px] flex-col overflow-hidden border border-[#e2e7ee] bg-white shadow-[0_18px_50px_rgba(15,23,42,0.16)]">
-            <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[#e2e7ee] bg-white px-5 py-4">
+          <div className="quotation-record-modal-v2 flex min-h-[520px] max-h-[min(760px,calc(100dvh-72px))] w-full max-w-[1440px] flex-col overflow-hidden border border-[#d9e2ef] bg-white shadow-none">
+            <div className="quotation-record-unified-header shrink-0 px-5 py-4">
+            <div className="flex items-start justify-between gap-4">
               <div className="flex min-w-0 items-center gap-3">
                 <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[8px] bg-[#edf4ff] text-[#407aff]">
                   <ReceiptText className="h-4 w-4" />
@@ -1678,9 +1884,9 @@ export default function QuotationsPage() {
                       openRecordCustomerEditor(activeRecordCustomer);
                     }}
                     disabled={!activeRecordCustomer?.customer_id}
-                    className="group inline-flex min-h-9 items-center gap-2 rounded-[9px] border border-[#bfe8d3] bg-[#f1fbf6] px-3 text-xs font-semibold text-[#167457] shadow-[0_1px_2px_rgba(16,24,40,0.04)] transition hover:border-[#8fd8b0] hover:bg-white hover:text-[#0f5f47]"
+                    className="group inline-flex min-h-9 items-center gap-2 rounded-[9px] border border-[#bfe8d3] bg-[#f1fbf6] px-3 text-xs font-semibold text-[#167457] shadow-none transition hover:border-[#8fd8b0] hover:bg-white hover:text-[#0f5f47]"
                   >
-                    <span className="inline-flex h-5 w-5 items-center justify-center rounded-[6px] bg-white text-[#159863] shadow-[inset_0_0_0_1px_rgba(21,152,99,0.18)] transition group-hover:bg-[#e8f8ef]">
+                    <span className="inline-flex h-5 w-5 items-center justify-center rounded-[6px] border border-[#bfe8d3] bg-white text-[#159863] shadow-none transition group-hover:bg-[#e8f8ef]">
                       <Pencil className="h-3.5 w-3.5" />
                     </span>
                     编辑资料
@@ -1689,14 +1895,14 @@ export default function QuotationsPage() {
                 <button
                   type="button"
                   onClick={() => setShowRecycleBin((value) => !value)}
-                  className={`group inline-flex min-h-9 items-center gap-2 rounded-[9px] border px-3 text-xs font-semibold shadow-[0_1px_2px_rgba(16,24,40,0.04)] transition ${
+                  className={`group inline-flex min-h-9 items-center gap-2 rounded-[9px] border px-3 text-xs font-semibold shadow-none transition ${
                     showRecycleBin
                       ? "border-[#cfe0ff] bg-[#edf4ff] text-[#407aff] hover:bg-white"
                       : "border-[#d9e2ef] bg-white text-[#52647b] hover:border-[#b8c2d0] hover:bg-[#fbfcfe] hover:text-[#182230]"
                   }`}
                 >
-                  <span className={`inline-flex h-5 w-5 items-center justify-center rounded-[6px] shadow-[inset_0_0_0_1px_rgba(15,23,42,0.08)] transition ${
-                    showRecycleBin ? "bg-white text-[#407aff]" : "bg-[#f2f5f9] text-[#667085] group-hover:bg-white"
+                  <span className={`inline-flex h-5 w-5 items-center justify-center rounded-[6px] border shadow-none transition ${
+                    showRecycleBin ? "border-[#cfe0ff] bg-white text-[#407aff]" : "border-[#d9e2ef] bg-[#f2f5f9] text-[#667085] group-hover:bg-white"
                   }`}>
                     {showRecycleBin ? <History className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
                   </span>
@@ -1708,12 +1914,13 @@ export default function QuotationsPage() {
               </div>
             </div>
 
-            <div className="flex shrink-0 flex-wrap items-center gap-y-2 border-b border-[#e2e7ee] bg-[#f8fafc] px-5 py-2.5">
-              <div className="flex items-baseline gap-2 pr-5"><span className="text-xs text-[#667085]">{showRecycleBin ? "已删除" : "共"}</span><strong className="text-sm font-semibold tabular-nums text-[#182230]">{visibleRecordRows.length}</strong><span className="text-xs text-[#667085]">份报价</span></div>
-              <div className="flex items-baseline gap-2 border-l border-[#dce2ea] px-5"><span className="text-xs text-[#667085]">正式</span><strong className="text-sm font-semibold tabular-nums text-emerald-700">{visibleFormalRecordCount}</strong></div>
-              <div className="flex items-baseline gap-2 border-l border-[#dce2ea] px-5"><span className="text-xs text-[#667085]">已发送</span><strong className="text-sm font-semibold tabular-nums text-[#407aff]">{visibleSentRecordCount}</strong></div>
-              <div className="flex items-baseline gap-2 border-l border-[#dce2ea] px-5"><span className="text-xs text-[#667085]">草稿</span><strong className="text-sm font-semibold tabular-nums text-[#667085]">{visibleDraftRecordCount}</strong></div>
-              <div className="flex items-baseline gap-2 border-l border-[#dce2ea] pl-5"><span className="text-xs text-[#667085]">报价合计</span><strong className="text-sm font-semibold tabular-nums text-[#182230]">¥ {formatRecordAmount(visibleRecordTotalAmount)}</strong></div>
+            <div className="quotation-record-summary-row mt-3 flex flex-wrap items-center gap-2">
+              <div className="quotation-record-summary-pill"><span>{showRecycleBin ? "已删除" : "共"}</span><strong>{visibleRecordRows.length}</strong><span>份报价</span></div>
+              <div className="quotation-record-summary-pill"><span>正式</span><strong className="text-emerald-700">{visibleFormalRecordCount}</strong></div>
+              <div className="quotation-record-summary-pill"><span>已发送</span><strong className="text-[#407aff]">{visibleSentRecordCount}</strong></div>
+              <div className="quotation-record-summary-pill"><span>草稿</span><strong className="text-[#667085]">{visibleDraftRecordCount}</strong></div>
+              <div className="quotation-record-summary-pill quotation-record-summary-total"><span>报价合计</span><strong>¥ {formatRecordAmount(visibleRecordTotalAmount)}</strong></div>
+            </div>
             </div>
 
             {message && <p className="mx-4 mt-4 rounded-[8px] border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">{message}</p>}
@@ -1727,7 +1934,7 @@ export default function QuotationsPage() {
                 </span>
               </div>
             ) : null}
-            <div className="min-h-0 flex-1 overflow-y-auto bg-[#f8fafc] p-3 md:p-4">
+            <div className="quotation-record-list-body min-h-0 flex-1 overflow-y-auto bg-[#f8fafc] p-3 md:p-4">
               {visibleRecordRows.length > 0 ? (
                 <div className="space-y-3">
                   {visibleRecordRows.map((record: any) => {
@@ -1736,19 +1943,30 @@ export default function QuotationsPage() {
                     const isJustPromotedFormal = promotedFormalRecord?.id === String(record.id) && isFormalQuotation;
                     const isSentQuotation = isSentToDesigner(record);
                     const lockedBySignedContract = isFormalQuotation && isUsedBySignedContract(record);
+                    const recordStatusLabel = formatRecordStatus(record);
+                    const recordStatusTone = lockedBySignedContract
+                      ? "signed"
+                      : isFormalQuotation
+                        ? "formal"
+                        : isSentQuotation
+                          ? "sent"
+                          : "draft";
                     const deleteDisabledReason = lockedBySignedContract
                       ? "已签合同的报价不能删除"
                       : isFormalQuotation
                         ? "正式报价不能删除"
                         : "";
+                    const compareDisabledReason = compareCandidateRows.length < 2
+                      ? "当前预算记录只有 1 份报价，至少需要 2 份报价才能进行对比"
+                      : "";
                     const costSummary = getRecordCostSummary(record);
-                    const costBreakdown = [
-                      { label: "基装", amount: Number(record?.base_amount || 0) },
-                      { label: "产品", amount: Number(record?.main_material_amount || 0) + Number(record?.custom_direct_amount || 0) },
-                      { label: "综合费用", amount: Number(record?.other_amount || 0), alwaysShow: true },
-                    ].filter((item) => Number.isFinite(item.amount) && (item.alwaysShow || Math.abs(item.amount) >= 0.01));
-                    const statusDotClass = lockedBySignedContract || isFormalQuotation ? "bg-emerald-500" : isSentQuotation ? "bg-[#407aff]" : "bg-[#98a2b3]";
-                    const actionBaseClass = "inline-flex h-8 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-[9px] border px-2.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50";
+	                    const costBreakdown = [
+	                      { label: "基装", amount: Number(record?.base_amount || 0) },
+	                      { label: "产品", amount: Number(record?.main_material_amount || 0) + Number(record?.custom_direct_amount || 0) },
+	                      { label: "综合费用", amount: Number(record?.other_amount || 0), alwaysShow: true },
+	                    ].filter((item) => Number.isFinite(item.amount) && (item.alwaysShow || Math.abs(item.amount) >= 0.01));
+	                    const quotaTemplateName = getRecordQuotaTemplateName(record);
+	                    const actionBaseClass = "inline-flex h-8 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-[9px] border px-2.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50";
                     const secondaryActionClass = `${actionBaseClass} border-[#d7dfeb] bg-white text-[#475467] hover:border-[#b8c2d0] hover:bg-[#f8fafc] hover:text-[#182230] focus-visible:ring-[#407aff]/15`;
                     const softActionClass = `${actionBaseClass} border-[#dce4ef] bg-white text-[#52647b] hover:border-[#cfe0ff] hover:bg-[#f3f7ff] hover:text-[#245ee8] focus-visible:ring-[#407aff]/15`;
                     const dangerActionClass = `${actionBaseClass} border-[#f3c5c0] bg-white text-[#d92d20] hover:border-[#fda29b] hover:bg-[#fff6f5] focus-visible:ring-[#d92d20]/15`;
@@ -1756,19 +1974,25 @@ export default function QuotationsPage() {
                       <article key={record.id} className={`quotation-record-card grid gap-4 border bg-white p-4 xl:grid-cols-[minmax(0,1fr)_minmax(520px,42%)] xl:items-center ${isJustPromotedFormal ? "quotation-record-card-promoted border-[#75d99a]" : "border-[#e2e7ee]"}`}>
                         <div className="min-w-0">
                           <div className="flex items-start justify-between gap-3 xl:block">
-                            <div className="min-w-0">
-                              {showRecycleBin ? (
-                                <span className="block truncate text-sm font-semibold text-[#182230]" title={getBudgetRecordTitle(record)}>{getBudgetRecordTitle(record)}</span>
-                              ) : (
-                                <Link href={`/quotations/${record.id}`} className="block truncate text-sm font-semibold text-[#182230] transition hover:text-[#407aff]" title={getBudgetRecordTitle(record)}>{getBudgetRecordTitle(record)}</Link>
-                              )}
-                              <p className="mt-1 text-xs tabular-nums text-[#667085]">{formatQuoteDateTime(getLatestQuoteDate(record))}</p>
-                            </div>
-                            <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium xl:hidden ${getRecordStatusClass(record)}`}>
-                              <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass}`} />
-                              {formatRecordStatus(record)}
-                            </span>
-                          </div>
+	                            <div className="min-w-0">
+	                              {showRecycleBin ? (
+	                                <span className="block truncate text-sm font-semibold text-[#182230]" title={getBudgetRecordTitle(record)}>{getBudgetRecordTitle(record)}</span>
+	                              ) : (
+	                                <Link href={`/quotations/${record.id}`} className="block truncate text-sm font-semibold text-[#182230] transition hover:text-[#407aff]" title={getBudgetRecordTitle(record)}>{getBudgetRecordTitle(record)}</Link>
+	                              )}
+	                              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[#667085]">
+	                                <span className="tabular-nums">{formatQuoteDateTime(getLatestQuoteDate(record))}</span>
+	                                <span className={`inline-flex max-w-full items-center gap-1.5 rounded-full border px-2 py-0.5 ${
+	                                  quotaTemplateName
+	                                    ? "border-[#cfe0ff] bg-[#f3f7ff] text-[#2f66e8]"
+	                                    : "border-[#e3e9f2] bg-[#f8fafc] text-[#98a2b3]"
+	                                }`} title={quotaTemplateName ? `定额模板：${quotaTemplateName}` : "未记录定额模板"}>
+	                                  <FileText className="h-3 w-3 shrink-0" />
+	                                  <span className="max-w-[220px] truncate">{quotaTemplateName || "未记录定额模板"}</span>
+	                                </span>
+	                              </div>
+	                            </div>
+	                          </div>
                           {isJustPromotedFormal ? (
                             <span className="quotation-record-promoted-badge mt-3 inline-flex items-center gap-1.5 rounded-full border border-[#a6e7c0] bg-[#ecfdf3] px-2.5 py-1 text-xs font-semibold text-[#027a48]">
                               <CheckCircle2 className="h-3.5 w-3.5" />
@@ -1790,19 +2014,34 @@ export default function QuotationsPage() {
                               </div>
                             ) : costSummary ? <span className="text-xs font-medium tabular-nums text-[#667085]">{costSummary}</span> : null}
                           </div>
-                          <button type="button" onClick={() => updateQuotationNotes(record)} className={`mt-2 inline-flex max-w-full items-start gap-1.5 rounded-[7px] px-1.5 py-1 text-left text-xs leading-5 transition hover:bg-[#edf4ff] hover:text-[#407aff] ${record.notes ? "text-[#667085]" : "text-[#98a2b3]"}`} title={record.notes || "添加备注"}>
+                          <button type="button" onClick={() => updateQuotationNotes(record)} className={`quotation-record-note mt-2 inline-flex max-w-full items-start gap-1.5 rounded-[7px] px-1.5 py-1 text-left text-xs leading-5 transition hover:bg-[#edf4ff] hover:text-[#407aff] ${record.notes ? "text-[#667085]" : "text-[#98a2b3]"}`} title={record.notes || "添加备注"}>
                             <Pencil className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                            <span className="line-clamp-2">{record.notes || "添加备注"}</span>
+                            <span className="truncate">{record.notes || "添加备注"}</span>
                           </button>
+                          {record.latest_change_at ? (
+                            <div className="mt-2 flex max-w-full flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-5 text-[#667085]">
+                              <span className="inline-flex items-center gap-1.5 rounded-[7px] bg-[#f4f7fb] px-2 py-1 text-[#52647b]">
+                                <History className="h-3.5 w-3.5 text-[#407aff]" />
+                                <span className="truncate">
+                                  最近修改：{record.latest_change_user_name || "未知用户"} · {formatChangeLogDateTime(record.latest_change_at)} · {record.latest_change_summary || `修改 ${record.latest_change_count || 0} 项内容`}
+                                </span>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => openQuotationChangeLogs(record)}
+                                className="inline-flex items-center gap-1 rounded-[7px] px-1.5 py-1 font-medium text-[#407aff] transition hover:bg-[#edf4ff]"
+                              >
+                                查看变更
+                                <ArrowUpRight className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          ) : null}
                         </div>
 
                         <div className="quotation-record-action-panel xl:justify-self-end xl:w-full">
-                          <div className="mb-2.5 flex items-center justify-between gap-3">
+                          <div className="quotation-record-action-head mb-2.5 flex items-center justify-between gap-3">
                             <span className="text-xs font-semibold text-[#98a2b3]">{showRecycleBin ? "回收站操作" : "操作"}</span>
-                            <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium ${getRecordStatusClass(record)}`}>
-                              <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass}`} />
-                              {formatRecordStatus(record)}
-                            </span>
+                            <span className="quotation-status-stamp" data-tone={recordStatusTone}>{recordStatusLabel}</span>
                           </div>
 
                           {showRecycleBin ? (
@@ -1835,10 +2074,12 @@ export default function QuotationsPage() {
                               <button type="button" onClick={() => openShareLinkDialog(record)} className={copiedLinkId === record.id ? `${actionBaseClass} border-[#a6e7c0] bg-[#ecfdf3] text-[#027a48] hover:border-[#75d99a] hover:bg-[#dcfae6] focus-visible:ring-[#12b76a]/20` : softActionClass}>
                                 {copiedLinkId === record.id ? <CheckCircle2 className="h-3.5 w-3.5" /> : <LinkIcon className="h-3.5 w-3.5" />}{copiedLinkId === record.id ? "链接已复制" : "分享链接"}
                               </button>
-                              <button type="button" disabled={busy || compareCandidateRows.length < 2} onClick={() => openComparePicker(record)} className={softActionClass} title={compareCandidateRows.length < 2 ? "同一工地至少需要 2 份报价才能对比" : undefined}>
-                                <GitCompareArrows className="h-3.5 w-3.5" />
-                                报价对比
-                              </button>
+                              <span className="inline-flex w-full" onMouseEnter={compareDisabledReason ? (event) => showLockedQuotationTooltip(event, compareDisabledReason) : undefined} onMouseLeave={() => setLockTooltip(null)} title={compareDisabledReason || undefined}>
+                                <button type="button" disabled={busy || Boolean(compareDisabledReason)} onClick={() => openComparePicker(record)} className={softActionClass}>
+                                  <GitCompareArrows className="h-3.5 w-3.5" />
+                                  报价对比
+                                </button>
+                              </span>
                               <span className="inline-flex w-full" onMouseEnter={deleteDisabledReason ? (event) => showLockedQuotationTooltip(event, deleteDisabledReason) : undefined} onMouseLeave={() => setLockTooltip(null)}>
                                 <button type="button" disabled={busy || Boolean(deleteDisabledReason)} onClick={() => deleteQuotation(record)} className={dangerActionClass}><Trash2 className="h-3.5 w-3.5" />删除报价</button>
                               </span>
@@ -3150,71 +3391,118 @@ export default function QuotationsPage() {
 
       {copyQuotationDialog && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-[#0f172a]/28 p-4">
-          <div className={`flex w-full max-w-[520px] flex-col overflow-hidden rounded-[14px] border border-[#d9e1ec] bg-white shadow-[0_24px_72px_rgba(15,23,42,0.22)] ${copyTargetMode === "other" ? "h-[min(720px,calc(100dvh-48px))]" : "max-h-[82vh]"}`}>
-            <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[#e4e9f0] px-5 py-4">
+          <div className={`quotation-copy-modal quotation-copy-modal-fixed flex h-[min(720px,calc(100dvh-48px))] w-full max-w-[680px] flex-col overflow-hidden rounded-[14px] border border-[#d9e1ec] bg-white shadow-[0_24px_72px_rgba(15,23,42,0.22)] ${copyTargetMode === "other" ? "quotation-copy-modal-other" : ""}`}>
+            <div className="quotation-copy-header flex shrink-0 items-start justify-between gap-4 border-b border-[#e4e9f0] px-5 py-4">
               <div className="flex min-w-0 items-center gap-3">
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] bg-[#edf4ff] text-[#407aff] ring-1 ring-[#d8e6ff]">
-                  <Copy className="h-4 w-4" />
+                <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] border border-[#d6e4ff] bg-[#f5f8ff] text-[#407aff]">
+                  <span className="absolute -right-1 -top-1 h-3 w-3 rounded-full border-2 border-white bg-[#12b76a]" />
+                  <span className="flex h-7 w-7 items-center justify-center rounded-[9px] bg-white ring-1 ring-[#dbe7ff]">
+                    <Copy className="h-4 w-4 stroke-[2.2]" />
+                  </span>
                 </span>
                 <div className="min-w-0">
-                  <h2 className="truncate text-[15px] font-semibold text-[#162033]">复制报价副本</h2>
+                  <h2 className="truncate text-[15px] font-semibold text-[#162033]">复制报价</h2>
                   <p className="mt-1 truncate text-xs font-medium text-[#667085]">{copyQuotationDialog.title || "装修报价单"}</p>
                 </div>
               </div>
               <button type="button" onClick={closeCopyQuotationDialog} disabled={copyingQuotation} className="rounded-[8px] p-2 text-[#667085] transition hover:bg-[#f2f4f7] hover:text-[#182230] disabled:opacity-50" aria-label="关闭复制报价弹窗"><X className="h-4 w-4" /></button>
             </div>
 
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-5 py-4">
-              <div className="shrink-0">
-                <p className="mb-2 text-xs font-semibold text-[#667085]">选择复制方式</p>
-                <div className="grid grid-cols-2 gap-3">
+            <div className="quotation-copy-body flex min-h-0 flex-1 flex-col overflow-hidden bg-white px-5 py-4">
+              <div className="quotation-copy-static-area shrink-0">
+                <div className="quotation-copy-section-label">
+                  <span>复制位置</span>
+                </div>
+                <div className="quotation-copy-target-tabs grid grid-cols-2 rounded-[10px] bg-[#f2f5f9] p-1">
                   <button
                     type="button"
                     onClick={() => {
                       setCopyTargetMode("current");
                       setSelectedCopyCustomer(null);
                     }}
-                    className={`group relative flex min-h-[72px] items-center gap-2.5 rounded-[12px] border p-3 pr-9 text-left transition ${copyTargetMode === "current" ? "border-[#407aff] bg-[#f6f9ff] ring-2 ring-[#407aff]/10" : "border-[#d9e2ef] bg-white hover:border-[#b9c8dd] hover:bg-[#fbfcfe]"}`}
+                    className={`flex h-9 items-center justify-center gap-1.5 rounded-[8px] text-xs transition ${copyTargetMode === "current" ? "bg-white font-semibold text-[#182230] ring-1 ring-[#d9e2ef]" : "font-medium text-[#667085] hover:text-[#344054]"}`}
                   >
-                    <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] ${copyTargetMode === "current" ? "bg-[#407aff] text-white" : "bg-[#f2f5f9] text-[#667085] group-hover:text-[#407aff]"}`}>
-                      <ReceiptText className="h-3.5 w-3.5" />
+                    <span className={`flex h-5 w-5 items-center justify-center rounded-[6px] ${copyTargetMode === "current" ? "bg-[#edf4ff] text-[#407aff]" : "bg-white/70 text-[#98a2b3]"}`}>
+                      <ReceiptText className="h-3.5 w-3.5 stroke-[2.2]" />
                     </span>
-                    <span className="min-w-0">
-                      <span className="block text-sm font-semibold text-[#182230]">复制到当前客户</span>
-                      <span className="mt-1 block text-xs leading-4 text-[#667085]">在本客户下新增副本</span>
-                    </span>
-                    {copyTargetMode === "current" ? <CheckCircle2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#407aff]" /> : null}
+                    复制到当前客户
                   </button>
                   <button
                     type="button"
                     onClick={() => setCopyTargetMode("other")}
-                    className={`group relative flex min-h-[72px] items-center gap-2.5 rounded-[12px] border p-3 pr-9 text-left transition ${copyTargetMode === "other" ? "border-[#407aff] bg-[#f6f9ff] ring-2 ring-[#407aff]/10" : "border-[#d9e2ef] bg-white hover:border-[#b9c8dd] hover:bg-[#fbfcfe]"}`}
+                    className={`flex h-9 items-center justify-center gap-1.5 rounded-[8px] text-xs transition ${copyTargetMode === "other" ? "bg-white font-semibold text-[#182230] ring-1 ring-[#d9e2ef]" : "font-medium text-[#667085] hover:text-[#344054]"}`}
                   >
-                    <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] ${copyTargetMode === "other" ? "bg-[#407aff] text-white" : "bg-[#f2f5f9] text-[#667085] group-hover:text-[#407aff]"}`}>
-                      <Users className="h-3.5 w-3.5" />
+                    <span className={`flex h-5 w-5 items-center justify-center rounded-[6px] ${copyTargetMode === "other" ? "bg-[#edf4ff] text-[#407aff]" : "bg-white/70 text-[#98a2b3]"}`}>
+                      <Users className="h-3.5 w-3.5 stroke-[2.2]" />
                     </span>
-                    <span className="min-w-0">
-                      <span className="block text-sm font-semibold text-[#182230]">复制到其他客户</span>
-                      <span className="mt-1 block text-xs leading-4 text-[#667085]">选择客户后归档过去</span>
+                    复制到其他客户
+                  </button>
+                </div>
+
+                <div className="quotation-copy-section-label mt-4">
+                  <span>复制内容</span>
+                </div>
+                <div className="quotation-copy-choice-panel mt-2 rounded-[12px] border border-[#e1e7f0] bg-white">
+                  <button
+                    type="button"
+                    onClick={() => setCopyContentMode("full")}
+                    className={`flex w-full items-center justify-between gap-3 rounded-t-[12px] px-3.5 py-3 text-left transition ${copyContentMode === "full" ? "bg-[#f6f9ff]" : "hover:bg-[#fbfcfe]"}`}
+                  >
+                    <span className="flex min-w-0 items-center gap-3">
+                      <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border ${copyContentMode === "full" ? "border-[#cfe0ff] bg-white text-[#407aff]" : "border-[#e3e9f2] bg-[#f8fafc] text-[#8a96a8]"}`}>
+                        <ReceiptText className="h-4 w-4 stroke-[2.2]" />
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold text-[#182230]">复制完整报价</span>
+                        <span className="mt-0.5 block text-xs leading-4 text-[#667085]">项目、数量、单价、金额和优惠都复制过去</span>
+                      </span>
                     </span>
-                    {copyTargetMode === "other" ? <CheckCircle2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#407aff]" /> : null}
+                    <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition ${copyContentMode === "full" ? "border-[#407aff] bg-[#407aff] text-white ring-4 ring-[#407aff]/10" : "border-[#cfd7e3] bg-white text-transparent"}`}>
+                      <Check className="h-3.5 w-3.5 stroke-[2.4]" />
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCopyContentMode("items_only")}
+                    className={`flex w-full items-center justify-between gap-3 rounded-b-[12px] border-t border-[#edf1f6] px-3.5 py-3 text-left transition ${copyContentMode === "items_only" ? "bg-[#f6f9ff]" : "hover:bg-[#fbfcfe]"}`}
+                  >
+                    <span className="flex min-w-0 items-center gap-3">
+                      <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border ${copyContentMode === "items_only" ? "border-[#cfe0ff] bg-white text-[#407aff]" : "border-[#e3e9f2] bg-[#f8fafc] text-[#8a96a8]"}`}>
+                        <FileText className="h-4 w-4 stroke-[2.2]" />
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold text-[#182230]">只复制项目</span>
+                        <span className="mt-0.5 block text-xs leading-4 text-[#667085]">保留项目、单位、说明和单价，数量和优惠清空</span>
+                      </span>
+                    </span>
+                    <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition ${copyContentMode === "items_only" ? "border-[#407aff] bg-[#407aff] text-white ring-4 ring-[#407aff]/10" : "border-[#cfd7e3] bg-white text-transparent"}`}>
+                      <Check className="h-3.5 w-3.5 stroke-[2.4]" />
+                    </span>
                   </button>
                 </div>
               </div>
 
               {copyTargetMode === "current" ? (
-                <div className="mt-4 shrink-0 rounded-[12px] border border-[#e1e7f0] bg-[#fbfcfe] p-3">
-                  <p className="text-xs font-semibold text-[#98a2b3]">目标客户</p>
-                  <div className="mt-2 flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold text-[#182230]">{copyQuotationDialog.customer_name || activeRecordCustomer?.customer_name || "当前客户"}</p>
-                      <p className="mt-0.5 truncate text-xs text-[#667085]">将在当前客户预算记录中新增草稿副本</p>
+                <div className="quotation-copy-target-card mt-4 shrink-0 rounded-[10px] border border-[#e6ebf2] bg-[#fbfcfe] px-3.5 py-3">
+                  <div className="quotation-copy-current-summary flex items-center justify-between gap-3">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span className="quotation-copy-customer-avatar">
+                        {(copyQuotationDialog.customer_name || activeRecordCustomer?.customer_name || "客").slice(0, 1)}
+                      </span>
+                      <div className="min-w-0">
+                        <p className="quotation-copy-target-caption">复制去向</p>
+                        <p className="truncate text-[15px] font-semibold text-[#182230]">{copyQuotationDialog.customer_name || activeRecordCustomer?.customer_name || "当前客户"}</p>
+                        <p className="mt-0.5 truncate text-xs text-[#667085]">{copyQuotationDialog.title || "装修报价单"}</p>
+                      </div>
                     </div>
-                    <CheckCircle2 className="h-4 w-4 shrink-0 text-[#12b76a]" />
+                    <div className="quotation-copy-result-meta shrink-0 text-right">
+                      <span>生成草稿</span>
+                      <p>{copyContentMode === "items_only" ? "只复制项目" : "完整报价"}</p>
+                    </div>
                   </div>
                 </div>
               ) : (
-                <div className="mt-4 flex min-h-0 flex-1 flex-col">
+                <div className="quotation-copy-other-target mt-4 flex min-h-0 flex-1 flex-col">
                   <div className="relative shrink-0">
                     <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#98a2b3]" />
                     <input
@@ -3223,12 +3511,12 @@ export default function QuotationsPage() {
                         setCopyCustomerSearch(event.target.value);
                         setSelectedCopyCustomer(null);
                       }}
-                      className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white pl-9 pr-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
+                      className="quotation-copy-search h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white pl-9 pr-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
                       placeholder="搜索客户姓名、手机号、小区、房号"
                     />
                   </div>
                   {copyCustomerMore ? <p className="mt-2 shrink-0 text-xs font-medium text-[#667085]">客户数量较多，已显示前 1000 条，可输入关键词继续定位。</p> : null}
-                  <div className="mt-3 min-h-0 flex-1 overflow-y-auto rounded-[12px] border border-[#e1e7f0] bg-white">
+                  <div className="quotation-copy-customer-list mt-3 min-h-0 flex-1 overflow-y-auto rounded-[10px] border border-[#e1e7f0] bg-white">
                     {copyCustomerLoading ? (
                       <div className="flex h-28 items-center justify-center text-sm font-semibold text-[#52647b]">
                         <Loader2 className="mr-2 h-4 w-4 animate-spin text-[#407aff]" />
@@ -3246,21 +3534,23 @@ export default function QuotationsPage() {
                               key={customer.id}
                               type="button"
                               onClick={() => setSelectedCopyCustomer(customer)}
-                              className={`grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-3.5 py-2.5 text-left transition ${active ? "bg-[#f3f7ff]" : "bg-white hover:bg-[#f8fafc]"}`}
+                              className={`quotation-copy-customer-row grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-3.5 py-2.5 text-left transition ${active ? "bg-[#f3f7ff]" : "bg-white hover:bg-[#f8fafc]"}`}
                             >
-                              <div className="grid min-w-0 grid-cols-[64px_minmax(0,1fr)] items-start gap-x-2">
-                                <span className={`mt-px inline-flex h-[18px] w-[64px] items-center justify-center rounded-[6px] border text-[11px] font-semibold ${statusView.className}`}>
+                              <div className="grid min-w-0 grid-cols-[64px_minmax(0,1fr)] items-center gap-x-2">
+                                <span className={`quotation-copy-customer-status inline-flex h-[18px] w-[64px] items-center justify-center rounded-[6px] border text-[11px] font-semibold ${statusView.className}`}>
                                   <span className="truncate px-1">
                                     {statusView.label}
                                   </span>
                                 </span>
-                                <p className="min-w-0 truncate text-[12px] font-semibold leading-4 text-[#182230]" title={houseText}>
-                                  {houseText}
-                                </p>
-                                <div className="col-start-2 mt-0.5 flex min-w-0 items-center gap-1.5 text-[12px] leading-4 text-[#667085]">
-                                  <span className="truncate font-medium">{customer.name || "未命名客户"}</span>
-                                  <span className="shrink-0 text-[#c7cfda]">·</span>
-                                  <span className="truncate tabular-nums">{contactText}</span>
+                                <div className="min-w-0">
+                                  <p className="min-w-0 truncate text-[12px] font-semibold leading-4 text-[#182230]" title={houseText}>
+                                    {houseText}
+                                  </p>
+                                  <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12px] leading-4 text-[#667085]">
+                                    <span className="truncate font-medium">{customer.name || "未命名客户"}</span>
+                                    <span className="shrink-0 text-[#c7cfda]">·</span>
+                                    <span className="truncate tabular-nums">{contactText}</span>
+                                  </div>
                                 </div>
                               </div>
                               <span className={`flex h-5 w-5 items-center justify-center rounded-full border ${active ? "border-[#407aff] bg-[#407aff] text-white" : "border-[#d0d7e2] bg-white text-transparent"}`}>
@@ -3280,16 +3570,20 @@ export default function QuotationsPage() {
                 </div>
               )}
 
-              <p className="mt-3 shrink-0 text-xs leading-5 text-[#667085]">报价内容会复制为草稿；复制到其他客户时，客户资料取目标客户。</p>
+              <p className="quotation-copy-hint mt-2 shrink-0 px-1 text-xs leading-5 text-[#667085]">
+                {copyContentMode === "items_only"
+                  ? `最终会${copyTargetMode === "other" ? "复制到所选客户" : "复制到当前客户"}，保留项目、单位、说明和单价，数量、金额和优惠会清空。`
+                  : `最终会${copyTargetMode === "other" ? "复制到所选客户" : "复制到当前客户"}，项目、数量、单价和金额都会一起复制为草稿。`}
+              </p>
               {message ? <p className="mt-3 rounded-[10px] border border-red-100 bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">{message}</p> : null}
-            </div>
 
-            <div className="flex shrink-0 justify-end gap-2 border-t border-[#e4e9f0] bg-white px-5 py-3">
-              <button type="button" onClick={closeCopyQuotationDialog} disabled={copyingQuotation} className="btn-secondary disabled:opacity-50">取消</button>
-              <button type="button" disabled={copyingQuotation || (copyTargetMode === "other" && !selectedCopyCustomer)} onClick={confirmCopyQuotation} className="btn-primary disabled:opacity-50">
-                {copyingQuotation ? <Loader2 className="h-4 w-4 animate-spin" /> : <Copy className="h-4 w-4" />}
-                确认复制
-              </button>
+              <div className="quotation-copy-footer">
+                <button type="button" onClick={closeCopyQuotationDialog} disabled={copyingQuotation} className="quotation-copy-cancel-button disabled:opacity-50">取消</button>
+                <button type="button" disabled={copyingQuotation || (copyTargetMode === "other" && !selectedCopyCustomer)} onClick={confirmCopyQuotation} className="quotation-copy-confirm-button disabled:opacity-50">
+                  {copyingQuotation ? <Loader2 className="h-4 w-4 animate-spin" /> : <Copy className="h-4 w-4" />}
+                  确认复制
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -3425,6 +3719,120 @@ export default function QuotationsPage() {
                 {recordProjectInfoSaving ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
                 保存资料
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {changeLogRecord && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[#0f172a]/10 p-4 md:p-6">
+          <div className="quotation-change-log-modal flex h-[min(820px,calc(100dvh-56px))] w-full max-w-[980px] flex-col overflow-hidden rounded-[16px] border border-[#d7e0eb] bg-white shadow-none [&_*]:!shadow-none" style={{ boxShadow: "none", backgroundImage: "none" }}>
+            <div className="min-h-0 flex-1 overflow-y-auto bg-white px-5 pb-4 pt-4">
+              <div className="mb-3 flex items-start justify-between gap-4 bg-white shadow-none" style={{ boxShadow: "none", backgroundImage: "none" }}>
+                <div className="flex min-w-0 items-start gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[10px] border border-[#d8e6ff] bg-[#f3f7ff] text-[#407aff] shadow-none" style={{ boxShadow: "none", backgroundImage: "none" }}>
+                      <History className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0">
+                    <h2 className="truncate text-[16px] font-semibold text-[#182230]">报价变更记录</h2>
+                    <p className="mt-0.5 truncate text-[11px] text-[#667085]">{changeLogRecord.title || getBudgetRecordTitle(changeLogRecord)}</p>
+                  </div>
+                </div>
+                <button type="button" onClick={closeQuotationChangeLogs} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[8px] text-[#667085] transition hover:bg-[#f2f4f7] hover:text-[#182230]" aria-label="关闭报价变更记录">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              {changeLogsLoading ? (
+                <div className="flex min-h-[280px] items-center justify-center rounded-[12px] border border-[#e2e8f0] bg-white text-sm font-medium text-[#52647b] shadow-none">
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin text-[#407aff]" />
+                  正在读取变更记录...
+                </div>
+              ) : changeLogsError ? (
+                <div className="rounded-[12px] border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">{changeLogsError}</div>
+              ) : changeLogs.length > 0 ? (
+                <div className="space-y-2.5 pt-0">
+                  {changeLogs.map((log) => {
+                    const displayChanges = getQuotationChangeDisplayItems(log.changes);
+                    const displaySummary = getChangeLogDisplaySummary(log, displayChanges);
+                    return (
+                    <section key={log.id} className="overflow-hidden rounded-[12px] border border-[#dfe6ef] bg-white shadow-none">
+                      <div className="flex flex-wrap items-center justify-between gap-2 bg-white px-3 pb-1.5 pt-2.5">
+                        <div className="flex min-w-0 items-center gap-2.5">
+                          <span className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#182230] text-[11px] font-semibold text-white ring-1 ring-[#e3eaf3]">
+                            {log.user_avatar ? (
+                              <NativeImage src={log.user_avatar} alt={`${log.user_name || "操作人"}头像`} className="h-full w-full object-cover" loading="eager" />
+                            ) : (
+                              (log.user_name || "用").slice(0, 1)
+                            )}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-medium text-[#182230]">{log.user_name || "未知用户"} 在 {formatChangeLogDateTime(log.created_at)} 操作</p>
+                            <p className="mt-0.5 text-[10px] leading-3 text-[#8a96a8]">{displaySummary}</p>
+                          </div>
+                        </div>
+                        <span className="rounded-full bg-[#f1f4f8] px-2 py-0.5 text-[10px] font-medium tabular-nums text-[#52647b]">
+                          {displayChanges.length} 条
+                        </span>
+                      </div>
+                      <div className="bg-white px-2.5 py-1.5">
+                        <div className="divide-y divide-[#eef2f6]">
+                          {displayChanges.map((displayChange) => {
+                            if (displayChange.kind === "replacement") {
+                              return (
+                                <article key={displayChange.id} className="rounded-[10px] px-2.5 py-2 transition hover:bg-[#f8fafc]">
+                                  <p className="break-words text-xs font-medium leading-4 text-[#182230]">
+                                    由「{displayChange.oldName}」替换为「{displayChange.newName}」
+                                  </p>
+                                  <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px] leading-3 text-[#8a96a8]">
+                                    {displayChange.space ? <span>{displayChange.space}</span> : null}
+                                    {displayChange.space && displayChange.category ? <span className="text-[#c1c9d6]">/</span> : null}
+                                    {getChangeCategoryLabel(displayChange.category) ? <span>{getChangeCategoryLabel(displayChange.category)}</span> : null}
+                                  </div>
+                                </article>
+                              );
+                            }
+                            const change = displayChange.change;
+                            return (
+                            <article key={displayChange.id} className="grid gap-2 rounded-[10px] px-2.5 py-1.5 transition hover:bg-[#f8fafc] md:grid-cols-[minmax(0,0.76fr)_minmax(340px,0.74fr)] md:items-center">
+                              <div className="min-w-0">
+                                <p className="break-words text-xs font-medium leading-4 text-[#182230]">
+                                  {getChangeActionText(displayChange.change)}
+                                </p>
+                                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px] leading-3 text-[#8a96a8]">
+                                  {change?.space ? <span>{change.space}</span> : null}
+                                  {change?.space && change.category ? <span className="text-[#c1c9d6]">/</span> : null}
+                                  {getChangeCategoryLabel(change?.category) ? <span>{getChangeCategoryLabel(change?.category)}</span> : null}
+                                </div>
+                              </div>
+                              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_18px_minmax(0,1fr)] gap-1.5">
+                                <div className="min-w-0 rounded-[7px] border border-[#edf1f6] bg-white px-2.5 py-1.5">
+                                  <p className="text-[10px] leading-3 text-[#98a2b3]">原值</p>
+                                  <p className="whitespace-pre-wrap break-words text-xs leading-4 text-[#667085]">
+                                    {change?.change_type === "created" ? "-" : formatChangeValue(change?.old_value)}
+                                  </p>
+                                </div>
+                                <span className="flex items-center justify-center text-xs text-[#b8c2d0]">→</span>
+                                <div className="min-w-0 rounded-[7px] border border-[#dbe8ff] bg-[#f8fbff] px-2.5 py-1.5">
+                                  <p className="text-[10px] leading-3 text-[#407aff]">新值</p>
+                                  <p className={`whitespace-pre-wrap break-words text-xs leading-4 ${change?.change_type === "deleted" ? "text-[#98a2b3]" : "text-[#182230]"}`}>
+                                    {change?.change_type === "deleted" ? "-" : formatChangeValue(change?.new_value)}
+                                  </p>
+                                </div>
+                              </div>
+                            </article>
+                          )})}
+                        </div>
+                      </div>
+                    </section>
+                  )})}
+                </div>
+              ) : (
+                <div className="flex min-h-[280px] flex-col items-center justify-center rounded-[12px] border border-dashed border-[#cfd7e3] bg-white px-6 text-center shadow-none">
+                  <History className="mb-3 h-8 w-8 text-[#98a2b3]" />
+                  <h3 className="text-sm font-semibold text-[#182230]">暂无变更记录</h3>
+                  <p className="mt-2 max-w-sm text-xs leading-5 text-[#667085]">从现在开始，报价明细里的数量、单价、名称、工艺说明等内容变化会记录在这里。</p>
+                </div>
+              )}
             </div>
           </div>
         </div>

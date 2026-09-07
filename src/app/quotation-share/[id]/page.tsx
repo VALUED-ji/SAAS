@@ -22,6 +22,14 @@ const baseExportColumnOptions: { key: BaseExportColumnKey; label: string }[] = [
 ];
 const configurableExportScopes: QuotationPrintScope[] = ["all", "all_without_cover", "base"];
 
+function hasReadableRichText(value: unknown) {
+  return String(value || "")
+    .replace(/<br\s*\/?>/gi, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .trim().length > 0;
+}
+
 export default function QuotationSharePage() {
   const params = useParams<{ id: string }>();
   const shareToken = params.id;
@@ -32,8 +40,9 @@ export default function QuotationSharePage() {
   const [canUsePrintTools, setCanUsePrintTools] = useState(false);
   const [outputMode, setOutputMode] = useState<QuotationOutputMode>("list");
   const [printScope, setPrintScope] = useState<QuotationPrintScope>("all");
-  const [exportColumnDialog, setExportColumnDialog] = useState<{ scope: QuotationPrintScope; selected: BaseExportColumnKey[]; action: "print" | "export" } | null>(null);
+  const [exportColumnDialog, setExportColumnDialog] = useState<{ scope: QuotationPrintScope; selected: BaseExportColumnKey[]; action: "print" | "export"; includeBudgetCompilation: boolean } | null>(null);
   const [printBaseColumns, setPrintBaseColumns] = useState<QuotationBaseColumnOptions | undefined>(undefined);
+  const [includeBudgetCompilation, setIncludeBudgetCompilation] = useState(true);
   const [mobileDocumentScale, setMobileDocumentScale] = useState(1);
   const printScopes: { value: QuotationPrintScope; label: string }[] = [
     { value: "all", label: "全部明细（带封面）" },
@@ -47,14 +56,17 @@ export default function QuotationSharePage() {
     setOutputMode("list");
     setPrintScope(scope);
   };
-  const printWithScope = (scope: QuotationPrintScope) => {
+  const hasBudgetCompilation = hasReadableRichText(data?.settings?.budgetCompilationHtml || data?.settings?.budgetCompilation);
+  const supportsBudgetCompilation = (scope: QuotationPrintScope) => scope === "all" || scope === "all_without_cover" || scope === "fees";
+  const printWithScope = (scope: QuotationPrintScope, nextIncludeBudgetCompilation = includeBudgetCompilation) => {
     setOutputMode("list");
     setPrintScope(scope);
+    setIncludeBudgetCompilation(nextIncludeBudgetCompilation);
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => window.print());
     });
   };
-  const exportWithScope = (scope: QuotationPrintScope, columns?: BaseExportColumnKey[]) => {
+  const exportWithScope = (scope: QuotationPrintScope, columns?: BaseExportColumnKey[], nextIncludeBudgetCompilation = includeBudgetCompilation) => {
     if (!data?.id) {
       window.alert("当前报价缺少编号，暂时无法导出表格");
       return;
@@ -63,20 +75,23 @@ export default function QuotationSharePage() {
     url.searchParams.set("scope", scope);
     url.searchParams.set("share", shareToken);
     if (columns) url.searchParams.set("baseColumns", columns.join(","));
+    if (hasBudgetCompilation && supportsBudgetCompilation(scope) && !nextIncludeBudgetCompilation) {
+      url.searchParams.set("includeBudgetCompilation", "0");
+    }
     window.location.href = url.toString();
   };
   const openExportColumnDialog = (scope: QuotationPrintScope) => {
-    if (configurableExportScopes.includes(scope)) {
-      setExportColumnDialog({ scope, selected: baseExportColumnOptions.map((option) => option.key), action: "export" });
+    if (configurableExportScopes.includes(scope) || supportsBudgetCompilation(scope)) {
+      setExportColumnDialog({ scope, selected: baseExportColumnOptions.map((option) => option.key), action: "export", includeBudgetCompilation: true });
       return;
     }
     exportWithScope(scope);
   };
   const openPrintColumnDialog = (scope: QuotationPrintScope) => {
-    if (configurableExportScopes.includes(scope)) {
+    if (configurableExportScopes.includes(scope) || supportsBudgetCompilation(scope)) {
       setOutputMode("list");
       setPrintScope(scope);
-      setExportColumnDialog({ scope, selected: baseExportColumnOptions.map((option) => option.key), action: "print" });
+      setExportColumnDialog({ scope, selected: baseExportColumnOptions.map((option) => option.key), action: "print", includeBudgetCompilation: true });
       return;
     }
     setPrintBaseColumns(undefined);
@@ -98,13 +113,14 @@ export default function QuotationSharePage() {
       setPrintBaseColumns(nextColumns);
       setOutputMode("list");
       setPrintScope(exportColumnDialog.scope);
+      setIncludeBudgetCompilation(exportColumnDialog.includeBudgetCompilation);
       setExportColumnDialog(null);
       window.requestAnimationFrame(() => {
         window.requestAnimationFrame(() => window.print());
       });
       return;
     }
-    exportWithScope(exportColumnDialog.scope, exportColumnDialog.selected);
+    exportWithScope(exportColumnDialog.scope, exportColumnDialog.selected, exportColumnDialog.includeBudgetCompilation);
     setExportColumnDialog(null);
   };
 
@@ -114,7 +130,18 @@ export default function QuotationSharePage() {
     setCanUsePrintTools(url.searchParams.get("print") === "1");
     url.searchParams.delete("print");
     setShareUrl(url.toString());
-  }, []);
+    fetch("/api/quotation-shares/compact", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: shareToken }),
+    })
+      .then((res) => res.json().then((next) => ({ ok: res.ok, next })))
+      .then(({ ok, next }) => {
+        if (!ok || !next?.url) return;
+        setShareUrl(new URL(String(next.url), window.location.origin).toString());
+      })
+      .catch(() => undefined);
+  }, [shareToken]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -203,28 +230,47 @@ export default function QuotationSharePage() {
                   <i><Columns3 className="h-4 w-4" /></i>
                   <strong>{exportColumnDialog.action === "print" ? "打印列设置" : "导出列设置"}</strong>
                 </div>
-                <span>选择基装明细中需要显示的列，确认后开始{exportColumnDialog.action === "print" ? "打印" : "导出"}。</span>
+                <span>
+                  {configurableExportScopes.includes(exportColumnDialog.scope)
+                    ? `选择基装明细中需要显示的列，确认后开始${exportColumnDialog.action === "print" ? "打印" : "导出"}。`
+                    : `确认是否带上预算编制，确认后开始${exportColumnDialog.action === "print" ? "打印" : "导出"}。`}
+                </span>
               </div>
               <button type="button" onClick={() => setExportColumnDialog(null)} aria-label="关闭">
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="quotation-export-column-grid">
-              {baseExportColumnOptions.map((option) => {
-                const checked = exportColumnDialog.selected.includes(option.key);
-                return (
-                  <button
-                    key={option.key}
-                    type="button"
-                    onClick={() => toggleExportColumn(option.key)}
-                    data-checked={checked || undefined}
-                  >
-                    <i><Check className="h-3.5 w-3.5" /></i>
-                    <span>{option.label}</span>
-                  </button>
-                );
-              })}
-            </div>
+            {configurableExportScopes.includes(exportColumnDialog.scope) && (
+              <div className="quotation-export-column-grid">
+                {baseExportColumnOptions.map((option) => {
+                  const checked = exportColumnDialog.selected.includes(option.key);
+                  return (
+                    <button
+                      key={option.key}
+                      type="button"
+                      onClick={() => toggleExportColumn(option.key)}
+                      data-checked={checked || undefined}
+                    >
+                      <i><Check className="h-3.5 w-3.5" /></i>
+                      <span>{option.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {supportsBudgetCompilation(exportColumnDialog.scope) && (
+              <button
+                type="button"
+                className="quotation-export-budget-option"
+                data-checked={hasBudgetCompilation && exportColumnDialog.includeBudgetCompilation || undefined}
+                disabled={!hasBudgetCompilation}
+                onClick={() => setExportColumnDialog((current) => current ? { ...current, includeBudgetCompilation: !current.includeBudgetCompilation } : current)}
+              >
+                <i><Check className="h-3.5 w-3.5" /></i>
+                <span>{exportColumnDialog.action === "print" ? "打印预算编制" : "导出预算编制"}</span>
+                {!hasBudgetCompilation && <em>当前报价暂无预算编制内容</em>}
+              </button>
+            )}
             <div className="quotation-export-column-actions">
               <button type="button" onClick={() => setExportColumnDialog(null)}>取消</button>
                 <button type="button" onClick={confirmExportColumns}>{exportColumnDialog.action === "print" ? "确认打印" : "确认导出"}</button>
@@ -292,6 +338,7 @@ export default function QuotationSharePage() {
           outputMode={canUsePrintTools ? outputMode : "list"}
           printScope={canUsePrintTools ? printScope : "all"}
           baseColumns={printBaseColumns}
+          includeBudgetCompilation={includeBudgetCompilation}
         />
       </div>
 
@@ -417,7 +464,7 @@ export default function QuotationSharePage() {
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 10px;
           background: linear-gradient(180deg, #f5f7fa 0%, #f8fafc 100%);
-          padding: 16px 20px 18px;
+          padding: 16px 20px 10px;
         }
         .quotation-export-column-grid button {
           display: flex;
@@ -464,6 +511,73 @@ export default function QuotationSharePage() {
           border-color: #14b872;
           background: #14b872;
           color: #ffffff;
+        }
+        .quotation-export-budget-option {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 10px;
+          width: calc(100% - 40px);
+          margin: 16px 20px 18px;
+          border: 1px solid #dde5ef;
+          border-radius: 10px;
+          background: rgba(255, 255, 255, 0.92);
+          padding: 11px 12px;
+          text-align: left;
+          color: #26384c;
+          box-shadow: 0 1px 1px rgba(16, 24, 40, 0.03);
+          transition: border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease;
+        }
+        .quotation-export-column-grid + .quotation-export-budget-option {
+          margin-top: 0;
+        }
+        .quotation-export-budget-option:hover {
+          border-color: #b8c7d8;
+          background: #ffffff;
+          box-shadow: 0 6px 16px rgba(25, 43, 68, 0.07);
+        }
+        .quotation-export-budget-option i {
+          display: inline-flex;
+          height: 18px;
+          width: 18px;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid #c8d4e2;
+          border-radius: 50%;
+          color: transparent;
+          font-style: normal;
+        }
+        .quotation-export-budget-option[data-checked="true"] {
+          border-color: #73c69a;
+          background: linear-gradient(180deg, #fbfffd 0%, #f2fbf6 100%);
+          box-shadow: 0 7px 18px rgba(20, 184, 114, 0.12), 0 0 0 1px rgba(20, 184, 114, 0.07) inset;
+        }
+        .quotation-export-budget-option[data-checked="true"] i {
+          border-color: #14b872;
+          background: #14b872;
+          color: #ffffff;
+        }
+        .quotation-export-budget-option span {
+          font-size: 12px;
+          font-weight: 600;
+        }
+        .quotation-export-budget-option em {
+          font-size: 11px;
+          font-style: normal;
+          color: #7a8698;
+        }
+        .quotation-export-budget-option:disabled {
+          cursor: not-allowed;
+          border-color: #d5dfeb;
+          background: rgba(255, 255, 255, 0.9);
+          color: #334155;
+          opacity: 1;
+          box-shadow: 0 7px 18px rgba(100, 116, 139, 0.12), 0 0 0 1px rgba(100, 116, 139, 0.06);
+        }
+        .quotation-export-budget-option:disabled:hover {
+          border-color: #d5dfeb;
+          background: rgba(255, 255, 255, 0.9);
+          box-shadow: 0 7px 18px rgba(100, 116, 139, 0.12), 0 0 0 1px rgba(100, 116, 139, 0.06);
         }
         .quotation-export-column-actions {
           display: flex;
@@ -725,15 +839,21 @@ export default function QuotationSharePage() {
           }
           .quotation-share-page .quotation-print-cover-field {
             grid-template-columns: 126px minmax(0, 1fr) !important;
+            align-items: start !important;
             gap: 14px !important;
           }
           .quotation-share-page .quotation-print-cover-field span,
           .quotation-share-page .quotation-print-cover-field strong {
             font-size: 16px !important;
-            line-height: 24px !important;
+            line-height: 22px !important;
           }
           .quotation-share-page .quotation-print-cover-field strong {
             min-height: 25px !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+            word-break: break-word !important;
           }
           .quotation-share-page .quotation-print-cover-brand {
             position: absolute !important;
@@ -779,27 +899,66 @@ export default function QuotationSharePage() {
           .quotation-share-page .quotation-print-head-total {
             margin-top: 14px !important;
           }
-          .quotation-share-page .quotation-print-head-info-grid {
-            grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-            border-radius: 10px !important;
+          .quotation-share-page .quotation-print-head-table {
+            grid-template-columns: 34% repeat(3, minmax(0, 1fr)) 10% !important;
+            grid-template-rows: repeat(2, 44px) !important;
+          }
+          .quotation-share-page .quotation-print-head-title-cell {
+            grid-column: 1 !important;
+            grid-row: 1 / span 2 !important;
+            padding: 8px 14px !important;
+          }
+          .quotation-share-page .quotation-print-head-title-cell h1 {
+            font-size: 15px !important;
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+            word-break: break-word !important;
           }
           .quotation-share-page .quotation-print-head-field {
-            min-height: 52px !important;
-            padding: 9px 12px !important;
-            border-right: 1px solid #e4eaf2 !important;
-            border-bottom: 1px solid #e4eaf2 !important;
-          }
-          .quotation-share-page .quotation-print-head-field:nth-child(3n),
-          .quotation-share-page .quotation-print-head-field:last-child {
+            min-height: 42px !important;
+            padding: 7px 12px !important;
             border-right: 0 !important;
-          }
-          .quotation-share-page .quotation-print-head-field:nth-last-child(-n + 3) {
             border-bottom: 0 !important;
+            border-left: var(--quotation-print-head-inner-line-width) solid #111111 !important;
+          }
+          .quotation-share-page .quotation-print-head-field-phone {
+            grid-column: 2 !important;
+            grid-row: 1 !important;
+            border-top: 0 !important;
+          }
+          .quotation-share-page .quotation-print-head-field-area {
+            grid-column: 3 !important;
+            grid-row: 1 !important;
+            border-top: 0 !important;
+          }
+          .quotation-share-page .quotation-print-head-field-date {
+            grid-column: 4 !important;
+            grid-row: 1 !important;
+            border-top: 0 !important;
+          }
+          .quotation-share-page .quotation-print-head-field-designer {
+            grid-column: 2 !important;
+            grid-row: 2 !important;
+            border-top: var(--quotation-print-head-inner-line-width) solid #111111 !important;
+          }
+          .quotation-share-page .quotation-print-head-field-creator {
+            grid-column: 3 !important;
+            grid-row: 2 !important;
+            border-top: var(--quotation-print-head-inner-line-width) solid #111111 !important;
+          }
+          .quotation-share-page .quotation-print-head-field-company-phone {
+            grid-column: 4 !important;
+            grid-row: 2 !important;
+            border-top: var(--quotation-print-head-inner-line-width) solid #111111 !important;
           }
           .quotation-share-page .quotation-print-qr {
             display: flex !important;
+            grid-column: 5 !important;
+            grid-row: 1 / span 2 !important;
             width: auto !important;
             justify-self: auto !important;
+            border-left: var(--quotation-print-head-inner-line-width) solid #111111 !important;
+            border-top: 0 !important;
           }
           .quotation-share-page .quotation-print-section {
             margin-top: 20px !important;
@@ -817,10 +976,15 @@ export default function QuotationSharePage() {
             min-width: 0 !important;
           }
           .quotation-share-page .quotation-print-appendix-note,
+          .quotation-share-page .quotation-print-budget-compilation-content,
           .quotation-share-page .quotation-print-signature-grid,
           .quotation-share-page .quotation-print-composition,
           .quotation-share-page .quotation-print-composition-detail-grid {
             min-width: 0;
+          }
+          .quotation-share-page .quotation-print-budget-compilation-head span,
+          .quotation-share-page .quotation-print-budget-compilation-content {
+            border-color: #111111 !important;
           }
           .quotation-share-page .quotation-print-composition,
           .quotation-share-page .quotation-print-composition-detail-grid {

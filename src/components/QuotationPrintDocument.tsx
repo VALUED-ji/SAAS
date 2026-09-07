@@ -1,4 +1,6 @@
-import { Fragment, type ReactNode } from "react";
+"use client";
+
+import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { calculateChargeableOtherFeeTotals, calculateOtherFeeTotals, getFeeFormulaText, getFeeRuleText, toMoney, toNumber, type FeeFormulaContext } from "@/lib/quotationFeeFormulas";
 import { getQuotationRowColor } from "@/lib/quotationRowColors";
 import { formatAlphaSequence } from "@/lib/quotationSequence";
@@ -35,13 +37,20 @@ export type PrintableQuotationSettings = {
   taxRate?: number;
   discount?: number;
   discountType?: "fee" | "space" | "work_type";
+  discountMode?: "amount" | "rate";
+  discountRate?: number;
   discountScope?: string;
   discountSpace?: string;
   discountWorkType?: string;
+  discountRules?: DiscountRule[];
   excludeSpecificDiscountAmount?: number;
+  excludeSpecialDiscountItems?: boolean;
+  excludeLaborOnlyDiscountItems?: boolean;
   warrantyMonths?: number;
   appendixNote?: string | null;
   quotationNote?: string | null;
+  budgetCompilationHtml?: string | null;
+  budgetCompilation?: string | null;
   quoteSpaces?: string[];
   quoteCategories?: string[];
   signatureLabels?: string[];
@@ -57,6 +66,7 @@ export type PrintableQuotationDetail = {
   branch_company_logo_url?: string | null;
   branch_company_legal_name?: string | null;
   branch_company_short_name?: string | null;
+  branch_company_phone?: string | null;
   title?: string | null;
   project_name?: string | null;
   project_address?: string | null;
@@ -101,6 +111,23 @@ type Totals = {
 type AppendixNotePart = {
   label?: string;
   content: string;
+};
+
+type DiscountRule = {
+  id: string;
+  type: "fee" | "space" | "work_type";
+  mode: "amount" | "rate";
+  scope?: string;
+  space?: string;
+  workType?: string;
+  discount?: number;
+  rate?: number;
+};
+
+type DiscountScopeOption = {
+  value: string;
+  label: string;
+  amount: number;
 };
 
 const emptyText = "-";
@@ -162,6 +189,23 @@ function getDiscountScopeLabel(settings?: PrintableQuotationSettings) {
   };
   if (labels[value]) return labels[value];
   if (value.startsWith("category:")) return value.slice("category:".length) || "总价";
+  return "总价";
+}
+
+function getDiscountScopeLabelByValue(value: string) {
+  const normalized = String(value || "total").trim();
+  const labels: Record<string, string> = {
+    base: "基装直接费",
+    base_labor: "基装直接费（人工）",
+    base_material: "基装直接费（材料）",
+    product: "产品费用",
+    custom_cabinet: "定制柜费用",
+    other: "综合费用",
+    direct: "工程直接费",
+    total: "总价",
+  };
+  if (labels[normalized]) return labels[normalized];
+  if (normalized.startsWith("category:")) return normalized.slice("category:".length) || "总价";
   return "总价";
 }
 
@@ -232,6 +276,169 @@ function getItemMaterialSubtotal(item: PrintableQuotationItem) {
   return toMoney(toNumber(item.quantity) * factor * toNumber(item.material_cost));
 }
 
+function isSpecialQuoteItem(item?: Pick<PrintableQuotationItem, "row_color"> | null) {
+  return String(item?.row_color || "") === "special";
+}
+
+function isLaborOnlyQuoteItem(item: PrintableQuotationItem) {
+  if (!isBaseCategory(item.category)) return false;
+  return getItemMaterialSubtotal(item) <= 0 && getItemLaborSubtotal(item) > 0;
+}
+
+function isExcludedFromDiscount(item: PrintableQuotationItem, settings?: PrintableQuotationSettings) {
+  if (settings?.excludeSpecialDiscountItems && isSpecialQuoteItem(item)) return true;
+  if (settings?.excludeLaborOnlyDiscountItems && isLaborOnlyQuoteItem(item)) return true;
+  return false;
+}
+
+function getDiscountableItems(items: PrintableQuotationItem[], settings?: PrintableQuotationSettings) {
+  return items.filter((item) => !isExcludedFromDiscount(item, settings));
+}
+
+function getDiscountScopeOptions(items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }): DiscountScopeOption[] {
+  const discountableItems = getDiscountableItems(items, settings);
+  const feeContext = buildFeeFormulaContext(discountableItems, settings?.quoteCategories);
+  const customCategoryOptions = Object.entries(feeContext.categoryAmounts || {}).map(([label, amount]) => ({
+    value: `category:${label}`,
+    label,
+    amount: toMoney(toNumber(amount)),
+  }));
+  const customCabinetAmount = discountableItems
+    .filter((item) => isCustomCabinetCategory(item.category))
+    .reduce((sum, item) => toMoney(sum + getItemTotal(item)), 0);
+  const discountableBaseAmount = discountableItems.filter((item) => isBaseCategory(item.category)).reduce((sum, item) => toMoney(sum + getItemTotal(item)), 0);
+  const discountableProductAmount = discountableItems.filter((item) => getCategoryKey(item.category) === "main_material").reduce((sum, item) => toMoney(sum + getItemTotal(item)), 0);
+  const discountableCustomCategoryAmount = discountableItems
+    .filter((item) => !isBaseCategory(item.category) && !isOtherCategory(item.category) && getCategoryKey(item.category) !== "main_material")
+    .reduce((sum, item) => toMoney(sum + getItemTotal(item)), 0);
+  const discountableDirectAmount = discountableBaseAmount + discountableProductAmount + discountableCustomCategoryAmount;
+  const fixedOptions: DiscountScopeOption[] = [
+    { value: "base", label: "基装直接费", amount: discountableBaseAmount },
+    { value: "base_labor", label: "基装直接费（人工）", amount: discountableItems.reduce((sum, item) => toMoney(sum + getItemLaborSubtotal(item)), 0) },
+    { value: "base_material", label: "基装直接费（材料）", amount: discountableItems.reduce((sum, item) => toMoney(sum + getItemMaterialSubtotal(item)), 0) },
+    { value: "product", label: "产品费用", amount: discountableProductAmount },
+    { value: "custom_cabinet", label: "定制柜费用", amount: customCabinetAmount },
+    { value: "other", label: "综合费用", amount: totals.otherAmount },
+    { value: "direct", label: "工程直接费", amount: discountableDirectAmount },
+    { value: "total", label: "总价", amount: discountableDirectAmount + totals.otherAmount },
+  ];
+  const fixedLabels = new Set(fixedOptions.map((option) => option.label));
+  const dynamicOptions = customCategoryOptions.filter((option) => !fixedLabels.has(option.label) && !/组合包|套餐|一口价|package|定制柜/i.test(option.label));
+  return [...fixedOptions, ...dynamicOptions];
+}
+
+function getDiscountSpaceOptions(items: PrintableQuotationItem[], settings?: PrintableQuotationSettings): DiscountScopeOption[] {
+  const discountableItems = getDiscountableItems(items, settings);
+  const spaces = uniqueValues([
+    ...(Array.isArray(settings?.quoteSpaces) ? settings.quoteSpaces : []),
+    ...items.filter((item) => !isOtherCategory(item.category)).map((item) => inferItemSpace(item)),
+  ]);
+  return spaces.map((space) => ({
+    value: `space:${space}`,
+    label: space,
+    amount: discountableItems
+      .filter((item) => !isOtherCategory(item.category) && inferItemSpace(item) === space)
+      .reduce((sum, item) => toMoney(sum + getItemTotal(item)), 0),
+  }));
+}
+
+function getDiscountWorkTypeOptions(items: PrintableQuotationItem[], settings?: PrintableQuotationSettings): DiscountScopeOption[] {
+  const discountableItems = getDiscountableItems(items, settings);
+  const workTypes = uniqueValues(items.filter((item) => !isOtherCategory(item.category)).map((item) => String(item.work_type_name || "").trim()));
+  return workTypes.map((workType) => ({
+    value: `work_type:${workType}`,
+    label: workType,
+    amount: discountableItems
+      .filter((item) => !isOtherCategory(item.category) && String(item.work_type_name || "").trim() === workType)
+      .reduce((sum, item) => toMoney(sum + getItemTotal(item)), 0),
+  }));
+}
+
+function getLegacyDiscountRule(settings?: PrintableQuotationSettings): DiscountRule | null {
+  const discount = Math.max(0, toNumber(settings?.discount));
+  if (discount <= 0) return null;
+  const type = settings?.discountType === "space" || settings?.discountType === "work_type" ? settings.discountType : "fee";
+  return {
+    id: "legacy",
+    type,
+    mode: settings?.discountMode === "rate" ? "rate" : "amount",
+    scope: settings?.discountScope || "total",
+    space: settings?.discountSpace || "",
+    workType: settings?.discountWorkType || "",
+    discount,
+    rate: Math.min(1, Math.max(0, toNumber(settings?.discountRate || 1))),
+  };
+}
+
+function getDiscountRules(settings?: PrintableQuotationSettings): DiscountRule[] {
+  const hasRuleList = Array.isArray(settings?.discountRules);
+  const rawRules = hasRuleList ? settings?.discountRules || [] : [];
+  const rules = rawRules
+    .map((rule, index): DiscountRule => ({
+      id: String(rule?.id || `rule_${index}`),
+      type: rule?.type === "space" || rule?.type === "work_type" ? rule.type : "fee",
+      mode: rule?.mode === "rate" ? "rate" : "amount",
+      scope: String(rule?.scope || "total"),
+      space: String(rule?.space || ""),
+      workType: String(rule?.workType || ""),
+      discount: Math.max(0, toNumber(rule?.discount)),
+      rate: Math.min(1, Math.max(0, toNumber(rule?.rate || 1))),
+    }))
+    .filter((rule) => rule.mode === "rate" ? toNumber(rule.rate) < 1 : toNumber(rule.discount) > 0);
+  if (hasRuleList) return rules;
+  const legacyRule = getLegacyDiscountRule(settings);
+  return legacyRule ? [legacyRule] : [];
+}
+
+function getDiscountRuleValue(rule: DiscountRule) {
+  if (rule.type === "space") return rule.space ? `space:${rule.space}` : "";
+  if (rule.type === "work_type") return rule.workType ? `work_type:${rule.workType}` : "";
+  return rule.scope || "total";
+}
+
+function getDiscountRuleScope(rule: DiscountRule, items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }) {
+  const options = rule.type === "space"
+    ? getDiscountSpaceOptions(items, settings)
+    : rule.type === "work_type"
+      ? getDiscountWorkTypeOptions(items, settings)
+      : getDiscountScopeOptions(items, settings, totals);
+  const value = getDiscountRuleValue(rule);
+  return options.find((option) => option.value === value)
+    || options.find((option) => option.value === "total")
+    || options[0];
+}
+
+function getDiscountRuleAmount(rule: DiscountRule, items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }) {
+  const scope = getDiscountRuleScope(rule, items, settings, totals);
+  const scopeAmount = Math.max(0, toNumber(scope?.amount));
+  const excludedAmount = Math.min(scopeAmount, Math.max(0, toNumber(settings?.excludeSpecificDiscountAmount)));
+  const baseAmount = Math.max(0, scopeAmount - excludedAmount);
+  if (baseAmount <= 0) return 0;
+  if (rule.mode === "rate") return toMoney(baseAmount * (1 - Math.min(1, Math.max(0, toNumber(rule.rate || 1)))));
+  return toMoney(Math.min(Math.max(0, toNumber(rule.discount)), baseAmount));
+}
+
+function getDiscountRuleRows(items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }) {
+  return getDiscountRules(settings)
+    .map((rule) => {
+      const scope = getDiscountRuleScope(rule, items, settings, totals);
+      const amount = getDiscountRuleAmount(rule, items, settings, totals);
+      const label = scope?.label || (rule.type === "space" ? rule.space : rule.type === "work_type" ? rule.workType : getDiscountScopeLabelByValue(rule.scope || "total")) || "优惠对象";
+      const rateText = `${(toNumber(rule.rate || 1) * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
+      const discountRateText = `${((1 - toNumber(rule.rate || 1)) * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
+      return {
+        id: rule.id,
+        label,
+        formula: rule.mode === "rate" ? `${label} × ${rateText}` : `${label}优惠`,
+        ruleText: rule.mode === "rate"
+          ? `${label}按${rateText}折扣系数计算，折扣优惠金额 ${formatPrintAmount(amount)}（${formatPrintAmount(toNumber(scope?.amount))} × ${discountRateText}）`
+          : `${label}直接优惠金额 ${formatPrintAmount(amount)}`,
+        amount,
+      };
+    })
+    .filter((row) => row.amount > 0);
+}
+
 function buildCostComposition(items: PrintableQuotationItem[]) {
   const addAmount = (map: Map<string, number>, name: string, amount: number) => {
     if (amount <= 0) return;
@@ -299,7 +506,9 @@ function calculateQuotationTotals(items: PrintableQuotationItem[], settings?: Pr
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
   const directAmount = baseAmount + materialAmount + otherAmount;
   const managementFee = 0;
-  const discount = toNumber(settings?.discount);
+  const discountRuleRows = getDiscountRuleRows(items, settings, { otherAmount });
+  const ruleDiscount = discountRuleRows.reduce((sum, row) => toMoney(sum + row.amount), 0);
+  const discount = Math.min(directAmount, Math.max(0, discountRuleRows.length > 0 ? ruleDiscount : toNumber(settings?.discount)));
   const taxAmount = Math.max(0, directAmount - discount) * toNumber(settings?.taxRate) / 100;
   const finalAmount = Math.max(0, directAmount + taxAmount - discount);
   return { baseAmount, materialAmount, mainMaterialAmount, customCategoryAmount, otherAmount, directAmount, managementFee, taxAmount, discount, finalAmount, feeFormulaContext };
@@ -349,6 +558,21 @@ function buildAppendixNoteParts(settings?: PrintableQuotationSettings, quotation
   if (templateNote) parts.push({ content: templateNote });
   if (customerNote && customerNote !== templateNote) parts.push({ label: "报价备注", content: customerNote });
   return parts;
+}
+
+function getBudgetCompilationHtml(settings?: PrintableQuotationSettings) {
+  const html = String(settings?.budgetCompilationHtml || settings?.budgetCompilation || "").trim();
+  const readableText = html
+    .replace(/<br\s*\/?>/gi, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .trim();
+  if (!readableText) return "";
+  return html
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, "")
+    .replace(/\son\w+=(["']).*?\1/gi, "")
+    .replace(/\s(href|src)=(["'])javascript:[\s\S]*?\2/gi, "");
 }
 
 function cleanQuotationTitle(value?: string | null) {
@@ -409,7 +633,20 @@ function printRowStyle(value?: string | null) {
 }
 
 function qrCodeUrl(target: string) {
-  return `https://api.qrserver.com/v1/create-qr-code/?size=180x180&margin=8&data=${encodeURIComponent(target)}`;
+  return `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=12&ecc=L&v=2026090603&data=${encodeURIComponent(target)}`;
+}
+
+function getCompactQuotationShareUrl(target: string) {
+  if (!target) return "";
+  try {
+    const url = new URL(target);
+    const match = url.pathname.match(/^\/quotation-share\/([^/]+)$/);
+    if (!match?.[1]) return target;
+    const currentOrigin = typeof window !== "undefined" ? window.location.origin : url.origin;
+    return `${currentOrigin}/q/${match[1]}`;
+  } catch {
+    return target;
+  }
 }
 
 function formatChineseDate(value?: string | Date | null) {
@@ -417,6 +654,19 @@ function formatChineseDate(value?: string | Date | null) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+function formatPrintDateTime(value?: string | Date | null) {
+  if (!value) return "";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    const matched = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (matched) return `${matched[1]}-${matched[2]}-${matched[3]}`;
+  }
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (next: number) => String(next).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 function getCurrentYearLastDay() {
@@ -671,6 +921,8 @@ function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQu
     };
     return values[column.key];
   };
+  const firstSummaryColumnIndex = columns.findIndex((column) => column.key === "materialTotal" || column.key === "laborTotal" || column.key === "subtotal");
+  const summaryLabelEndIndex = Math.max(0, (firstSummaryColumnIndex >= 0 ? firstSummaryColumnIndex : columns.length) - 1);
 
   return (
 	    <table className="quotation-print-table quotation-print-base-table">
@@ -718,9 +970,8 @@ function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQu
               })}
               <tr className="quotation-print-space-total-row">
                 {columns.map((column, index) => {
-                  const labelEndIndex = Math.max(0, columns.findIndex((item) => item.key === "subtotal") - 1);
-                  if (index === 0) return <td key={column.key} colSpan={Math.max(1, labelEndIndex + 1)} className="text-center">小计</td>;
-                  if (index <= labelEndIndex) return null;
+                  if (index === 0) return <td key={column.key} colSpan={Math.max(1, summaryLabelEndIndex + 1)} className="text-center">小计</td>;
+                  if (index <= summaryLabelEndIndex) return null;
                   if (column.key === "materialTotal") return <td key={column.key} className="text-right">{formatPrintAmount(groupMaterialTotal)}</td>;
                   if (column.key === "laborTotal") return <td key={column.key} className="text-right">{formatPrintAmount(groupLaborTotal)}</td>;
                   if (column.key === "subtotal") return <td key={column.key} className="text-right">{formatPrintAmount(groupTotal)}</td>;
@@ -737,9 +988,8 @@ function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQu
 	        )}
 	        <tr className="quotation-print-total-row">
             {columns.map((column, index) => {
-              const labelEndIndex = Math.max(0, columns.findIndex((item) => item.key === "subtotal") - 1);
-              if (index === 0) return <td key={column.key} colSpan={Math.max(1, labelEndIndex + 1)} className="text-center">基装小计</td>;
-              if (index <= labelEndIndex) return null;
+              if (index === 0) return <td key={column.key} colSpan={Math.max(1, summaryLabelEndIndex + 1)} className="text-center">基装小计</td>;
+              if (index <= summaryLabelEndIndex) return null;
               if (column.key === "materialTotal") return <td key={column.key} className="text-right">{formatPrintAmount(baseMaterialTotal)}</td>;
               if (column.key === "laborTotal") return <td key={column.key} className="text-right">{formatPrintAmount(baseLaborTotal)}</td>;
               if (column.key === "subtotal") return <td key={column.key} className="text-right">{formatPrintAmount(baseTotal)}</td>;
@@ -910,7 +1160,7 @@ function CustomCabinetDetailsTable({ items, settings }: { items: PrintableQuotat
   );
 }
 
-function OtherFeesTable({ items, totals, settings }: { items: PrintableQuotationItem[]; totals: Totals; settings?: PrintableQuotationSettings }) {
+function OtherFeesTable({ items, allItems, totals, settings }: { items: PrintableQuotationItem[]; allItems: PrintableQuotationItem[]; totals: Totals; settings?: PrintableQuotationSettings }) {
   const otherFeeTotals = calculateOtherFeeTotals(items, totals.baseAmount, totals.materialAmount, totals.feeFormulaContext);
   const engineeringDirectAmount = toMoney(totals.baseAmount + totals.materialAmount);
   const hasProductDirectAmount = toNumber(totals.materialAmount) > 0;
@@ -920,9 +1170,17 @@ function OtherFeesTable({ items, totals, settings }: { items: PrintableQuotation
     : `基装直接费 ${formatPrintAmount(totals.baseAmount)} = ${formatPrintAmount(engineeringDirectAmount)}`;
   const otherAmount = otherFeeTotals.reduce((sum, amount) => toMoney(sum + amount), 0);
   const hasDiscount = totals.discount > 0;
-  const discountScopeLabel = getDiscountScopeLabel(settings);
-  const discountSequenceIndex = items.length + 1;
-  const finalSequenceIndex = items.length + (hasDiscount ? 2 : 1);
+  const discountRows = getDiscountRuleRows(allItems, settings, { otherAmount });
+  const fallbackDiscountRows = hasDiscount && discountRows.length === 0
+    ? [{
+        id: "legacy",
+        label: getDiscountScopeLabel(settings),
+        formula: `${getDiscountScopeLabel(settings)}优惠`,
+        ruleText: `${getDiscountScopeLabel(settings)}优惠 ${formatPrintAmount(totals.discount)}`,
+        amount: totals.discount,
+      }]
+    : discountRows;
+  const finalSequenceIndex = items.length + fallbackDiscountRows.length + 1;
   const finalFormulaParts = ["工程直接费"];
   const finalRuleParts = [`工程直接费 ${formatPrintAmount(engineeringDirectAmount)}`];
   if (otherAmount > 0) {
@@ -984,19 +1242,19 @@ function OtherFeesTable({ items, totals, settings }: { items: PrintableQuotation
               </tr>
             );
           })}
-          {hasDiscount && (
-            <tr>
-              <td className="text-center">{formatAlphaSequence(discountSequenceIndex)}</td>
+          {fallbackDiscountRows.map((row, index) => (
+            <tr key={row.id || `discount-${index}`}>
+              <td className="text-center">{formatAlphaSequence(items.length + index + 1)}</td>
               <td className="quotation-print-item-name">优惠</td>
-              <td>{discountScopeLabel}优惠</td>
+              <td>{row.formula}</td>
               <td className="text-right font-semibold text-surface-950">
-                -{formatPrintAmount(totals.discount)}
+                -{formatPrintAmount(row.amount)}
               </td>
               <td className="quotation-print-rule-cell leading-relaxed text-surface-600">
-                {discountScopeLabel}优惠 {formatPrintAmount(totals.discount)}
+                {row.ruleText}
               </td>
             </tr>
-          )}
+          ))}
           <tr className="quotation-print-fee-final-row">
             <td className="text-center">{formatAlphaSequence(finalSequenceIndex)}</td>
             <td className="quotation-print-item-name">工程总造价</td>
@@ -1048,6 +1306,18 @@ function AppendixNoteBlock({ parts }: { parts: AppendixNotePart[] }) {
   );
 }
 
+function BudgetCompilationBlock({ html }: { html: string }) {
+  return (
+    <section className="quotation-print-budget-compilation">
+      <div className="quotation-print-budget-compilation-head">
+        <h2>预算编制</h2>
+        <span />
+      </div>
+      <div className="quotation-print-budget-compilation-content" dangerouslySetInnerHTML={{ __html: html }} />
+    </section>
+  );
+}
+
 export function QuotationPrintDocument({
   quotation,
   items,
@@ -1056,6 +1326,7 @@ export function QuotationPrintDocument({
   outputMode = "list",
   printScope = "all",
   baseColumns,
+  includeBudgetCompilation = true,
 }: {
   quotation?: PrintableQuotationDetail | null;
   items: PrintableQuotationItem[];
@@ -1064,6 +1335,7 @@ export function QuotationPrintDocument({
   outputMode?: QuotationOutputMode;
   printScope?: QuotationPrintScope;
   baseColumns?: Partial<QuotationBaseColumnOptions>;
+  includeBudgetCompilation?: boolean;
 }) {
   const normalizedItems = items.map((item) => ({ ...item, space: inferItemSpace(item) }));
   const baseItems = normalizedItems.filter((item) => isBaseCategory(item.category));
@@ -1079,6 +1351,10 @@ export function QuotationPrintDocument({
   const totals = calculateQuotationTotals(normalizedItems, settings);
   const costComposition = buildCostComposition(normalizedItems);
   const targetUrl = shareUrl || "";
+  const [qrTargetUrl, setQrTargetUrl] = useState("");
+  useEffect(() => {
+    setQrTargetUrl(getCompactQuotationShareUrl(targetUrl));
+  }, [targetUrl]);
   const isAllDetailScope = printScope === "all" || printScope === "all_without_cover";
   const shouldShowBase = isAllDetailScope || printScope === "base";
   const shouldShowFees = isAllDetailScope || printScope === "fees";
@@ -1088,54 +1364,49 @@ export function QuotationPrintDocument({
   const displayTitle = buildQuotationDisplayTitle(quotation);
   const appendixNoteParts = buildAppendixNoteParts(settings, quotation);
   const shouldShowAppendixNote = outputMode === "list" && appendixNoteParts.length > 0 && (isAllDetailScope || printScope === "fees");
+  const budgetCompilationHtml = getBudgetCompilationHtml(settings);
+  const shouldShowBudgetCompilation = outputMode === "list" && includeBudgetCompilation && budgetCompilationHtml && (isAllDetailScope || printScope === "fees");
 
   return (
     <article className="quotation-print-document mx-auto w-full max-w-[1040px] bg-white text-surface-900 shadow-[0_18px_50px_rgba(31,41,53,0.08)]">
       {shouldShowCover && <PrintCoverPage quotation={quotation} />}
 
       <section className="quotation-print-head-block">
-        <div className="quotation-print-head-layout">
-          <header className="quotation-print-cover">
-            <p className="quotation-print-kicker">Renovation quotation</p>
+        <div className="quotation-print-head-table" role="table" aria-label="报价单基础信息">
+          <div className="quotation-print-head-title-cell quotation-print-head-title-main" role="cell">
             <h1>{displayTitle}</h1>
-          </header>
-
-          <div className="quotation-print-head-info">
-            <div className="quotation-print-head-info-grid">
-              <div className="quotation-print-head-field quotation-print-head-field-strong">
-                <span>客户姓名</span>
-                <strong>{text(quotation?.customer_name)}</strong>
-              </div>
-              <div className="quotation-print-head-field">
-                <span>手机号</span>
-                <strong>{maskCustomerPhone(quotation?.customer_phone)}</strong>
-              </div>
-              <div className="quotation-print-head-field">
-                <span>建筑面积</span>
-                <strong>{quotation?.project_area ? `${quotation.project_area} 平方` : "-"}</strong>
-              </div>
-              <div className="quotation-print-head-field">
-                <span>项目地址</span>
-                <strong>{text(getPrintProjectAddressText(quotation))}</strong>
-              </div>
-              <div className="quotation-print-head-field">
-                <span>设计师</span>
-                <strong>{text(quotation?.designer_name)}</strong>
-              </div>
-              <div className="quotation-print-head-field">
-                <span>报价人</span>
-                <strong>{text(quotation?.creator_name)}</strong>
-              </div>
-            </div>
           </div>
-
-          <div className="quotation-print-qr">
+          <div className="quotation-print-head-field quotation-print-head-field-phone" role="cell">
+            <span>手机号</span>
+            <strong>{maskCustomerPhone(quotation?.customer_phone)}</strong>
+          </div>
+          <div className="quotation-print-head-field quotation-print-head-field-area" role="cell">
+            <span>建筑面积</span>
+            <strong>{quotation?.project_area ? `${quotation.project_area} 平方` : "-"}</strong>
+          </div>
+          <div className="quotation-print-head-field quotation-print-head-field-date" role="cell">
+            <span>预算时间</span>
+            <strong>{text(formatPrintDateTime(quotation?.created_at))}</strong>
+          </div>
+          <div className="quotation-print-qr" role="cell">
             {targetUrl ? (
-              <NativeImage src={qrCodeUrl(targetUrl)} alt="报价单二维码" loading="eager" />
+              <NativeImage src={qrCodeUrl(qrTargetUrl)} alt="报价单二维码" loading="eager" />
             ) : (
               <div />
             )}
             <p>扫码查看报价单</p>
+          </div>
+          <div className="quotation-print-head-field quotation-print-head-field-designer" role="cell">
+            <span>设计师</span>
+            <strong>{text(quotation?.designer_name)}</strong>
+          </div>
+          <div className="quotation-print-head-field quotation-print-head-field-creator" role="cell">
+            <span>报价人</span>
+            <strong>{text(quotation?.creator_name)}</strong>
+          </div>
+          <div className="quotation-print-head-field quotation-print-head-field-company-phone quotation-print-head-field-strong" role="cell">
+            <span>公司电话</span>
+            <strong>{text(quotation?.branch_company_phone)}</strong>
           </div>
         </div>
       </section>
@@ -1170,10 +1441,11 @@ export function QuotationPrintDocument({
 
           {shouldShowFees && (
             <Section title="综合费用和总费用" className={shouldSplitAllSections ? "quotation-print-section-new-page" : ""}>
-              <OtherFeesTable items={otherItems} totals={totals} settings={settings} />
+              <OtherFeesTable items={otherItems} allItems={items} totals={totals} settings={settings} />
             </Section>
           )}
           {shouldShowAppendixNote && <AppendixNoteBlock parts={appendixNoteParts} />}
+          {shouldShowBudgetCompilation && <BudgetCompilationBlock html={budgetCompilationHtml} />}
         </>
       )}
 
@@ -1253,7 +1525,7 @@ export function QuotationPrintDocument({
         .quotation-print-cover-field {
           display: grid;
           grid-template-columns: 126px minmax(0, 1fr);
-          align-items: end;
+          align-items: start;
           gap: 14px;
           color: #111111;
         }
@@ -1271,11 +1543,13 @@ export function QuotationPrintDocument({
           color: #111111;
           font-size: 16px;
           font-weight: 400;
-          line-height: 24px;
-          overflow: hidden;
+          line-height: 22px;
+          overflow: visible;
           text-align: center;
-          text-overflow: ellipsis;
-          white-space: nowrap;
+          text-overflow: clip;
+          white-space: normal;
+          overflow-wrap: anywhere;
+          word-break: break-word;
         }
         .quotation-print-cover-brand {
           position: absolute;
@@ -1318,55 +1592,7 @@ export function QuotationPrintDocument({
           white-space: nowrap;
         }
         .quotation-print-head-block {
-          overflow: hidden;
-          border: 1px solid #dce4ef;
-          border-radius: 12px;
-          background: linear-gradient(90deg, #ffffff 0%, #fbfdff 62%, #f4f8ff 100%);
-        }
-        .quotation-print-head-layout {
-          display: grid;
-          grid-template-columns: 220px minmax(0, 1fr) 104px;
-          gap: 18px;
-          align-items: stretch;
-          padding: 18px;
-        }
-        .quotation-print-cover {
-          display: flex;
-          min-width: 0;
-          flex-direction: column;
-          justify-content: center;
-          border-radius: 0;
-          border: 0;
-          background: transparent;
-          color: #182230;
-          padding: 0 0 0 16px;
-          overflow: hidden;
-          position: relative;
-        }
-        .quotation-print-cover::before {
-          content: "";
-          position: absolute;
-          left: 0;
-          top: 2px;
-          bottom: 2px;
-          width: 3px;
-          border-radius: 999px;
-          background: #2f6feb;
-        }
-        .quotation-print-kicker {
-          font-size: 9px;
-          font-weight: 700;
-          letter-spacing: 0.12em;
-          text-transform: uppercase;
-          color: #667085;
-        }
-        .quotation-print-cover h1 {
-          margin-top: 7px;
-          max-width: 720px;
-          font-size: 23px;
-          line-height: 1.18;
-          font-weight: 700;
-          color: #101828;
+          margin-bottom: 16px;
         }
         .quotation-print-head-total {
           display: inline-flex;
@@ -1390,79 +1616,159 @@ export function QuotationPrintDocument({
           color: #111111;
           white-space: nowrap;
         }
-        .quotation-print-qr {
+        .quotation-print-head-table {
+          --quotation-print-head-line-width: 1px;
+          --quotation-print-head-inner-line-width: var(--quotation-print-head-line-width);
           position: relative;
-          z-index: 1;
-          align-self: stretch;
+          width: 100%;
+          display: grid;
+          grid-template-columns: 34% repeat(3, minmax(0, 1fr)) 10%;
+          grid-template-rows: repeat(2, 44px);
+          border: var(--quotation-print-head-line-width) solid #111111;
+          border-radius: 10px;
+          overflow: hidden;
+          background: #ffffff;
+        }
+        .quotation-print-head-table::before {
+          display: none;
+        }
+        .quotation-print-head-title-cell {
+          position: relative;
+          grid-column: 1;
           display: flex;
+          min-width: 0;
           flex-direction: column;
           justify-content: center;
-          border-radius: 0;
-          border: 0;
-          background: transparent;
-          padding: 0;
+          background: #ffffff;
+          padding: 8px 14px;
+        }
+        .quotation-print-head-title-kicker {
+          grid-row: 1;
+          justify-content: flex-end;
+          padding-bottom: 4px;
+        }
+        .quotation-print-head-title-main {
+          grid-row: 1 / span 2;
+          justify-content: center;
+          padding-top: 8px;
+          padding-bottom: 8px;
+        }
+        .quotation-print-head-title-cell p {
+          margin: 0;
+          color: #111111;
+          font-size: 8px;
+          font-weight: 800;
+          letter-spacing: 0.14em;
+          line-height: 1;
+          text-transform: uppercase;
+        }
+        .quotation-print-head-title-cell h1 {
+          margin: 0;
+          color: #111111;
+          font-size: 15px;
+          font-weight: 750;
+          letter-spacing: 0;
+          line-height: 1.22;
+          max-width: 100%;
+          white-space: normal;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+        }
+        .quotation-print-qr {
+          grid-column: 5;
+          grid-row: 1 / span 2;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          background: #ffffff;
+          border-left: var(--quotation-print-head-inner-line-width) solid #111111;
+          padding: 8px 6px;
           text-align: center;
           color: #475467;
         }
         .quotation-print-qr img {
-          width: 76px;
-          height: 76px;
+          width: 50px;
+          height: 50px;
           margin: 0 auto;
-          border-radius: 0;
+          border-radius: 6px;
           background: #ffffff;
         }
         .quotation-print-qr > div {
-          width: 76px;
-          height: 76px;
+          width: 50px;
+          height: 50px;
           margin: 0 auto;
-          border-radius: 0;
+          border-radius: 6px;
           background: transparent;
         }
         .quotation-print-qr p {
-          margin-top: 5px;
-          font-size: 8px;
-          font-weight: 600;
+          margin-top: 6px;
+          font-size: 7px;
+          font-weight: 700;
           color: #667085;
         }
         .quotation-print-head-info {
           min-width: 0;
-          align-self: center;
+          align-self: stretch;
           padding: 0;
         }
         .quotation-print-head-info-grid {
           display: grid;
           grid-template-columns: repeat(3, minmax(0, 1fr));
           overflow: hidden;
-          border: 1px solid #dce4ef;
-          border-radius: 10px;
-          background: rgba(255, 255, 255, .82);
+          border-radius: 0;
+          background: #f8fbff;
         }
         .quotation-print-head-field {
-          min-height: 52px;
-          padding: 9px 12px;
-          border-right: 1px solid #e4eaf2;
-          border-bottom: 1px solid #e4eaf2;
+          display: flex;
+          min-height: 42px;
+          min-width: 0;
+          flex-direction: column;
+          justify-content: center;
+          background: #ffffff;
+          border-left: var(--quotation-print-head-inner-line-width) solid #111111;
+          padding: 7px 12px;
         }
-        .quotation-print-head-field:nth-child(3n),
-        .quotation-print-head-field:last-child {
-          border-right: 0;
+        .quotation-print-head-field-phone {
+          grid-column: 2;
+          grid-row: 1;
         }
-        .quotation-print-head-field:nth-last-child(-n + 3) {
-          border-bottom: 0;
+        .quotation-print-head-field-area {
+          grid-column: 3;
+          grid-row: 1;
+        }
+        .quotation-print-head-field-date {
+          grid-column: 4;
+          grid-row: 1;
+        }
+        .quotation-print-head-field-designer {
+          grid-column: 2;
+          grid-row: 2;
+          border-top: var(--quotation-print-head-inner-line-width) solid #111111;
+        }
+        .quotation-print-head-field-creator {
+          grid-column: 3;
+          grid-row: 2;
+          border-top: var(--quotation-print-head-inner-line-width) solid #111111;
+        }
+        .quotation-print-head-field-company-phone {
+          grid-column: 4;
+          grid-row: 2;
+          border-top: var(--quotation-print-head-inner-line-width) solid #111111;
         }
         .quotation-print-head-field-wide {
           grid-column: span 2;
         }
         .quotation-print-head-field span {
           display: block;
-          color: #52647b;
+          color: #111111;
           font-size: 9px;
-          font-weight: 700;
+          font-weight: 750;
+          letter-spacing: 0.04em;
           line-height: 1.2;
         }
         .quotation-print-head-field strong {
           display: block;
-          margin-top: 6px;
           overflow: hidden;
           color: #111111;
           font-size: 12px;
@@ -1472,7 +1778,6 @@ export function QuotationPrintDocument({
           white-space: nowrap;
         }
         .quotation-print-head-field-strong strong {
-          font-size: 13px;
           font-weight: 750;
         }
         .quotation-print-composition {
@@ -1623,6 +1928,50 @@ export function QuotationPrintDocument({
         .quotation-print-appendix-note-content p {
           margin: 0;
         }
+        .quotation-print-budget-compilation {
+          margin-top: 0;
+          padding-top: 26px;
+          break-before: page;
+          page-break-before: always;
+        }
+        .quotation-print-budget-compilation-head {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          margin-bottom: 14px;
+        }
+        .quotation-print-budget-compilation-head h2 {
+          margin: 0;
+          font-size: 16px;
+          line-height: 1;
+          font-weight: 700;
+          color: #182230;
+        }
+        .quotation-print-budget-compilation-head span {
+          height: 1px;
+          flex: 1;
+          background: linear-gradient(90deg, #dce4ef, transparent);
+        }
+        .quotation-print-budget-compilation-content {
+          border: var(--quotation-print-table-border-width, 1px) solid #111111;
+          border-radius: 10px;
+          padding: 18px 20px;
+          font-size: 12px;
+          line-height: 1.9;
+          color: #111111;
+          background: #ffffff;
+        }
+        .quotation-print-budget-compilation-content p {
+          margin: 0 0 8px;
+        }
+        .quotation-print-budget-compilation-content ul,
+        .quotation-print-budget-compilation-content ol {
+          margin: 0 0 8px 20px;
+          padding: 0;
+        }
+        .quotation-print-budget-compilation-content li {
+          margin: 0 0 4px;
+        }
         .quotation-print-document table {
           width: 100%;
           border-collapse: separate;
@@ -1766,6 +2115,49 @@ export function QuotationPrintDocument({
           font-size: 10px;
           line-height: 1.42;
         }
+        .quotation-print-head-table {
+          border: var(--quotation-print-head-line-width) solid #111111 !important;
+          background: #ffffff !important;
+        }
+        .quotation-print-head-table .quotation-print-head-title-cell,
+        .quotation-print-head-table .quotation-print-head-field,
+        .quotation-print-head-table .quotation-print-qr {
+          background: #ffffff !important;
+        }
+        .quotation-print-head-table .quotation-print-head-field {
+          min-height: 0 !important;
+          padding: 8px 12px !important;
+        }
+        .quotation-print-head-table .quotation-print-qr {
+          padding: 8px 6px !important;
+        }
+        .quotation-print-head-title-cell p,
+        .quotation-print-head-field span,
+        .quotation-print-qr p {
+          color: #111111 !important;
+        }
+        .quotation-print-head-title-cell h1,
+        .quotation-print-head-field strong {
+          color: #111111 !important;
+        }
+        .quotation-print-head-field span {
+          margin-bottom: 4px;
+          font-size: 8px;
+          font-weight: 700;
+          line-height: 1.1;
+        }
+        .quotation-print-head-field strong {
+          font-size: 12px;
+          font-weight: 700;
+          line-height: 1.2;
+        }
+        .quotation-print-head-title-cell h1 {
+          font-size: 15px;
+          line-height: 1.2;
+          white-space: normal;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+        }
         .quotation-print-base-table th,
         .quotation-print-material-table th,
         .quotation-print-fee-table th,
@@ -1907,7 +2299,7 @@ export function QuotationPrintDocument({
           min-height: 48px;
           background: #ffffff;
           padding: 4px 0 0;
-          border-bottom: 1px solid #cfd7e3;
+          border-bottom: 1px solid #111111;
         }
         .quotation-print-signature-card p {
           font-size: 11px;
@@ -1952,38 +2344,63 @@ export function QuotationPrintDocument({
             padding: 16px;
             border-radius: 12px;
           }
-          .quotation-print-head-layout {
-            grid-template-columns: minmax(0, 1fr);
-            gap: 12px;
-            padding: 16px;
+          .quotation-print-head-table {
+            grid-template-columns: 34% repeat(3, minmax(0, 1fr)) 10%;
+            grid-template-rows: repeat(2, 44px);
           }
-          .quotation-print-cover {
-            min-height: 72px;
+          .quotation-print-head-table::before {
+            display: none;
           }
-          .quotation-print-cover h1 {
-            font-size: 22px;
+          .quotation-print-head-title-cell {
+            grid-column: 1;
+            grid-row: 1 / span 2;
+            padding: 8px 14px;
+          }
+          .quotation-print-head-title-cell h1 {
+            font-size: 15px;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: break-word;
           }
           .quotation-print-qr {
-            width: 104px;
-            justify-self: start;
+            grid-column: 5;
+            grid-row: 1 / span 2;
+            width: auto;
+            border-left: var(--quotation-print-head-inner-line-width) solid #111111;
+            border-top: 0;
           }
-          .quotation-print-head-info-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
+          .quotation-print-head-field {
+            border-left: var(--quotation-print-head-inner-line-width) solid #111111;
           }
-          .quotation-print-head-field:nth-child(4n),
-          .quotation-print-head-field:nth-last-child(-n + 3) {
-            border-right: 1px solid #e4eaf2;
-            border-bottom: 1px solid #e4eaf2;
+          .quotation-print-head-field-phone {
+            grid-column: 2;
+            grid-row: 1;
+            border-top: 0;
           }
-          .quotation-print-head-field:nth-child(2n),
-          .quotation-print-head-field:last-child {
-            border-right: 0;
+          .quotation-print-head-field-area {
+            grid-column: 3;
+            grid-row: 1;
+            border-top: 0;
           }
-          .quotation-print-head-field:nth-last-child(-n + 2) {
-            border-bottom: 0;
+          .quotation-print-head-field-date {
+            grid-column: 4;
+            grid-row: 1;
+            border-top: 0;
           }
-          .quotation-print-head-field-wide {
-            grid-column: span 2;
+          .quotation-print-head-field-designer {
+            grid-column: 2;
+            grid-row: 2;
+            border-top: var(--quotation-print-head-inner-line-width) solid #111111;
+          }
+          .quotation-print-head-field-creator {
+            grid-column: 3;
+            grid-row: 2;
+            border-top: var(--quotation-print-head-inner-line-width) solid #111111;
+          }
+          .quotation-print-head-field-company-phone {
+            grid-column: 4;
+            grid-row: 2;
+            border-top: var(--quotation-print-head-inner-line-width) solid #111111;
           }
           .quotation-print-composition,
           .quotation-print-composition-detail-grid {
@@ -1992,7 +2409,7 @@ export function QuotationPrintDocument({
         }
         @media print {
           @page {
-            margin: 5mm 5mm 12mm;
+            margin: 6mm 6mm 10mm;
             @bottom-right {
               content: counter(page) "/" counter(pages);
               color: #111111;
@@ -2009,17 +2426,19 @@ export function QuotationPrintDocument({
             print-color-adjust: exact;
           }
           .quotation-print-document {
-            width: 1080px !important;
-            max-width: 1080px !important;
+            width: 100% !important;
+            max-width: none !important;
             margin: 0 auto !important;
-            padding: 14px !important;
+            padding: 0 !important;
             border: 0 !important;
             border-radius: 0 !important;
             box-shadow: none !important;
           }
           .quotation-print-cover-page {
-            height: calc(100vh - 52px) !important;
+            width: 100% !important;
             min-height: 0 !important;
+            height: calc(100vh - 1px) !important;
+            box-sizing: border-box !important;
             padding: 118px 88px 72px !important;
             break-inside: avoid !important;
             page-break-inside: avoid !important;
@@ -2043,15 +2462,23 @@ export function QuotationPrintDocument({
           .quotation-print-cover-fields {
             width: 430px !important;
             gap: 18px !important;
-            margin: 360px auto 0 !important;
+            margin: 110px auto 0 !important;
           }
           .quotation-print-cover-field {
             grid-template-columns: 126px minmax(0, 1fr) !important;
+            align-items: start !important;
             gap: 14px !important;
           }
           .quotation-print-cover-field span,
           .quotation-print-cover-field strong {
             font-size: 16px !important;
+          }
+          .quotation-print-cover-field strong {
+            overflow: visible !important;
+            text-overflow: clip !important;
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+            word-break: break-word !important;
           }
           .quotation-print-cover-brand {
             gap: 36px !important;
@@ -2066,11 +2493,9 @@ export function QuotationPrintDocument({
           .quotation-print-cover-brand-mark strong {
             font-size: 18px !important;
           }
-          .quotation-print-head-layout {
-            grid-template-columns: 210px minmax(0, 1fr) 104px !important;
-          }
-          .quotation-print-head-info-grid {
-            grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+          .quotation-print-head-table {
+            grid-template-columns: 34% repeat(3, minmax(0, 1fr)) 10% !important;
+            grid-template-rows: repeat(2, 44px) !important;
           }
           .quotation-print-composition {
             grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
@@ -2100,13 +2525,14 @@ export function QuotationPrintDocument({
           .quotation-print-document table,
           .quotation-print-base-table,
           .quotation-print-material-table,
-          .quotation-print-fee-table,
-          .quotation-print-cabinet-table,
-          .quotation-print-composition-table,
-          .quotation-print-appendix-note {
-            border-collapse: collapse !important;
-            border-spacing: 0 !important;
-            border: 1px solid #111111 !important;
+	          .quotation-print-fee-table,
+	          .quotation-print-cabinet-table,
+	          .quotation-print-composition-table,
+	          .quotation-print-appendix-note,
+	          .quotation-print-budget-compilation-content {
+	            border-collapse: collapse !important;
+	            border-spacing: 0 !important;
+	            border: 1px solid #111111 !important;
             border-radius: 0 !important;
             overflow: hidden !important;
           }
@@ -2126,6 +2552,32 @@ export function QuotationPrintDocument({
           .quotation-print-composition-table th,
           .quotation-print-composition-table td {
             border: 1px solid #111111 !important;
+            font-size: 11px !important;
+            line-height: 1.48 !important;
+            padding: 7px 8px !important;
+            vertical-align: middle !important;
+          }
+          .quotation-print-base-table col:nth-child(1) { width: 5% !important; }
+          .quotation-print-base-table col:nth-child(2) { width: 21% !important; }
+          .quotation-print-base-table col:nth-child(3) { width: 6% !important; }
+          .quotation-print-base-table col:nth-child(4) { width: 5% !important; }
+          .quotation-print-base-table col:nth-child(5),
+          .quotation-print-base-table col:nth-child(7) { width: 6% !important; }
+          .quotation-print-base-table col:nth-child(6),
+          .quotation-print-base-table col:nth-child(8) { width: 7.5% !important; }
+          .quotation-print-base-table col:nth-child(9) { width: 8.5% !important; }
+          .quotation-print-base-table col:nth-child(10) { width: 27.5% !important; }
+          .quotation-print-base-table th,
+          .quotation-print-base-table td {
+            font-size: 10.5px !important;
+            line-height: 1.42 !important;
+            padding: 6px 5px !important;
+          }
+          .quotation-print-base-description {
+            font-size: 9.5px !important;
+            line-height: 1.34 !important;
+            overflow-wrap: break-word !important;
+            word-break: normal !important;
           }
           .quotation-print-base-labor-total-head {
             border-right: 1px solid #111111 !important;
@@ -2143,14 +2595,10 @@ export function QuotationPrintDocument({
         }
         @media print and (orientation: landscape) {
           .quotation-print-cover-page {
-            height: calc(100vh - 52px) !important;
             padding: 72px 88px 34px !important;
           }
           .quotation-print-cover-main h1 {
             font-size: 30px !important;
-          }
-          .quotation-print-cover-main h1 em {
-            font-size: inherit !important;
           }
           .quotation-print-cover-main h2 {
             margin-top: 42px !important;
@@ -2167,11 +2615,19 @@ export function QuotationPrintDocument({
           }
           .quotation-print-cover-field {
             grid-template-columns: 122px minmax(0, 1fr) !important;
+            align-items: start !important;
             gap: 14px !important;
           }
           .quotation-print-cover-field span,
           .quotation-print-cover-field strong {
             font-size: 15px !important;
+          }
+          .quotation-print-cover-field strong {
+            overflow: visible !important;
+            text-overflow: clip !important;
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+            word-break: break-word !important;
           }
           .quotation-print-cover-brand {
             gap: 42px !important;

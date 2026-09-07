@@ -34,14 +34,39 @@ export function FeeFormulaHelp() {
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ top: 0, left: 0 });
-  const tips = [
-    ["直接费", "基装直接费 + 产品直接费 + 定制柜"],
-    ["基装", "基装直接费"],
-    ["产品", "产品直接费"],
-    ["定制柜", "定制柜小计"],
-    ["A、B、C", "引用综合费用对应编号的小计"],
-    ["A+B", "多个金额相加"],
-    ["(基装+定制柜)*0.1", "可用加减乘除和括号"],
+  const groups = [
+    {
+      title: "可填写的中文名",
+      values: [
+        "直接费",
+        "工程直接费",
+        "直接费合计",
+        "基装",
+        "基装直接费",
+        "基装项目",
+        "人工",
+        "人工费",
+        "人工费合计",
+        "材料",
+        "材料费",
+        "材料费合计",
+        "产品",
+        "产品直接费",
+        "产品项目",
+        "主材",
+        "主材直接费",
+        "主材项目",
+        "定制柜",
+      ],
+    },
+    {
+      title: "综合费用编号",
+      values: ["A", "B", "C", "A+B", "A+直接费"],
+    },
+    {
+      title: "公式写法",
+      values: ["基装+产品", "基装+主材", "(基装+定制柜)*0.1", "直接费-A"],
+    },
   ];
 
   const updatePosition = useCallback(() => {
@@ -49,8 +74,8 @@ export function FeeFormulaHelp() {
     if (!button || typeof window === "undefined") return;
 
     const rect = button.getBoundingClientRect();
-    const tooltipWidth = 288;
-    const tooltipHeight = 224;
+    const tooltipWidth = 340;
+    const tooltipHeight = 300;
     const gap = 10;
     const left = Math.min(
       Math.max(12, rect.right - tooltipWidth),
@@ -82,7 +107,7 @@ export function FeeFormulaHelp() {
 
   return (
     <div
-      className="relative flex h-full items-center pr-1"
+      className="relative inline-flex items-center align-middle"
       onMouseEnter={showHelp}
       onMouseLeave={() => setOpen(false)}
     >
@@ -92,24 +117,33 @@ export function FeeFormulaHelp() {
         tabIndex={-1}
         onFocus={showHelp}
         onBlur={() => setOpen(false)}
-        className="inline-flex h-6 w-6 items-center justify-center rounded-full text-surface-400 transition hover:bg-primary-50 hover:text-primary-700"
+        className="inline-flex h-5 w-5 items-center justify-center rounded-full text-surface-400 transition hover:bg-primary-50 hover:text-primary-700"
         aria-label="查看基础公式填写说明"
       >
         <CircleHelp className="h-3.5 w-3.5" />
       </button>
       {open && typeof document !== "undefined" && createPortal(
         <div
-          className="pointer-events-none fixed z-[9999] w-72 rounded-md border border-surface-200 bg-white p-3 text-xs text-surface-600 shadow-[0_18px_40px_rgba(31,41,53,0.18)]"
+          className="pointer-events-none fixed z-[9999] w-[340px] rounded-lg border border-[#d9e2ef] bg-white p-3 text-xs text-[#52647b] shadow-[0_18px_40px_rgba(31,41,53,0.14)]"
           style={{ top: position.top, left: position.left }}
         >
-          <div className="mb-2 font-semibold text-surface-900">基础公式填写说明</div>
-          <div className="space-y-1.5">
-            {tips.map(([label, description]) => (
-              <div key={label} className="flex gap-2">
-                <span className="w-16 shrink-0 font-semibold text-surface-700">{label}</span>
-                <span>{description}</span>
+          <div className="mb-2 text-[13px] font-semibold text-[#172033]">基础公式可用字段</div>
+          <div className="space-y-2">
+            {groups.map((group) => (
+              <div key={group.title}>
+                <div className="mb-1 text-[11px] font-semibold text-[#8a98aa]">{group.title}</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {group.values.map((value) => (
+                    <span key={value} className="rounded-md border border-[#e5edf6] bg-[#f7f9fc] px-1.5 py-1 font-medium text-[#34445a]">
+                      {value}
+                    </span>
+                  ))}
+                </div>
               </div>
             ))}
+          </div>
+          <div className="mt-2 border-t border-[#edf2f7] pt-2 text-[11px] leading-4 text-[#8a98aa]">
+            也支持加、减、乘、除和括号；自定义类别名称也可以直接填写。
           </div>
         </div>,
         document.body,

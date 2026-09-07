@@ -13,6 +13,10 @@ export type QuotaTemplateOrgOption = QuotaTemplateOrgUnit & {
 };
 
 export type QuotaTemplateAutoScope = {
+  scopeType?: "global" | "branch";
+  branchOrgUnitId?: string;
+  branchOrgUnitName?: string;
+  branchOrgUnitPath?: string;
   orgUnitId: string;
   orgUnitName: string;
   orgUnitPath: string;
@@ -137,15 +141,39 @@ export function isQuotaPrivilegedRole(role?: string | null) {
 export function normalizeQuotaTemplateAutoScope(value: unknown): QuotaTemplateAutoScope | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
-  const orgUnitId = cleanText(raw.orgUnitId ?? raw.org_unit_id);
-  const orgUnitName = cleanText(raw.orgUnitName ?? raw.org_unit_name);
-  const orgUnitPath = cleanText(raw.orgUnitPath ?? raw.org_unit_path);
+  const rawScopeType = cleanText(raw.scopeType ?? raw.scope_type);
+  const scopeType = rawScopeType === "branch" ? "branch" : rawScopeType === "global" ? "global" : "";
+  const branchOrgUnitId = cleanText(raw.branchOrgUnitId ?? raw.branch_org_unit_id);
+  const branchOrgUnitName = cleanText(raw.branchOrgUnitName ?? raw.branch_org_unit_name);
+  const branchOrgUnitPath = cleanText(raw.branchOrgUnitPath ?? raw.branch_org_unit_path);
+  const orgUnitId = branchOrgUnitId || cleanText(raw.orgUnitId ?? raw.org_unit_id);
+  const orgUnitName = branchOrgUnitName || cleanText(raw.orgUnitName ?? raw.org_unit_name);
+  const orgUnitPath = branchOrgUnitPath || cleanText(raw.orgUnitPath ?? raw.org_unit_path);
   const orgUnitType = cleanText(raw.orgUnitType ?? raw.org_unit_type);
   const companyName = cleanText(raw.companyName ?? raw.company_name);
   const createdByUserId = cleanText(raw.createdByUserId ?? raw.created_by_user_id);
   const createdByName = cleanText(raw.createdByName ?? raw.created_by_name);
+  if (scopeType === "global") {
+    return {
+      scopeType: "global",
+      branchOrgUnitId: "",
+      branchOrgUnitName: "",
+      branchOrgUnitPath: "",
+      orgUnitId: "",
+      orgUnitName: "",
+      orgUnitPath: "",
+      orgUnitType: "",
+      companyName,
+      createdByUserId,
+      createdByName,
+    };
+  }
   if (!orgUnitId && !orgUnitName && !companyName && !createdByUserId) return null;
   return {
+    scopeType: orgUnitId ? "branch" : "global",
+    branchOrgUnitId: orgUnitId,
+    branchOrgUnitName: orgUnitName,
+    branchOrgUnitPath: orgUnitPath,
     orgUnitId,
     orgUnitName,
     orgUnitPath,
@@ -160,6 +188,10 @@ export function makeQuotaTemplateAutoScope(user: QuotaTemplateScopeUser | null |
   const orgUnitId = cleanText(user?.org_unit_id);
   const org = orgOptions.find((option) => option.id === orgUnitId);
   return {
+    scopeType: orgUnitId ? "branch" : "global",
+    branchOrgUnitId: orgUnitId,
+    branchOrgUnitName: org?.name || "",
+    branchOrgUnitPath: org?.path || org?.name || "",
     orgUnitId,
     orgUnitName: org?.name || "",
     orgUnitPath: org?.path || org?.name || "",
@@ -209,31 +241,28 @@ export function canViewQuotaTemplate(template: QuotaTemplateLike, context: Quota
   const user = context.user;
   const scope = getQuotaTemplateScope(template);
   if (!scope?.orgUnitId) return true;
-  if (isQuotaPrivilegedRole(user?.role)) return true;
-  if (scope.createdByUserId && cleanText(user?.id) && scope.createdByUserId === cleanText(user?.id)) return true;
   if (hasLoadedOrgOptions(context.orgOptions) && !findActiveOrgOption(scope.orgUnitId, context.orgOptions)) return false;
   const currentOrgUnitId = cleanText(user?.org_unit_id);
   if (!currentOrgUnitId) return false;
-  return isSameOrDescendant(currentOrgUnitId, scope.orgUnitId, context.orgOptions);
+  return isSameOrDescendant(currentOrgUnitId, scope.orgUnitId, context.orgOptions)
+    || isSameOrDescendant(scope.orgUnitId, currentOrgUnitId, context.orgOptions);
 }
 
 export function getQuotaTemplateScopeLabel(template: QuotaTemplateLike, orgOptions: QuotaTemplateOrgOption[] = []) {
   const scope = getQuotaTemplateScope(template);
-  if (!scope?.orgUnitId) return "全公司可见";
+  if (!scope?.orgUnitId || scope.scopeType === "global") return "总部通用";
   const org = orgOptions.find((option) => option.id === scope.orgUnitId);
   if (hasLoadedOrgOptions(orgOptions) && !isOrgOptionActive(org)) return "查看范围已失效";
-  const orgName = org?.name || scope.orgUnitName || "当前组织";
-  const orgType = org?.type || scope.orgUnitType;
-  if (orgType === "group" || orgType === "company") return `${orgName}通用`;
-  return `${orgName}及下级`;
+  const orgName = org?.name || scope.branchOrgUnitName || scope.orgUnitName || "指定分公司";
+  return orgName;
 }
 
 export function getQuotaTemplateScopePath(template: QuotaTemplateLike, orgOptions: QuotaTemplateOrgOption[] = []) {
   const scope = getQuotaTemplateScope(template);
-  if (!scope?.orgUnitId) return "历史模板，未记录创建组织";
+  if (!scope?.orgUnitId || scope.scopeType === "global") return "全部分公司均可使用";
   const org = orgOptions.find((option) => option.id === scope.orgUnitId);
   if (hasLoadedOrgOptions(orgOptions) && !isOrgOptionActive(org)) return "原查看范围对应的组织已删除或停用";
-  return org?.path || scope.orgUnitPath || scope.orgUnitName || "当前组织";
+  return org?.path || scope.branchOrgUnitPath || scope.orgUnitPath || scope.orgUnitName || "指定分公司";
 }
 
 function getAreaRanges(quoteConfig: QuotaTemplateLike["quoteConfig"]) {

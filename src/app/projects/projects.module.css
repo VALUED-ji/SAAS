@@ -814,18 +814,12 @@
 .tableScroll {
   position: relative;
   display: flex;
-  width: 100%;
+  width: auto;
   min-height: 0;
   flex: 1 1 auto;
-  background: linear-gradient(
-    to bottom,
-    #eef3f8 0,
-    #eef3f8 45px,
-    var(--border-strong) 45px,
-    var(--border-strong) 46px,
-    var(--surface) 46px,
-    var(--surface) 100%
-  );
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--surface);
 }
 
 .tableScroll :global(.thin-scroll-area) {
@@ -833,12 +827,33 @@
   min-height: 0;
   height: 100%;
   flex: 1 1 auto;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
+  scrollbar-color: #b8c2cf transparent;
+  scrollbar-width: thin;
+}
+
+.tableScroll :global(.thin-scroll-area::-webkit-scrollbar) {
+  width: 6px;
+  height: 6px;
+}
+
+.tableScroll :global(.thin-scroll-area::-webkit-scrollbar-track) {
+  background: transparent;
+}
+
+.tableScroll :global(.thin-scroll-area::-webkit-scrollbar-thumb) {
+  border-radius: 999px;
+  background: #b8c2cf;
+}
+
+.tableScroll :global(.thin-scroll-area::-webkit-scrollbar-thumb:hover) {
+  background: #9aa8bb;
 }
 
 .table {
   width: 100%;
-  min-width: 1920px;
+  min-width: 2040px;
   table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
@@ -857,15 +872,15 @@
 }
 
 .actionColumnCol {
-  width: 106px;
+  width: 104px;
 }
 
 .tableHeaderCell {
   position: sticky;
   top: 0;
   z-index: 6;
-  height: 46px;
-  padding: 0 20px !important;
+  height: 48px;
+  padding: 0 16px !important;
   border-right: 1px solid #e2e8f0 !important;
   border-bottom: 1px solid var(--border-strong) !important;
   background: #eef3f8 !important;
@@ -963,15 +978,16 @@
   align-items: center;
   justify-content: flex-start;
   gap: 5px;
-  overflow: hidden;
-  white-space: nowrap;
+  overflow: visible;
+  line-height: 16px;
+  white-space: normal;
 }
 
 .columnHeaderInner > span:first-child {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .columnDragIcon {
@@ -1075,12 +1091,12 @@
 
 .tableHeaderCell[data-column="duplicate"],
 .tableCell[data-column="duplicate"] {
-  min-width: 88px;
+  min-width: 104px;
 }
 
 .tableHeaderCell[data-column="contact"],
 .tableCell[data-column="contact"] {
-  min-width: 150px;
+  min-width: 156px;
 }
 
 .tableHeaderCell[data-column="address"],
@@ -1100,7 +1116,7 @@
 
 .tableHeaderCell[data-column="status"],
 .tableCell[data-column="status"] {
-  min-width: 126px;
+  min-width: 150px;
 }
 
 .tableHeaderCell[data-column="advisor"],
@@ -1123,7 +1139,7 @@
 .tableCell[data-column="last_followup"],
 .tableHeaderCell[data-column="next_followup"],
 .tableCell[data-column="next_followup"] {
-  min-width: 120px;
+  min-width: 132px;
 }
 
 .tableHeaderCell[data-column="service_store"],
@@ -1139,40 +1155,50 @@
 }
 
 .tableRow {
+  --customer-row-bg: var(--surface);
   transition: background-color 150ms cubic-bezier(0.2, 0, 0, 1);
 }
 
-.tableRow:nth-child(even) .tableCell,
-.tableRow:nth-child(even) .stickyAction {
-  background: #fbfcfe !important;
+.tableRow:nth-child(even) {
+  --customer-row-bg: #fbfcfe;
 }
 
-.tableRow:hover .tableCell,
-.tableRow:hover .stickyAction {
-  background: #f3f7fd !important;
+.tableRow:hover {
+  --customer-row-bg: #f3f7fd;
 }
 
-.tableRow[aria-busy="true"] .tableCell,
-.tableRow[aria-busy="true"] .stickyAction {
-  background: var(--accent-soft) !important;
+.tableRow[aria-busy="true"] {
+  --customer-row-bg: var(--accent-soft);
 }
 
-.stickyAction {
+.tableRow .tableCell {
+  background: var(--customer-row-bg) !important;
+}
+
+.actionColumnHeader,
+.actionColumnCell {
   position: sticky;
   right: 0;
-  z-index: 8;
-  width: 106px;
-  min-width: 106px;
-  max-width: 106px;
   box-sizing: border-box;
-  border-left: 1px solid #e2e8f0 !important;
-  background: var(--surface) !important;
+  width: 104px;
+  min-width: 104px;
+  max-width: 104px;
+  padding-right: 8px !important;
+  padding-left: 8px !important;
+  border-left: 1px solid #d9e2ec !important;
+  border-right: 0 !important;
   text-align: center !important;
+  vertical-align: middle !important;
 }
 
-thead .stickyAction {
-  z-index: 12;
+.actionColumnHeader {
+  z-index: 14;
   background: #eef3f8 !important;
+}
+
+.actionColumnCell {
+  z-index: 8;
+  background: var(--customer-row-bg) !important;
 }
 
 .exportModalOverlay {
@@ -1519,14 +1545,25 @@ thead .stickyAction {
 .rowActionQuiet,
 .rowActionDanger {
   display: inline-flex;
-  min-height: 32px;
+  min-height: 28px;
   align-items: center;
   justify-content: center;
   gap: 5px;
-  padding: 0 9px;
+  padding: 0 8px;
   border-radius: 6px !important;
   font-size: 11px;
   font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.actionCellContent {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
 }
 
 .rowAction {
@@ -1536,12 +1573,13 @@ thead .stickyAction {
 }
 
 .rowAction:hover {
-  background: var(--accent-soft);
-  color: var(--fg);
+  background: #eaf1ff;
+  color: #2f6feb;
 }
 
 .rowActionQuiet {
-  color: var(--fg);
+  color: #475467;
+  font-weight: 600;
 }
 
 .rowActionDanger {

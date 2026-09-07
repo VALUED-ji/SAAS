@@ -129,7 +129,8 @@ export async function POST(req: NextRequest) {
     });
     setSessionCookie(response, token);
     return response;
-  } catch {
+  } catch (error) {
+    console.error("Login failed", error);
     return NextResponse.json({ message: "服务器错误" }, { status: 500 });
   }
 }

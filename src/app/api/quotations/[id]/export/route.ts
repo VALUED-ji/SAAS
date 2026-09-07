@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import ExcelJS from "exceljs";
+import QRCode from "qrcode";
 import { existsSync, readFileSync } from "fs";
 import path from "path";
 import { getDb } from "@/lib/db";
@@ -19,7 +20,8 @@ import { formatAlphaSequence } from "@/lib/quotationSequence";
 import { normalizeQuotationSignatureLabels } from "@/lib/quotationPrintSettings";
 import { formatDate } from "@/lib/utils";
 import { getAuthContext, hasPermission } from "@/lib/security/authorization";
-import { verifyQuotationShareToken } from "@/lib/security/quotationShare";
+import { signQuotationShareToken, verifyQuotationShareToken } from "@/lib/security/quotationShare";
+import { getPublicAppOrigin } from "@/lib/security/requestOrigin";
 import { ensureQuotationSchema } from "@/lib/quotationSchema";
 
 type ExportItem = {
@@ -47,11 +49,28 @@ type ExportItem = {
   fee_rate?: number | null;
 };
 
+type DiscountRule = {
+  id: string;
+  type: "fee" | "space" | "work_type";
+  mode: "amount" | "rate";
+  scope?: string;
+  space?: string;
+  workType?: string;
+  discount?: number;
+  rate?: number;
+};
+
+type DiscountScopeOption = {
+  value: string;
+  label: string;
+  amount: number;
+};
+
 type QuotationExportScope = "all" | "all_without_cover" | "base" | "main_material" | "custom_cabinet" | "fees";
 type BaseExportColumnKey = "materialUnit" | "materialTotal" | "laborUnit" | "laborTotal" | "subtotal" | "description";
 type BaseExportColumnOptions = Record<BaseExportColumnKey, boolean>;
 
-const EXPORT_COLUMN_COUNT = 11;
+const EXPORT_COLUMN_COUNT = 12;
 const EXPORT_FONT_NAME = "SimSun";
 const EXPORT_BORDER_COLOR = "DCE4EF";
 const EXPORT_HEADER_BORDER_COLOR = "E4EAF2";
@@ -138,6 +157,48 @@ function buildAppendixNoteContent(rawSettings: any, quotation: any) {
     customerNote && customerNote !== templateNote ? `报价备注：\n${customerNote}` : "",
   ].filter(Boolean);
   return parts.join("\n");
+}
+
+function decodeBasicHtmlEntities(value: string) {
+  const named: Record<string, string> = {
+    nbsp: " ",
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: "\"",
+    apos: "'",
+  };
+  return value.replace(/&(#\d+|#x[\da-f]+|[a-z]+);/gi, (match, entity) => {
+    const key = String(entity || "").toLowerCase();
+    if (key.startsWith("#x")) {
+      const code = Number.parseInt(key.slice(2), 16);
+      return Number.isFinite(code) ? String.fromCharCode(code) : match;
+    }
+    if (key.startsWith("#")) {
+      const code = Number.parseInt(key.slice(1), 10);
+      return Number.isFinite(code) ? String.fromCharCode(code) : match;
+    }
+    return named[key] ?? match;
+  });
+}
+
+function htmlToPlainText(value: unknown) {
+  return decodeBasicHtmlEntities(String(value || "")
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, "")
+    .replace(/<\/(p|div|h[1-6]|li|tr)>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<li[^>]*>/gi, "• ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n"));
+}
+
+function getBudgetCompilationContent(rawSettings: any) {
+  return htmlToPlainText(rawSettings?.budgetCompilationHtml || rawSettings?.budgetCompilation || "");
 }
 
 function orderQuoteCategories(categories: string[]) {
@@ -410,6 +471,169 @@ function getItemMaterialSubtotal(item: ExportItem) {
   return roundMoney(toNumber(item.quantity) * factor * toNumber(item.material_cost));
 }
 
+function isSpecialQuoteItem(item?: Pick<ExportItem, "row_color"> | null) {
+  return String(item?.row_color || "") === "special";
+}
+
+function isLaborOnlyQuoteItem(item: ExportItem) {
+  if (!isBaseCategory(item.category)) return false;
+  return getItemMaterialSubtotal(item) <= 0 && getItemLaborSubtotal(item) > 0;
+}
+
+function isExcludedFromDiscount(item: ExportItem, settings: any) {
+  if (settings?.excludeSpecialDiscountItems && isSpecialQuoteItem(item)) return true;
+  if (settings?.excludeLaborOnlyDiscountItems && isLaborOnlyQuoteItem(item)) return true;
+  return false;
+}
+
+function getDiscountableItems(items: ExportItem[], settings: any) {
+  return items.filter((item) => !isExcludedFromDiscount(item, settings));
+}
+
+function getDiscountScopeOptions(items: ExportItem[], settings: any, totals: { otherAmount: number }): DiscountScopeOption[] {
+  const discountableItems = getDiscountableItems(items, settings);
+  const feeContext = buildFeeFormulaContext(discountableItems, settings?.quoteCategories);
+  const customCategoryOptions = Object.entries(feeContext.categoryAmounts || {}).map(([label, amount]) => ({
+    value: `category:${label}`,
+    label,
+    amount: roundMoney(toNumber(amount)),
+  }));
+  const customCabinetAmount = discountableItems
+    .filter((item) => isCustomCabinetCategory(item.category))
+    .reduce((sum, item) => roundMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
+  const discountableBaseAmount = discountableItems.filter((item) => isBaseCategory(item.category)).reduce((sum, item) => roundMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
+  const discountableProductAmount = discountableItems.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => roundMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
+  const discountableCustomCategoryAmount = discountableItems
+    .filter((item) => !isBaseCategory(item.category) && !isOtherCategory(item.category) && !isMainMaterialCategory(item.category))
+    .reduce((sum, item) => roundMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
+  const discountableDirectAmount = discountableBaseAmount + discountableProductAmount + discountableCustomCategoryAmount;
+  const fixedOptions: DiscountScopeOption[] = [
+    { value: "base", label: "基装直接费", amount: discountableBaseAmount },
+    { value: "base_labor", label: "基装直接费（人工）", amount: discountableItems.reduce((sum, item) => roundMoney(sum + getItemLaborSubtotal(item)), 0) },
+    { value: "base_material", label: "基装直接费（材料）", amount: discountableItems.reduce((sum, item) => roundMoney(sum + getItemMaterialSubtotal(item)), 0) },
+    { value: "product", label: "产品费用", amount: discountableProductAmount },
+    { value: "custom_cabinet", label: "定制柜费用", amount: customCabinetAmount },
+    { value: "other", label: "综合费用", amount: totals.otherAmount },
+    { value: "direct", label: "工程直接费", amount: discountableDirectAmount },
+    { value: "total", label: "总价", amount: discountableDirectAmount + totals.otherAmount },
+  ];
+  const fixedLabels = new Set(fixedOptions.map((option) => option.label));
+  const dynamicOptions = customCategoryOptions.filter((option) => !fixedLabels.has(option.label) && !/组合包|套餐|一口价|package|定制柜/i.test(option.label));
+  return [...fixedOptions, ...dynamicOptions];
+}
+
+function getDiscountSpaceOptions(items: ExportItem[], settings: any): DiscountScopeOption[] {
+  const discountableItems = getDiscountableItems(items, settings);
+  const spaces = uniqueValues([
+    ...(Array.isArray(settings?.quoteSpaces) ? settings.quoteSpaces : []),
+    ...items.filter((item) => !isOtherCategory(item.category)).map((item) => inferItemSpace(item)),
+  ]);
+  return spaces.map((space) => ({
+    value: `space:${space}`,
+    label: space,
+    amount: discountableItems
+      .filter((item) => !isOtherCategory(item.category) && inferItemSpace(item) === space)
+      .reduce((sum, item) => roundMoney(sum + getBaseOrMaterialItemTotal(item)), 0),
+  }));
+}
+
+function getDiscountWorkTypeOptions(items: ExportItem[], settings: any): DiscountScopeOption[] {
+  const discountableItems = getDiscountableItems(items, settings);
+  const workTypes = uniqueValues(items.filter((item) => !isOtherCategory(item.category)).map((item) => String(item.work_type_name || "").trim()));
+  return workTypes.map((workType) => ({
+    value: `work_type:${workType}`,
+    label: workType,
+    amount: discountableItems
+      .filter((item) => !isOtherCategory(item.category) && String(item.work_type_name || "").trim() === workType)
+      .reduce((sum, item) => roundMoney(sum + getBaseOrMaterialItemTotal(item)), 0),
+  }));
+}
+
+function getLegacyDiscountRule(settings: any): DiscountRule | null {
+  const discount = Math.max(0, toNumber(settings?.discount));
+  if (discount <= 0) return null;
+  const type = settings?.discountType === "space" || settings?.discountType === "work_type" ? settings.discountType : "fee";
+  return {
+    id: "legacy",
+    type,
+    mode: settings?.discountMode === "rate" ? "rate" : "amount",
+    scope: settings?.discountScope || "total",
+    space: settings?.discountSpace || "",
+    workType: settings?.discountWorkType || "",
+    discount,
+    rate: Math.min(1, Math.max(0, toNumber(settings?.discountRate || 1))),
+  };
+}
+
+function getDiscountRules(settings: any): DiscountRule[] {
+  const hasRuleList = Array.isArray(settings?.discountRules);
+  const rawRules = hasRuleList ? settings.discountRules || [] : [];
+  const rules = rawRules
+    .map((rule: any, index: number) => ({
+      id: String(rule?.id || `rule_${index}`),
+      type: rule?.type === "space" || rule?.type === "work_type" ? rule.type : "fee",
+      mode: rule?.mode === "rate" ? "rate" : "amount",
+      scope: String(rule?.scope || "total"),
+      space: String(rule?.space || ""),
+      workType: String(rule?.workType || ""),
+      discount: Math.max(0, toNumber(rule?.discount)),
+      rate: Math.min(1, Math.max(0, toNumber(rule?.rate || 1))),
+    }))
+    .filter((rule: DiscountRule) => rule.mode === "rate" ? toNumber(rule.rate || 1) < 1 : toNumber(rule.discount) > 0);
+  if (hasRuleList) return rules;
+  const legacyRule = getLegacyDiscountRule(settings);
+  return legacyRule ? [legacyRule] : [];
+}
+
+function getDiscountRuleValue(rule: DiscountRule) {
+  if (rule.type === "space") return rule.space ? `space:${rule.space}` : "";
+  if (rule.type === "work_type") return rule.workType ? `work_type:${rule.workType}` : "";
+  return rule.scope || "total";
+}
+
+function getDiscountRuleScope(rule: DiscountRule, items: ExportItem[], settings: any, totals: { otherAmount: number }) {
+  const options = rule.type === "space"
+    ? getDiscountSpaceOptions(items, settings)
+    : rule.type === "work_type"
+      ? getDiscountWorkTypeOptions(items, settings)
+      : getDiscountScopeOptions(items, settings, totals);
+  const value = getDiscountRuleValue(rule);
+  return options.find((option) => option.value === value)
+    || options.find((option) => option.value === "total")
+    || options[0];
+}
+
+function getDiscountRuleAmount(rule: DiscountRule, items: ExportItem[], settings: any, totals: { otherAmount: number }) {
+  const scope = getDiscountRuleScope(rule, items, settings, totals);
+  const scopeAmount = Math.max(0, toNumber(scope?.amount));
+  const excludedAmount = Math.min(scopeAmount, Math.max(0, toNumber(settings?.excludeSpecificDiscountAmount)));
+  const baseAmount = Math.max(0, scopeAmount - excludedAmount);
+  if (baseAmount <= 0) return 0;
+  if (rule.mode === "rate") return roundMoney(baseAmount * (1 - Math.min(1, Math.max(0, toNumber(rule.rate || 1)))));
+  return roundMoney(Math.min(Math.max(0, toNumber(rule.discount)), baseAmount));
+}
+
+function getDiscountRuleRows(items: ExportItem[], settings: any, totals: { otherAmount: number }) {
+  return getDiscountRules(settings)
+    .map((rule) => {
+      const scope = getDiscountRuleScope(rule, items, settings, totals);
+      const amount = getDiscountRuleAmount(rule, items, settings, totals);
+      const label = scope?.label || (rule.type === "space" ? rule.space : rule.type === "work_type" ? rule.workType : getDiscountScopeLabelByValue(rule.scope || "total")) || "优惠对象";
+      const rateText = `${(toNumber(rule.rate || 1) * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
+      const discountRateText = `${((1 - toNumber(rule.rate || 1)) * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
+      return {
+        id: rule.id,
+        label,
+        formula: rule.mode === "rate" ? `${label} × ${rateText}` : `${label}优惠`,
+        ruleText: rule.mode === "rate"
+          ? `${label}按${rateText}折扣系数计算，折扣优惠金额 ${formatExportAmount(amount)}（${formatExportAmount(toNumber(scope?.amount))} × ${discountRateText}）`
+          : `${label}直接优惠金额 ${formatExportAmount(amount)}`,
+        amount,
+      };
+    })
+    .filter((row) => row.amount > 0);
+}
+
 function buildCostComposition(items: ExportItem[]) {
   const addAmount = (map: Map<string, number>, name: string, amount: number) => {
     if (amount <= 0) return;
@@ -526,6 +750,23 @@ function getDiscountScopeLabel(settings?: any) {
   return "总价";
 }
 
+function getDiscountScopeLabelByValue(value: string) {
+  const normalized = String(value || "total").trim();
+  const labels: Record<string, string> = {
+    base: "基装直接费",
+    base_labor: "基装直接费（人工）",
+    base_material: "基装直接费（材料）",
+    product: "产品费用",
+    custom_cabinet: "定制柜费用",
+    other: "综合费用",
+    direct: "工程直接费",
+    total: "总价",
+  };
+  if (labels[normalized]) return labels[normalized];
+  if (normalized.startsWith("category:")) return normalized.slice("category:".length) || "总价";
+  return "总价";
+}
+
 function applyThinBorder(cell: ExcelJS.Cell, color = EXPORT_BORDER_COLOR) {
   cell.border = {
     top: { style: "thin", color: { argb: color } },
@@ -583,10 +824,85 @@ function addTableHeader(sheet: ExcelJS.Worksheet, rowNumber: number, headers: st
   }
 }
 
-function addAmountCell(cell: ExcelJS.Cell, bold = false, color = "111827") {
+function addAmountCell(cell: ExcelJS.Cell, bold = false, color = "111827", horizontal: "left" | "center" | "right" = "right") {
   cell.numFmt = '0.00;-0.00';
   cell.font = { name: EXPORT_FONT_NAME, size: 10, bold, color: { argb: color } };
-  cell.alignment = { vertical: "middle", horizontal: "right" };
+  cell.alignment = { vertical: "middle", horizontal };
+}
+
+function addQuotationHeader(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet, quotation: any, branchSettings: any, exportTitle: string, qrDataUrl?: string) {
+  const companyPhone = String(branchSettings?.settings?.basicInfo?.contactPhone || "").trim();
+  const headerFields = [
+    { row: 2, labelCol: 1, valueCol: 2, valueEndCol: 3, label: "手机号", value: maskExportPhone(quotation.customer_phone) },
+    { row: 2, labelCol: 4, valueCol: 5, valueEndCol: 7, label: "建筑面积", value: quotation.project_area ? `${quotation.project_area} 平方` : "-" },
+    { row: 2, labelCol: 8, valueCol: 9, valueEndCol: 10, label: "预算时间", value: formatDateText(quotation.created_at) },
+    { row: 3, labelCol: 1, valueCol: 2, valueEndCol: 3, label: "设计师", value: quotation.designer_name || "-" },
+    { row: 3, labelCol: 4, valueCol: 5, valueEndCol: 7, label: "报价人", value: quotation.creator_name || "-" },
+    { row: 3, labelCol: 8, valueCol: 9, valueEndCol: 10, label: "公司电话", value: companyPhone || "-" },
+  ];
+
+  sheet.mergeCells(1, 1, 1, EXPORT_COLUMN_COUNT);
+  headerFields.forEach((field) => {
+    sheet.mergeCells(field.row, field.valueCol, field.row, field.valueEndCol);
+  });
+  sheet.mergeCells(2, 11, 3, 12);
+
+  const titleCell = sheet.getCell(1, 1);
+  titleCell.value = exportTitle;
+
+  headerFields.forEach((field) => {
+    const labelCell = sheet.getCell(field.row, field.labelCol);
+    const valueCell = sheet.getCell(field.row, field.valueCol);
+    labelCell.value = field.label;
+    valueCell.value = field.value;
+  });
+  sheet.getCell(2, 11).value = "扫码查看报价单";
+
+  for (let rowNumber = 1; rowNumber <= 3; rowNumber += 1) {
+    sheet.getRow(rowNumber).height = rowNumber === 1 ? 36 : 32;
+    for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
+      const cell = sheet.getCell(rowNumber, col);
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF" } };
+      cell.border = {
+        top: { style: "medium", color: { argb: "111111" } },
+        left: { style: "medium", color: { argb: "111111" } },
+        bottom: { style: "medium", color: { argb: "111111" } },
+        right: { style: "medium", color: { argb: "111111" } },
+      };
+      cell.alignment = { vertical: "middle", horizontal: "center", wrapText: false, shrinkToFit: true };
+      cell.font = { name: EXPORT_FONT_NAME, size: 10, color: { argb: "111827" } };
+    }
+  }
+
+  [1, 4, 8].forEach((labelCol) => {
+    [2, 3].forEach((rowNumber) => {
+      const cell = sheet.getCell(rowNumber, labelCol);
+      cell.font = { name: EXPORT_FONT_NAME, size: 9, bold: true, color: { argb: "475569" } };
+      cell.alignment = { vertical: "middle", horizontal: "center", wrapText: false, shrinkToFit: true };
+    });
+  });
+  [2, 5, 9].forEach((valueCol) => {
+    [2, 3].forEach((rowNumber) => {
+      const cell = sheet.getCell(rowNumber, valueCol);
+      cell.font = { name: EXPORT_FONT_NAME, size: 10, bold: false, color: { argb: "111827" } };
+      cell.alignment = { vertical: "middle", horizontal: "center", wrapText: false, shrinkToFit: true };
+    });
+  });
+  sheet.getCell(2, 11).font = { name: EXPORT_FONT_NAME, size: 10, bold: false, color: { argb: "475569" } };
+  sheet.getCell(2, 11).alignment = { vertical: "bottom", horizontal: "center", wrapText: false, shrinkToFit: true };
+  titleCell.font = { name: EXPORT_FONT_NAME, size: 18, bold: true, color: { argb: "111827" } };
+  titleCell.alignment = { vertical: "middle", horizontal: "center", wrapText: false, shrinkToFit: true };
+  if (qrDataUrl) {
+    const imageId = workbook.addImage({
+      base64: qrDataUrl.replace(/^data:image\/png;base64,/, ""),
+      extension: "png",
+    });
+    sheet.addImage(imageId, {
+      tl: { col: 11.18, row: 1.02 },
+      ext: { width: 50, height: 50 },
+      editAs: "oneCell",
+    });
+  }
 }
 
 function applyRowColor(row: ExcelJS.Row, value?: string | null, fromCol = 1, toCol = EXPORT_COLUMN_COUNT) {
@@ -642,6 +958,26 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
   const layoutByKey = Object.fromEntries(columnLayouts.map((layout) => [layout.column.key, layout])) as Partial<Record<(typeof columns)[number]["key"], (typeof columnLayouts)[number]>>;
   const mergeLayoutCells = (row: number, layout: (typeof columnLayouts)[number]) => {
     if (layout.end > layout.start) sheet.mergeCells(row, layout.start, row, layout.end);
+  };
+  const firstSummaryLayout = columnLayouts.find(({ column }) => column.key === "materialTotal" || column.key === "laborTotal" || column.key === "subtotal");
+  const getSummaryLabelEndCol = () => Math.max(1, (firstSummaryLayout?.start || EXPORT_COLUMN_COUNT + 1) - 1);
+  const writeSummaryAmounts = (row: number, totals: { materialTotal: number; laborTotal: number; subtotal: number }, subtotalColor: string) => {
+    if (layoutByKey.materialTotal) {
+      sheet.getCell(row, layoutByKey.materialTotal.start).value = totals.materialTotal;
+      mergeLayoutCells(row, layoutByKey.materialTotal);
+      addAmountCell(sheet.getCell(row, layoutByKey.materialTotal.start), true, "111827", "center");
+    }
+    if (layoutByKey.laborTotal) {
+      sheet.getCell(row, layoutByKey.laborTotal.start).value = totals.laborTotal;
+      mergeLayoutCells(row, layoutByKey.laborTotal);
+      addAmountCell(sheet.getCell(row, layoutByKey.laborTotal.start), true, "111827", "center");
+    }
+    if (layoutByKey.subtotal) {
+      sheet.getCell(row, layoutByKey.subtotal.start).value = totals.subtotal;
+      mergeLayoutCells(row, layoutByKey.subtotal);
+      addAmountCell(sheet.getCell(row, layoutByKey.subtotal.start), true, subtotalColor, "center");
+    }
+    if (layoutByKey.description) mergeLayoutCells(row, layoutByKey.description);
   };
 
   columnLayouts.forEach((layout, index) => {
@@ -721,36 +1057,24 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
       }
       columnLayouts.forEach((layout) => {
         const cell = row.getCell(layout.start);
-        cell.alignment = { vertical: "middle", horizontal: layout.column.amount ? "right" : layout.column.key === "name" || layout.column.key === "description" ? "left" : "center", wrapText: layout.column.key !== "sequence" };
-        if (layout.column.amount) addAmountCell(cell, layout.column.boldAmount, layout.column.redAmount ? "DC2626" : "344054");
+        cell.alignment = { vertical: "middle", horizontal: layout.column.amount ? "center" : layout.column.key === "name" || layout.column.key === "description" ? "left" : "center", wrapText: layout.column.key !== "sequence" };
+        if (layout.column.amount) addAmountCell(cell, layout.column.boldAmount, layout.column.redAmount ? "DC2626" : "344054", "center");
       });
       rowNumber += 1;
     });
 
-    const summaryTotalLayout = layoutByKey.subtotal || { start: EXPORT_COLUMN_COUNT - 1, end: EXPORT_COLUMN_COUNT };
-    const labelEndCol = Math.max(1, summaryTotalLayout.start - 1);
+    const groupMaterialTotal = group.items.reduce((sum, item) => sum + getBasePriceParts(item).materialTotal, 0);
+    const groupLaborTotal = group.items.reduce((sum, item) => sum + getBasePriceParts(item).laborTotal, 0);
+    const labelEndCol = getSummaryLabelEndCol();
     sheet.mergeCells(rowNumber, 1, rowNumber, labelEndCol);
     sheet.getCell(rowNumber, 1).value = "小计";
-    if (layoutByKey.subtotal && layoutByKey.materialTotal) {
-      sheet.getCell(rowNumber, layoutByKey.materialTotal.start).value = group.items.reduce((sum, item) => sum + getBasePriceParts(item).materialTotal, 0);
-      mergeLayoutCells(rowNumber, layoutByKey.materialTotal);
-    }
-    if (layoutByKey.subtotal && layoutByKey.laborTotal) {
-      sheet.getCell(rowNumber, layoutByKey.laborTotal.start).value = group.items.reduce((sum, item) => sum + getBasePriceParts(item).laborTotal, 0);
-      mergeLayoutCells(rowNumber, layoutByKey.laborTotal);
-    }
-    sheet.getCell(rowNumber, summaryTotalLayout.start).value = groupTotal;
-    if (summaryTotalLayout.end > summaryTotalLayout.start) sheet.mergeCells(rowNumber, summaryTotalLayout.start, rowNumber, summaryTotalLayout.end);
     styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
       font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "344054" } },
       fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_SECTION_FILL } },
       alignment: { vertical: "middle" },
     });
     sheet.getCell(rowNumber, 1).alignment = { horizontal: "center", vertical: "middle" };
-    if (layoutByKey.subtotal) {
-      [layoutByKey.materialTotal, layoutByKey.laborTotal].filter(Boolean).forEach((layout) => addAmountCell(sheet.getCell(rowNumber, layout!.start), true, "111827"));
-    }
-    addAmountCell(sheet.getCell(rowNumber, summaryTotalLayout.start), true, "111827");
+    writeSummaryAmounts(rowNumber, { materialTotal: groupMaterialTotal, laborTotal: groupLaborTotal, subtotal: groupTotal }, "111827");
     for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
     rowNumber += 1;
   });
@@ -758,29 +1082,15 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
   const total = items.reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const materialTotal = items.reduce((sum, item) => sum + getBasePriceParts(item).materialTotal, 0);
   const laborTotal = items.reduce((sum, item) => sum + getBasePriceParts(item).laborTotal, 0);
-  const summaryTotalLayout = layoutByKey.subtotal || { start: EXPORT_COLUMN_COUNT - 1, end: EXPORT_COLUMN_COUNT };
-  const labelEndCol = Math.max(1, summaryTotalLayout.start - 1);
+  const labelEndCol = getSummaryLabelEndCol();
   sheet.mergeCells(rowNumber, 1, rowNumber, labelEndCol);
   sheet.getCell(rowNumber, 1).value = "基装小计";
-  if (layoutByKey.subtotal && layoutByKey.materialTotal) {
-    sheet.getCell(rowNumber, layoutByKey.materialTotal.start).value = materialTotal;
-    mergeLayoutCells(rowNumber, layoutByKey.materialTotal);
-  }
-  if (layoutByKey.subtotal && layoutByKey.laborTotal) {
-    sheet.getCell(rowNumber, layoutByKey.laborTotal.start).value = laborTotal;
-    mergeLayoutCells(rowNumber, layoutByKey.laborTotal);
-  }
-  sheet.getCell(rowNumber, summaryTotalLayout.start).value = total;
-  if (summaryTotalLayout.end > summaryTotalLayout.start) sheet.mergeCells(rowNumber, summaryTotalLayout.start, rowNumber, summaryTotalLayout.end);
   styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
     font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "111827" } },
     fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_TOTAL_FILL } },
   });
   sheet.getCell(rowNumber, 1).alignment = { horizontal: "center", vertical: "middle" };
-  if (layoutByKey.subtotal) {
-    [layoutByKey.materialTotal, layoutByKey.laborTotal].filter(Boolean).forEach((layout) => addAmountCell(sheet.getCell(rowNumber, layout!.start), true, "111827"));
-  }
-  addAmountCell(sheet.getCell(rowNumber, summaryTotalLayout.start), true, "DC2626");
+  writeSummaryAmounts(rowNumber, { materialTotal, laborTotal, subtotal: total }, "DC2626");
   for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
   return rowNumber + 1;
 }
@@ -789,8 +1099,10 @@ function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: E
   let rowNumber = startRow;
   addSectionTitle(sheet, rowNumber, title);
   rowNumber += 1;
-  addTableHeader(sheet, rowNumber, ["序号", "材料名称", "规格", "型号", "单位", "单价", "数量", "小计", "备注", "", ""], EXPORT_COLUMN_COUNT);
-  sheet.mergeCells(rowNumber, 9, rowNumber, EXPORT_COLUMN_COUNT);
+  addTableHeader(sheet, rowNumber, ["序号", "材料名称", "", "规格", "", "型号", "单位", "单价", "数量", "小计", "备注", ""], EXPORT_COLUMN_COUNT);
+  sheet.mergeCells(rowNumber, 2, rowNumber, 3);
+  sheet.mergeCells(rowNumber, 4, rowNumber, 5);
+  sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
   rowNumber += 1;
 
   const groups = groupItemsBySpace(items, quoteSpaces);
@@ -818,7 +1130,9 @@ function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: E
       const row = setRowValues(sheet, rowNumber, [
         sequence,
         nameText,
+        "",
         specText,
+        "",
         modelText,
         itemText(item.unit),
         getBaseOrMaterialItemUnitPrice(item),
@@ -826,51 +1140,52 @@ function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: E
         total,
         remarkText,
         "",
-        "",
       ]);
       row.height = Math.max(
-        getWrappedRowHeight(nameText, 18, 28),
-        getWrappedRowHeight(specText, 14, specText ? 40 : 28),
+        getWrappedRowHeight(nameText, 32, 28),
+        getWrappedRowHeight(specText, 24, specText ? 40 : 28),
         getWrappedRowHeight(modelText, 12, modelText ? 40 : 28),
-        getWrappedRowHeight(remarkText, 28, remarkText ? 40 : 28),
+        getWrappedRowHeight(remarkText, 56, remarkText ? 40 : 28),
       );
-      sheet.mergeCells(rowNumber, 9, rowNumber, EXPORT_COLUMN_COUNT);
+      sheet.mergeCells(rowNumber, 2, rowNumber, 3);
+      sheet.mergeCells(rowNumber, 4, rowNumber, 5);
+      sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
       applyRowColor(row, item.row_color);
       for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
         const cell = row.getCell(col);
         applyThinBorder(cell);
         cell.font = { name: EXPORT_FONT_NAME, size: 10, color: { argb: "344054" } };
-        cell.alignment = { vertical: [3, 4].includes(col) ? "top" : "middle", horizontal: [6, 8].includes(col) ? "right" : [2, 3, 4].includes(col) || col >= 9 ? "left" : "center", wrapText: col !== 1 };
+        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: ![1, 7, 8, 9, 10].includes(col) };
       }
-      [6, 8].forEach((col) => addAmountCell(row.getCell(col), col === 8));
+      [8, 10].forEach((col) => addAmountCell(row.getCell(col), col === 10, "111827", "center"));
       rowNumber += 1;
     });
 
-    sheet.mergeCells(rowNumber, 1, rowNumber, 8);
+    sheet.mergeCells(rowNumber, 1, rowNumber, 9);
     sheet.getCell(rowNumber, 1).value = `${group.space} 小计`;
-    sheet.getCell(rowNumber, 1).alignment = { horizontal: "right", vertical: "middle" };
-    sheet.mergeCells(rowNumber, 9, rowNumber, EXPORT_COLUMN_COUNT);
-    sheet.getCell(rowNumber, 9).value = groupTotal;
+    sheet.getCell(rowNumber, 1).alignment = { horizontal: "center", vertical: "middle" };
+    sheet.getCell(rowNumber, 10).value = groupTotal;
+    sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
     styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
       font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "344054" } },
       fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_SECTION_FILL } },
     });
-    addAmountCell(sheet.getCell(rowNumber, 9), true, "111827");
+    addAmountCell(sheet.getCell(rowNumber, 10), true, "111827", "center");
     for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
     rowNumber += 1;
   });
 
   const total = items.reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
-  sheet.mergeCells(rowNumber, 1, rowNumber, 8);
+  sheet.mergeCells(rowNumber, 1, rowNumber, 9);
   sheet.getCell(rowNumber, 1).value = `${title.replace(/明细$/, "")}小计`;
-  sheet.getCell(rowNumber, 1).alignment = { horizontal: "right", vertical: "middle" };
-  sheet.mergeCells(rowNumber, 9, rowNumber, EXPORT_COLUMN_COUNT);
-  sheet.getCell(rowNumber, 9).value = total;
+  sheet.getCell(rowNumber, 1).alignment = { horizontal: "center", vertical: "middle" };
+  sheet.getCell(rowNumber, 10).value = total;
+  sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
   styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
     font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "111827" } },
     fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_TOTAL_FILL } },
   });
-  addAmountCell(sheet.getCell(rowNumber, 9), true, "DC2626");
+  addAmountCell(sheet.getCell(rowNumber, 10), true, "DC2626", "center");
   for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
   return rowNumber + 1;
 }
@@ -879,8 +1194,10 @@ function addCustomCabinetSection(sheet: ExcelJS.Worksheet, startRow: number, ite
   let rowNumber = startRow;
   addSectionTitle(sheet, rowNumber, title);
   rowNumber += 1;
-  addTableHeader(sheet, rowNumber, ["编号", "名称", "H高×W宽×D深（mm）", "数量", "平方", "单价", "金额", "备注", "", "", ""], EXPORT_COLUMN_COUNT);
-  sheet.mergeCells(rowNumber, 8, rowNumber, EXPORT_COLUMN_COUNT);
+  addTableHeader(sheet, rowNumber, ["编号", "名称", "", "H高×W宽×D深（mm）", "", "", "数量", "平方", "单价", "金额", "备注", ""], EXPORT_COLUMN_COUNT);
+  sheet.mergeCells(rowNumber, 2, rowNumber, 3);
+  sheet.mergeCells(rowNumber, 4, rowNumber, 6);
+  sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
   rowNumber += 1;
 
   const groups = groupItemsBySpace(items, quoteSpaces);
@@ -908,57 +1225,61 @@ function addCustomCabinetSection(sheet: ExcelJS.Worksheet, startRow: number, ite
       const row = setRowValues(sheet, rowNumber, [
         sequence,
         nameText,
+        "",
         sizeText,
+        "",
+        "",
         formatQuantity(item.quantity),
         area,
         toNumber(item.unit_price),
         total,
         remarkText,
         "",
-        "",
-        "",
       ]);
       row.height = Math.max(
-        getWrappedRowHeight(nameText, 18, 28),
-        getWrappedRowHeight(remarkText, 32, remarkText ? 40 : 28),
+        getWrappedRowHeight(nameText, 32, 28),
+        getWrappedRowHeight(sizeText, 36, 28),
+        getWrappedRowHeight(remarkText, 56, remarkText ? 40 : 28),
       );
-      sheet.mergeCells(rowNumber, 8, rowNumber, EXPORT_COLUMN_COUNT);
+      sheet.mergeCells(rowNumber, 2, rowNumber, 3);
+      sheet.mergeCells(rowNumber, 4, rowNumber, 6);
+      sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
       applyRowColor(row, item.row_color);
       for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
         const cell = row.getCell(col);
         applyThinBorder(cell);
         cell.font = { name: EXPORT_FONT_NAME, size: 10, color: { argb: "344054" } };
-        cell.alignment = { vertical: "middle", horizontal: [6, 7].includes(col) ? "right" : col === 2 || col >= 8 ? "left" : "center", wrapText: col !== 1 };
+        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: ![1, 7, 8, 9, 10].includes(col) };
       }
-      [6, 7].forEach((col) => addAmountCell(row.getCell(col), col === 7));
+      [9, 10].forEach((col) => addAmountCell(row.getCell(col), col === 10, "111827", "center"));
       rowNumber += 1;
     });
 
-    sheet.mergeCells(rowNumber, 1, rowNumber, 6);
+    sheet.mergeCells(rowNumber, 1, rowNumber, 9);
     sheet.getCell(rowNumber, 1).value = `${group.space} 小计`;
-    sheet.getCell(rowNumber, 1).alignment = { horizontal: "right", vertical: "middle" };
-    sheet.getCell(rowNumber, 7).value = groupTotal;
-    sheet.mergeCells(rowNumber, 8, rowNumber, EXPORT_COLUMN_COUNT);
+    sheet.getCell(rowNumber, 1).alignment = { horizontal: "center", vertical: "middle" };
+    sheet.getCell(rowNumber, 10).value = groupTotal;
+    sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
     styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
       font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "344054" } },
       fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_SECTION_FILL } },
     });
-    addAmountCell(sheet.getCell(rowNumber, 7), true, "111827");
+    addAmountCell(sheet.getCell(rowNumber, 10), true, "111827", "center");
     for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
     rowNumber += 1;
   });
 
   const total = items.reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
-  sheet.mergeCells(rowNumber, 1, rowNumber, 6);
+  sheet.mergeCells(rowNumber, 1, rowNumber, 9);
   sheet.getCell(rowNumber, 1).value = `${title.replace(/明细$/, "")}小计`;
-  sheet.getCell(rowNumber, 1).alignment = { horizontal: "right", vertical: "middle" };
-  sheet.getCell(rowNumber, 7).value = total;
-  sheet.mergeCells(rowNumber, 8, rowNumber, EXPORT_COLUMN_COUNT);
+  sheet.getCell(rowNumber, 1).alignment = { horizontal: "center", vertical: "middle" };
+  sheet.getCell(rowNumber, 10).value = total;
+  sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
   styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
     font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "111827" } },
     fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_TOTAL_FILL } },
   });
-  addAmountCell(sheet.getCell(rowNumber, 7), true, "DC2626");
+  addAmountCell(sheet.getCell(rowNumber, 10), true, "DC2626", "center");
   for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
   return rowNumber + 1;
 }
@@ -967,6 +1288,7 @@ function addOtherFeeSection(
   sheet: ExcelJS.Worksheet,
   startRow: number,
   items: ExportItem[],
+  allItems: ExportItem[],
   baseAmount: number,
   materialAmount: number,
   feeFormulaContext: FeeFormulaContext,
@@ -1008,6 +1330,16 @@ function addOtherFeeSection(
     finalFormulaParts.push("- 优惠");
     finalRuleParts.push(`- 优惠 ${formatExportAmount(discount)}`);
   }
+  const discountRows = getDiscountRuleRows(allItems, settings, { otherAmount });
+  const fallbackDiscountRows = discount > 0 && discountRows.length === 0
+    ? [{
+        id: "legacy",
+        label: getDiscountScopeLabel(settings),
+        formula: `${getDiscountScopeLabel(settings)}优惠`,
+        ruleText: `${getDiscountScopeLabel(settings)}优惠 ${formatExportAmount(discount)}`,
+        amount: discount,
+      }]
+    : discountRows;
 
   const addFeeRow = (values: [unknown, unknown, unknown, unknown, unknown], options: { fill?: string; bold?: boolean; amountColor?: string; rowColor?: string | null } = {}) => {
     setRowValues(sheet, rowNumber, [
@@ -1049,19 +1381,18 @@ function addOtherFeeSection(
     addFeeRow([formatAlphaSequence(index + 1), item.name || "", getFeeFormulaText(item), total, ruleText], { rowColor: item.row_color });
   });
 
-  if (discount > 0) {
-    const discountScopeLabel = getDiscountScopeLabel(settings);
+  fallbackDiscountRows.forEach((row, index) => {
     addFeeRow([
-      formatAlphaSequence(items.length + 1),
+      formatAlphaSequence(items.length + index + 1),
       "优惠",
-      `${discountScopeLabel}优惠`,
-      -Math.abs(discount),
-      `${discountScopeLabel}优惠 ${formatExportAmount(discount)}`,
+      row.formula,
+      -Math.abs(row.amount),
+      row.ruleText,
     ]);
-  }
+  });
 
   addFeeRow([
-    formatAlphaSequence(items.length + (discount > 0 ? 2 : 1)),
+    formatAlphaSequence(items.length + fallbackDiscountRows.length + 1),
     "工程总造价",
     finalFormulaParts.join(" "),
     finalAmount,
@@ -1160,22 +1491,31 @@ function addSignatureSection(sheet: ExcelJS.Worksheet, startRow: number, labels:
   let rowNumber = startRow;
   addSectionTitle(sheet, rowNumber, "签字栏");
   rowNumber += 1;
+
+  const signatureLabels = labels.slice(0, 4);
   const slots = [
-    { start: 1, end: 2 },
-    { start: 4, end: 5 },
-    { start: 7, end: 8 },
-    { start: 10, end: 11 },
+    { start: 1, end: 3 },
+    { start: 4, end: 7 },
+    { start: 8, end: 10 },
+    { start: 11, end: EXPORT_COLUMN_COUNT },
   ];
-  labels.forEach((label, index) => {
-    const slot = slots[index % slots.length];
-    if (index > 0 && index % slots.length === 0) rowNumber += 3;
+
+  slots.forEach((slot, index) => {
     sheet.mergeCells(rowNumber, slot.start, rowNumber, slot.end);
     const cell = sheet.getCell(rowNumber, slot.start);
-    cell.value = label;
-    cell.font = { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "334155" } };
-    cell.alignment = { vertical: "middle", horizontal: "left" };
+    const label = String(signatureLabels[index] || "").replace(/[：:]+$/g, "");
+    cell.value = label ? `${label}：` : "";
+    cell.font = { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "334155" } };
+    cell.alignment = { vertical: "middle", horizontal: "left", wrapText: false, shrinkToFit: true };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF" } };
   });
-  sheet.getRow(rowNumber).height = 34;
+
+  for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
+    const cell = sheet.getCell(rowNumber, col);
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF" } };
+    applyThinBorder(cell, "111111");
+  }
+  sheet.getRow(rowNumber).height = 30;
   return rowNumber + 1;
 }
 
@@ -1217,6 +1557,86 @@ function addAppendixNoteSection(sheet: ExcelJS.Worksheet, startRow: number, note
   sheet.getRow(rowNumber).height = getAppendixNoteRowHeight(sheet, content);
   for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
   return rowNumber + 1;
+}
+
+function splitBudgetCompilationLines(content: string, usableWidth = 142) {
+  const result: string[] = [];
+  content.split(/\r?\n/).forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) {
+      result.push("");
+      return;
+    }
+    let current = "";
+    for (const char of Array.from(line)) {
+      const next = `${current}${char}`;
+      if (current && getExcelTextWidthUnits(next) > usableWidth) {
+        result.push(current);
+        current = char;
+      } else {
+        current = next;
+      }
+    }
+    if (current) result.push(current);
+  });
+  return result;
+}
+
+function addBudgetCompilationSheet(workbook: ExcelJS.Workbook, quotation: any, content: string) {
+  const sheet = workbook.addWorksheet("预算编制", {
+    pageSetup: {
+      paperSize: 9,
+      orientation: "landscape",
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 0,
+      margins: { left: 0.25, right: 0.25, top: 0.35, bottom: 0.35, header: 0.1, footer: 0.1 },
+    },
+  });
+  sheet.views = [{ showGridLines: false }];
+  sheet.properties.defaultRowHeight = 22;
+  sheet.columns = [
+    { key: "a", width: 12 },
+    { key: "b", width: 18 },
+    { key: "c", width: 18 },
+    { key: "d", width: 12 },
+    { key: "e", width: 12 },
+    { key: "f", width: 12 },
+    { key: "g", width: 12 },
+    { key: "h", width: 12 },
+    { key: "i", width: 12 },
+    { key: "j", width: 32 },
+    { key: "k", width: 24 },
+    { key: "l", width: 36 },
+  ];
+  sheet.mergeCells("A1:L1");
+  sheet.getCell("A1").value = "预算编制";
+  sheet.getCell("A1").font = { name: EXPORT_FONT_NAME, size: 18, bold: true, color: { argb: "111827" } };
+  sheet.getCell("A1").alignment = { vertical: "middle", horizontal: "center" };
+  sheet.getRow(1).height = 34;
+
+  const lines = splitBudgetCompilationLines(content);
+  const firstContentRow = 2;
+  const rows = lines.length > 0 ? lines : [content.trim()];
+  rows.forEach((line, index) => {
+    const rowNumber = firstContentRow + index;
+    sheet.mergeCells(rowNumber, 1, rowNumber, EXPORT_COLUMN_COUNT);
+    const cell = sheet.getCell(rowNumber, 1);
+    cell.value = line;
+    cell.font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "111111" } };
+    cell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF" } };
+    sheet.getRow(rowNumber).height = line ? 22 : 10;
+  });
+  const lastRow = firstContentRow + rows.length - 1;
+  for (let row = 1; row <= lastRow; row += 1) {
+    for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
+      const cell = sheet.getCell(row, col);
+      cell.fill = cell.fill || { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF" } };
+      applyThinBorder(cell, "111111");
+    }
+  }
+  sheet.pageSetup.printArea = `A1:L${lastRow}`;
 }
 
 function addCoverSheet(workbook: ExcelJS.Workbook, quotation: any, branchSettings: any) {
@@ -1313,17 +1733,17 @@ function addCoverSheet(workbook: ExcelJS.Workbook, quotation: any, branchSetting
     rowNumber += 2;
   });
 
-  sheet.mergeCells(40, 2, 40, 4);
+  sheet.mergeCells(40, 2, 40, 3);
   sheet.getCell(40, 2).border = { top: { style: "thin", color: { argb: "888888" } } };
-  sheet.mergeCells(40, 7, 40, 9);
-  sheet.getCell(40, 7).border = { top: { style: "thin", color: { argb: "888888" } } };
+  sheet.mergeCells(40, 8, 40, 9);
+  sheet.getCell(40, 8).border = { top: { style: "thin", color: { argb: "888888" } } };
 
   const logoFile = getPublicImageFile(brandLogoUrl);
   if (logoFile) {
     const imageId = workbook.addImage({ base64: readFileSync(logoFile.filePath).toString("base64"), extension: logoFile.extension });
-    sheet.addImage(imageId, { tl: { col: 4.2, row: 39.08 }, ext: { width: 86, height: 24 } });
+    sheet.addImage(imageId, { tl: { col: 4.18, row: 38.95 }, ext: { width: 122, height: 34 } });
   }
-  sheet.mergeCells(40, 5, 40, 6);
+  sheet.mergeCells(40, 4, 40, 7);
   sheet.getCell(40, 5).font = { name: EXPORT_FONT_NAME, size: 13, bold: true, color: { argb: "111111" } };
   sheet.getCell(40, 5).alignment = { vertical: "middle", horizontal: "left", wrapText: false, shrinkToFit: true };
   sheet.getRow(40).height = 26;
@@ -1370,6 +1790,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   const outputMode = req.nextUrl.searchParams.get("mode") === "composition" ? "composition" : "list";
   const exportScope = parseExportScope(req.nextUrl.searchParams.get("scope"));
   const baseExportColumns = parseBaseExportColumns(req.nextUrl.searchParams.get("baseColumns"), exportScope);
+  const includeBudgetCompilation = req.nextUrl.searchParams.get("includeBudgetCompilation") !== "0";
   const shareClaims = verifyQuotationShareToken(req.nextUrl.searchParams.get("share") || "", params.id);
   const auth = getAuthContext(req);
   if (shareClaims && !auth) return NextResponse.json({ message: "分享报价单仅支持查看，不能导出" }, { status: 403 });
@@ -1412,6 +1833,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
 
   const rawSettings = parseSettings(quotation.settings);
   const appendixNote = buildAppendixNoteContent(rawSettings, quotation);
+  const budgetCompilationContent = getBudgetCompilationContent(rawSettings);
   const rawItems = db.prepare("SELECT * FROM quotation_items WHERE quotation_id = ? ORDER BY sort_order ASC, created_at ASC").all(params.id) as ExportItem[];
   const items = migrateManagementFeeToOtherItem(rawItems, rawSettings).map((item) => ({ ...item, space: inferItemSpace(item) }));
   const quoteCategories = getQuoteCategoriesForItems(
@@ -1439,7 +1861,10 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   const feeFormulaContext = buildFeeFormulaContext(items, quoteCategories);
   const otherFeeTotals = calculateOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext);
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
-  const discount = Number(rawSettings.discount || quotation.discount || 0);
+  const discountRows = getDiscountRuleRows(items, rawSettings, { otherAmount });
+  const discount = discountRows.length > 0
+    ? Math.min(baseAmount + materialAmount + otherAmount, discountRows.reduce((sum, row) => roundMoney(sum + row.amount), 0))
+    : Number(rawSettings.discount || quotation.discount || 0);
   const taxAmount = Math.max(0, baseAmount + materialAmount + otherAmount - discount) * Number(rawSettings.taxRate || 0) / 100;
   const finalAmount = Math.max(0, roundMoney(baseAmount + materialAmount + otherAmount + taxAmount - discount));
   const costComposition = buildCostComposition(items);
@@ -1451,6 +1876,13 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   workbook.created = new Date();
   workbook.modified = new Date();
   const exportTitle = buildExportTitle(quotation);
+  const shareToken = signQuotationShareToken(params.id, companyId, null);
+  const shareUrl = `${getPublicAppOrigin(req)}/q/${encodeURIComponent(shareToken)}`;
+  const qrDataUrl = await QRCode.toDataURL(shareUrl, {
+    errorCorrectionLevel: "L",
+    margin: 2,
+    width: 180,
+  });
   const shouldAddCoverSheet = outputMode === "list" && exportScope === "all";
   if (shouldAddCoverSheet) addCoverSheet(workbook, quotation, branchSettings);
   const sheet = workbook.addWorksheet(safeSheetName(shouldAddCoverSheet ? "报价明细" : exportTitle), {
@@ -1465,46 +1897,21 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   });
   sheet.properties.defaultRowHeight = 22;
   sheet.columns = [
-    { key: "a", width: 9 },
-    { key: "b", width: 20 },
-    { key: "c", width: 10 },
+    { key: "a", width: 12 },
+    { key: "b", width: 18 },
+    { key: "c", width: 18 },
     { key: "d", width: 12 },
-    { key: "e", width: 9 },
-    { key: "f", width: 10 },
-    { key: "g", width: 10 },
-    { key: "h", width: 10 },
-    { key: "i", width: 10 },
-    { key: "j", width: 16 },
-    { key: "k", width: 48 },
+    { key: "e", width: 12 },
+    { key: "f", width: 12 },
+    { key: "g", width: 12 },
+    { key: "h", width: 12 },
+    { key: "i", width: 12 },
+    { key: "j", width: 32 },
+    { key: "k", width: 24 },
+    { key: "l", width: 36 },
   ];
 
-  sheet.mergeCells(1, 1, 1, EXPORT_COLUMN_COUNT);
-  sheet.getCell(1, 1).value = exportTitle;
-  sheet.getCell(1, 1).font = { name: EXPORT_FONT_NAME, size: 22, bold: true, color: { argb: "111827" } };
-  sheet.getCell(1, 1).alignment = { vertical: "middle", horizontal: "center", wrapText: false, shrinkToFit: true };
-  sheet.getRow(1).height = 36;
-
-  const infoRows = [
-    ["客户姓名", quotation.customer_name || "", "", "", "手机号", maskExportPhone(quotation.customer_phone), "", "", "建筑面积", quotation.project_area ? `${quotation.project_area} 平方` : "", ""],
-    ["项目地址", getExportProjectAddress(quotation), "", "", "设计师", quotation.designer_name || "", "", "", "报价人", quotation.creator_name || "", ""],
-  ];
-  setRowValues(sheet, 2, infoRows[0]);
-  setRowValues(sheet, 3, infoRows[1]);
-  [[2, 2, 2, 4], [2, 6, 2, 8], [2, 10, 2, 11], [3, 2, 3, 4], [3, 6, 3, 8], [3, 10, 3, 11]].forEach(
-    ([top, left, bottom, right]) => sheet.mergeCells(top, left, bottom, right),
-  );
-  for (let rowNumber = 2; rowNumber <= 3; rowNumber += 1) {
-    const row = sheet.getRow(rowNumber);
-    row.height = 28;
-    for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
-      const cell = row.getCell(col);
-      applyThinBorder(cell);
-      const isLabel = [1, 5, 9].includes(col);
-      cell.alignment = { vertical: "middle", horizontal: isLabel ? "center" : "left", wrapText: false, shrinkToFit: !isLabel };
-      cell.font = { name: EXPORT_FONT_NAME, size: 10, bold: isLabel, color: { argb: isLabel ? "64748B" : "111827" } };
-      if (isLabel) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "F8FAFC" } };
-    }
-  }
+  addQuotationHeader(workbook, sheet, quotation, branchSettings, exportTitle, qrDataUrl);
 
   let rowNumber = 4;
   if (outputMode === "composition") {
@@ -1527,7 +1934,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
           : addMaterialSection(sheet, rowNumber, group.items, rawSettings.quoteSpaces, `${group.label}明细`);
       });
     if (isAllDetailScope || exportScope === "fees") {
-      rowNumber = addOtherFeeSection(sheet, rowNumber, otherItems, baseAmount, materialAmount, feeFormulaContext, otherFeeTotals, discount, taxAmount, finalAmount, rawSettings);
+      rowNumber = addOtherFeeSection(sheet, rowNumber, otherItems, items, baseAmount, materialAmount, feeFormulaContext, otherFeeTotals, discount, taxAmount, finalAmount, rawSettings);
     }
   }
   if (outputMode !== "composition" && appendixNote && (exportScope === "all" || exportScope === "all_without_cover" || exportScope === "fees")) {
@@ -1537,6 +1944,14 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
     addSignatureSection(sheet, rowNumber, signatureLabels);
   }
   applyContentBorders(sheet);
+  if (
+    outputMode !== "composition"
+    && includeBudgetCompilation
+    && budgetCompilationContent
+    && (exportScope === "all" || exportScope === "all_without_cover" || exportScope === "fees")
+  ) {
+    addBudgetCompilationSheet(workbook, quotation, budgetCompilationContent);
+  }
   workbook.eachSheet((worksheet) => {
     worksheet.eachRow((row) => {
       row.eachCell((cell) => {

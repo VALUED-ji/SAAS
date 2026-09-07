@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { getAuthContext, hasPermission } from "@/lib/security/authorization";
 import { signQuotationShareToken } from "@/lib/security/quotationShare";
+import { getPublicAppOrigin } from "@/lib/security/requestOrigin";
 
 const allowedExpireDays = [3, 7, 15, 30] as const;
 
@@ -34,7 +35,7 @@ export async function POST(req: NextRequest) {
   const maxAgeSeconds = expiresInHours ? expiresInHours * 60 * 60 : expiresInDays === null ? null : expiresInDays * 24 * 60 * 60;
   const token = signQuotationShareToken(quotationId, auth.companyId, maxAgeSeconds);
   return NextResponse.json({
-    url: `/quotation-share/${encodeURIComponent(token)}`,
+    url: `${getPublicAppOrigin(req)}/quotation-share/${encodeURIComponent(token)}`,
     expires_in_days: expiresInDays,
     expires_in_hours: expiresInHours,
   });

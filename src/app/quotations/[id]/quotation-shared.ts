@@ -27,6 +27,8 @@ export type QuotationItem = {
   cost_labor_unit?: number;
   cost_loss_rate?: number;
   cost_source?: string | null;
+  quota_source_id?: string | null;
+  quota_source_type?: string | null;
   profit_margin?: number;
   row_color?: string | null;
   fee_calc_method?: FeeCalcMethod;

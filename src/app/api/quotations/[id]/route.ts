@@ -18,6 +18,11 @@ import { getAuthContext, hasPermission } from "@/lib/security/authorization";
 import { verifyQuotationShareToken } from "@/lib/security/quotationShare";
 import { ensureQuotationSchema } from "@/lib/quotationSchema";
 import { ensureProjectCostControlSchema, syncProjectCostSnapshotForQuotation } from "@/lib/projectCostControl";
+import {
+  ensureQuotationChangeLogSchema,
+  getQuotationItemsForChangeLog,
+  recordQuotationItemChanges,
+} from "@/lib/quotationChangeLogs";
 
 type ItemInput = {
   id?: string;
@@ -40,11 +45,30 @@ type ItemInput = {
   cost_labor_unit?: number;
   cost_loss_rate?: number;
   cost_source?: string | null;
+  quota_source_id?: string | null;
+  quota_source_type?: string | null;
   profit_margin?: number;
   row_color?: string | null;
   fee_calc_method?: string | null;
   fee_calc_base?: string | null;
   fee_rate?: number | null;
+};
+
+type DiscountRule = {
+  id: string;
+  type: "fee" | "space" | "work_type";
+  mode: "amount" | "rate";
+  scope?: string;
+  space?: string;
+  workType?: string;
+  discount?: number;
+  rate?: number;
+};
+
+type DiscountScopeOption = {
+  value: string;
+  label: string;
+  amount: number;
 };
 
 function ensureQuotationColumns(db: any) {
@@ -73,7 +97,83 @@ function ensureQuotationItemColumns(db: any) {
   if (!names.has("cost_labor_unit")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_labor_unit REAL").run();
   if (!names.has("cost_loss_rate")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_loss_rate REAL").run();
   if (!names.has("cost_source")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_source TEXT").run();
+  if (!names.has("quota_source_id")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_id TEXT").run();
+  if (!names.has("quota_source_type")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_type TEXT").run();
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS standard_quota_items (
+      id TEXT PRIMARY KEY,
+      company_id TEXT NOT NULL REFERENCES companies(id),
+      quota_item_id TEXT NOT NULL,
+      code TEXT,
+      scope TEXT,
+      category TEXT,
+      name TEXT NOT NULL,
+      status TEXT DEFAULT 'enabled',
+      payload TEXT NOT NULL DEFAULT '{}',
+      created_by_id TEXT REFERENCES users(id),
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      deleted_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_standard_quota_items_company_item
+      ON standard_quota_items(company_id, quota_item_id);
+    CREATE INDEX IF NOT EXISTS idx_standard_quota_items_company_status
+      ON standard_quota_items(company_id, status, deleted_at);
+  `);
   ensureProjectCostControlSchema(db);
+}
+
+function safelyRecordQuotationItemChanges(input: Parameters<typeof recordQuotationItemChanges>[0]) {
+  try {
+    return recordQuotationItemChanges(input);
+  } catch (err) {
+    console.error("Failed to record quotation item changes", err);
+    return null;
+  }
+}
+
+function tableExists(db: any, tableName: string) {
+  const row = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1").get(tableName) as any;
+  return Boolean(row?.name);
+}
+
+function clearQuotationHardDeleteDependencies(db: any, quotationId: string) {
+  if (tableExists(db, "quotation_change_log_items")) {
+    db.prepare("DELETE FROM quotation_change_log_items WHERE quotation_id = ?").run(quotationId);
+  }
+  if (tableExists(db, "quotation_change_logs")) {
+    db.prepare("DELETE FROM quotation_change_logs WHERE quotation_id = ?").run(quotationId);
+  }
+  if (tableExists(db, "quotation_receipt_todos")) {
+    db.prepare("DELETE FROM quotation_receipt_todos WHERE quotation_id = ?").run(quotationId);
+  }
+  if (tableExists(db, "project_cost_snapshots")) {
+    if (tableExists(db, "project_cost_snapshot_items")) {
+      const snapshots = db.prepare("SELECT id FROM project_cost_snapshots WHERE quotation_id = ?").all(quotationId) as { id: string }[];
+      const snapshotIds = snapshots.map((item) => String(item.id || "")).filter(Boolean);
+      if (snapshotIds.length > 0) {
+        db.prepare(`DELETE FROM project_cost_snapshot_items WHERE snapshot_id IN (${snapshotIds.map(() => "?").join(",")})`).run(...snapshotIds);
+      }
+    }
+    db.prepare("DELETE FROM project_cost_snapshots WHERE quotation_id = ?").run(quotationId);
+  }
+  if (tableExists(db, "custom_quota_items")) {
+    db.prepare(`
+      UPDATE custom_quota_items
+      SET source_quotation_id = NULL,
+          source_quotation_item_id = NULL,
+          updated_at = datetime('now')
+      WHERE source_quotation_id = ?
+    `).run(quotationId);
+  }
+  if (tableExists(db, "customer_deposit_records")) {
+    db.prepare(`
+      UPDATE customer_deposit_records
+      SET quotation_id = NULL,
+          updated_at = datetime('now')
+      WHERE quotation_id = ?
+    `).run(quotationId);
+  }
 }
 
 function ensureQuotationReceiptTodoTable(db: any) {
@@ -154,6 +254,18 @@ function isQuotationUsedBySignedContract(db: any, quotationId: string) {
     LIMIT 1
   `).get(quotationId, quotationId) as any;
   return !!signedContract;
+}
+
+function getQuotationContentLockReason(db: any, quotation: { id: string; status?: string | null }) {
+  if (isQuotationUsedBySignedContract(db, quotation.id)) return "signed_contract";
+  if (String(quotation.status || "").toUpperCase() === "APPROVED") return "approved";
+  return "";
+}
+
+function getQuotationContentLockMessage(reason: string) {
+  if (reason === "signed_contract") return "该报价已签合同，为避免合同金额和明细被改动，报价内容已锁定，不能修改、增加或删除项目。";
+  if (reason === "approved") return "该报价已设为正式报价，为避免正式报价被误改，报价内容已锁定，不能修改、增加或删除项目。";
+  return "";
 }
 
 function getQuotationDeleteBlockReason(db: any, quotation: { id: string; status?: string | null }) {
@@ -278,6 +390,104 @@ function parseSettings(value: string | null) {
   }
 }
 
+function parseJsonObject(value: unknown) {
+  try {
+    const parsed = JSON.parse(String(value || "{}"));
+    return parsed && typeof parsed === "object" ? parsed as Record<string, any> : {};
+  } catch {
+    return {};
+  }
+}
+
+function ensureQuotaTemplatesTable(db: any) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS quota_templates (
+      id TEXT PRIMARY KEY,
+      company_id TEXT NOT NULL REFERENCES companies(id),
+      template_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      status TEXT DEFAULT 'enabled',
+      payload TEXT NOT NULL DEFAULT '{}',
+      created_by_id TEXT REFERENCES users(id),
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      deleted_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_quota_templates_company_template
+      ON quota_templates(company_id, template_id);
+    CREATE INDEX IF NOT EXISTS idx_quota_templates_company_status
+      ON quota_templates(company_id, status, deleted_at);
+  `);
+}
+
+function hasReadableRichText(value: unknown) {
+  const text = String(value || "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .trim();
+  return text.length > 0;
+}
+
+function normalizeRichTextForCompare(value: unknown) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/>\s+</g, "><")
+    .replace(/&nbsp;/gi, " ")
+    .trim();
+}
+
+function getQuotationTemplateRow(db: any, companyId: string, settings: Record<string, any>) {
+  ensureQuotaTemplatesTable(db);
+  const quotaTemplateId = String(settings.quotaTemplateId || "").trim();
+  const quotaTemplateName = String(settings.quotaTemplateName || "").trim();
+  let templateRow = quotaTemplateId
+    ? db.prepare(`
+      SELECT template_id, name, payload, updated_at
+      FROM quota_templates
+      WHERE company_id = ? AND template_id = ? AND deleted_at IS NULL
+      LIMIT 1
+    `).get(companyId, quotaTemplateId) as { template_id?: string | null; name?: string | null; payload?: string | null; updated_at?: string | null } | undefined
+    : undefined;
+  if (!templateRow && quotaTemplateName) {
+    templateRow = db.prepare(`
+      SELECT template_id, name, payload, updated_at
+      FROM quota_templates
+      WHERE company_id = ? AND name = ? AND deleted_at IS NULL
+      ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC
+      LIMIT 1
+    `).get(companyId, quotaTemplateName) as { template_id?: string | null; name?: string | null; payload?: string | null; updated_at?: string | null } | undefined;
+  }
+  return templateRow || null;
+}
+
+function getTemplateBudgetCompilationState(db: any, quotation: { settings?: string | null }, companyId: string) {
+  const settings = parseSettings(quotation.settings || null);
+  const templateRow = getQuotationTemplateRow(db, companyId, settings);
+  if (!templateRow) return null;
+  const templatePayload = parseJsonObject(templateRow.payload);
+  const latestHtml = String(templatePayload.budgetCompilationHtml || templatePayload.budgetCompilation || "").trim();
+  if (!hasReadableRichText(latestHtml)) return null;
+  const currentHtml = String(settings.budgetCompilationHtml || settings.budgetCompilation || "").trim();
+  const currentExists = hasReadableRichText(currentHtml);
+  const changed = normalizeRichTextForCompare(currentHtml) !== normalizeRichTextForCompare(latestHtml);
+  if (!changed) return null;
+  return {
+    settings,
+    templatePayload,
+    templateRow,
+    currentHtml,
+    latestHtml,
+    currentExists,
+    templateId: String(templateRow.template_id || templatePayload.id || settings.quotaTemplateId || "").trim(),
+    templateName: String(templatePayload.name || templateRow.name || settings.quotaTemplateName || "").trim(),
+  };
+}
+
 function inferItemSpace(item: Partial<ItemInput>) {
   const current = String(item.space || "").trim();
   if (current) return current;
@@ -377,6 +587,148 @@ function getBaseMaterialSubtotal(item: any) {
   return toMoney(safeNonNegativeNumber(item.quantity) * safeNonNegativeNumber(item.material_cost));
 }
 
+function isSpecialQuoteItem(item?: { row_color?: unknown } | null) {
+  return String(item?.row_color || "") === "special";
+}
+
+function isLaborOnlyQuoteItem(item: any) {
+  if (!isBaseCategory(item.category)) return false;
+  return getBaseMaterialSubtotal(item) <= 0 && getBaseLaborSubtotal(item) > 0;
+}
+
+function isExcludedFromDiscount(item: any, settings: any) {
+  if (settings?.excludeSpecialDiscountItems && isSpecialQuoteItem(item)) return true;
+  if (settings?.excludeLaborOnlyDiscountItems && isLaborOnlyQuoteItem(item)) return true;
+  return false;
+}
+
+function getDiscountableItems(items: any[], settings: any) {
+  return items.filter((item) => !isExcludedFromDiscount(item, settings));
+}
+
+function getDiscountScopeOptions(items: any[], settings: any, totals: { otherAmount: number }): DiscountScopeOption[] {
+  const discountableItems = getDiscountableItems(items, settings);
+  const feeContext = buildFeeFormulaContext(discountableItems, settings?.quoteCategories);
+  const customCategoryOptions = Object.entries(feeContext.categoryAmounts || {}).map(([label, amount]) => ({
+    value: `category:${label}`,
+    label,
+    amount: toMoney(Number(amount || 0)),
+  }));
+  const customCabinetAmount = discountableItems
+    .filter((item) => isCustomCabinetCategory(item.category))
+    .reduce((sum, item) => toMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
+  const discountableBaseAmount = discountableItems.filter((item) => isBaseCategory(item.category)).reduce((sum, item) => toMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
+  const discountableProductAmount = discountableItems.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => toMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
+  const discountableCustomCategoryAmount = discountableItems
+    .filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category))
+    .reduce((sum, item) => toMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
+  const discountableDirectAmount = discountableBaseAmount + discountableProductAmount + discountableCustomCategoryAmount;
+  const fixedOptions: DiscountScopeOption[] = [
+    { value: "base", label: "基装直接费", amount: discountableBaseAmount },
+    { value: "base_labor", label: "基装直接费（人工）", amount: discountableItems.reduce((sum, item) => toMoney(sum + getBaseLaborSubtotal(item)), 0) },
+    { value: "base_material", label: "基装直接费（材料）", amount: discountableItems.reduce((sum, item) => toMoney(sum + getBaseMaterialSubtotal(item)), 0) },
+    { value: "product", label: "产品费用", amount: discountableProductAmount },
+    { value: "custom_cabinet", label: "定制柜费用", amount: customCabinetAmount },
+    { value: "other", label: "综合费用", amount: totals.otherAmount },
+    { value: "direct", label: "工程直接费", amount: discountableDirectAmount },
+    { value: "total", label: "总价", amount: discountableDirectAmount + totals.otherAmount },
+  ];
+  const fixedLabels = new Set(fixedOptions.map((option) => option.label));
+  const dynamicOptions = customCategoryOptions.filter((option) => !fixedLabels.has(option.label) && !/组合包|套餐|一口价|package|定制柜/i.test(option.label));
+  return [...fixedOptions, ...dynamicOptions];
+}
+
+function getDiscountSpaceOptions(items: any[], settings: any): DiscountScopeOption[] {
+  const discountableItems = getDiscountableItems(items, settings);
+  const spaces = uniqueValues([
+    ...(Array.isArray(settings?.quoteSpaces) ? settings.quoteSpaces : []),
+    ...items.filter((item) => !isOtherCategory(item.category)).map((item) => inferItemSpace(item)),
+  ]);
+  return spaces.map((space) => ({
+    value: `space:${space}`,
+    label: space,
+    amount: discountableItems
+      .filter((item) => !isOtherCategory(item.category) && inferItemSpace(item) === space)
+      .reduce((sum, item) => toMoney(sum + getBaseOrMaterialItemTotal(item)), 0),
+  }));
+}
+
+function getDiscountWorkTypeOptions(items: any[], settings: any): DiscountScopeOption[] {
+  const discountableItems = getDiscountableItems(items, settings);
+  const workTypes = uniqueValues(items.filter((item) => !isOtherCategory(item.category)).map((item) => String(item.work_type_name || "").trim()));
+  return workTypes.map((workType) => ({
+    value: `work_type:${workType}`,
+    label: workType,
+    amount: discountableItems
+      .filter((item) => !isOtherCategory(item.category) && String(item.work_type_name || "").trim() === workType)
+      .reduce((sum, item) => toMoney(sum + getBaseOrMaterialItemTotal(item)), 0),
+  }));
+}
+
+function getLegacyDiscountRule(settings: any): DiscountRule | null {
+  const discount = safeNonNegativeNumber(settings?.discount);
+  if (discount <= 0) return null;
+  const type = settings?.discountType === "space" || settings?.discountType === "work_type" ? settings.discountType : "fee";
+  return {
+    id: "legacy",
+    type,
+    mode: settings?.discountMode === "rate" ? "rate" : "amount",
+    scope: settings?.discountScope || "total",
+    space: settings?.discountSpace || "",
+    workType: settings?.discountWorkType || "",
+    discount,
+    rate: Math.min(1, Math.max(0, Number(settings?.discountRate || 1))),
+  };
+}
+
+function normalizeDiscountRules(settings: any): DiscountRule[] {
+  const hasRuleList = Array.isArray(settings?.discountRules);
+  const rawRules = hasRuleList ? settings.discountRules || [] : [];
+  const rules = rawRules
+    .map((rule: any, index: number) => ({
+      id: String(rule?.id || `rule_${index}`),
+      type: rule?.type === "space" || rule?.type === "work_type" ? rule.type : "fee",
+      mode: rule?.mode === "rate" ? "rate" : "amount",
+      scope: String(rule?.scope || "total"),
+      space: String(rule?.space || ""),
+      workType: String(rule?.workType || ""),
+      discount: safeNonNegativeNumber(rule?.discount),
+      rate: Math.min(1, Math.max(0, Number(rule?.rate || 1))),
+    }))
+    .filter((rule: DiscountRule) => rule.mode === "rate" ? Number(rule.rate || 1) < 1 : Number(rule.discount || 0) > 0);
+  if (hasRuleList) return rules;
+  const legacyRule = getLegacyDiscountRule(settings);
+  return legacyRule ? [legacyRule] : [];
+}
+
+function getDiscountRuleValue(rule: DiscountRule) {
+  if (rule.type === "space") return rule.space ? `space:${rule.space}` : "";
+  if (rule.type === "work_type") return rule.workType ? `work_type:${rule.workType}` : "";
+  return rule.scope || "total";
+}
+
+function getDiscountRuleScope(rule: DiscountRule, items: any[], settings: any, totals: { otherAmount: number }) {
+  const options = rule.type === "space"
+    ? getDiscountSpaceOptions(items, settings)
+    : rule.type === "work_type"
+      ? getDiscountWorkTypeOptions(items, settings)
+      : getDiscountScopeOptions(items, settings, totals);
+  const value = getDiscountRuleValue(rule);
+  return options.find((option) => option.value === value)
+    || options.find((option) => option.value === "total")
+    || options[0];
+}
+
+function getDiscountRuleAmount(rule: DiscountRule, items: any[], settings: any, totals: { otherAmount: number }) {
+  const scope = getDiscountRuleScope(rule, items, settings, totals);
+  const scopeAmount = Math.max(0, Number(scope?.amount || 0));
+  const excludedAmount = Math.min(scopeAmount, safeNonNegativeNumber(settings?.excludeSpecificDiscountAmount));
+  const baseAmount = Math.max(0, scopeAmount - excludedAmount);
+  if (baseAmount <= 0) return 0;
+  if (rule.mode === "rate") return roundMoney(baseAmount * (1 - Math.min(1, Math.max(0, Number(rule.rate || 1)))));
+  return roundMoney(Math.min(safeNonNegativeNumber(rule.discount), baseAmount));
+}
+
 function buildFeeFormulaContext(items: any[], categories: string[] = []): FeeFormulaContext {
   const orderedCategories = orderQuoteCategories([...categories, ...items.map((item) => String(item.category || "").trim())]);
   const mainMaterialAmount = items
@@ -469,12 +821,133 @@ function calculate(items: any[], settings: any) {
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, directBaseAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
   const directAmount = baseAmount + directBaseAmount + otherAmount;
   const taxRate = Number(settings.taxRate || 0);
-  const discount = Number(settings.discount || 0);
+  const rawTotals = { otherAmount };
+  const discountRules = normalizeDiscountRules(settings);
+  const ruleDiscount = discountRules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, rawTotals)), 0);
+  const discount = Math.min(directAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : Number(settings.discount || 0)));
   const managementFee = 0;
   const taxableAmount = Math.max(0, directAmount - discount);
   const taxAmount = Math.round(taxableAmount * taxRate) / 100;
   const finalAmount = Math.max(0, Math.round((taxableAmount + taxAmount) * 100) / 100);
   return { baseAmount, materialAmount: directBaseAmount, mainMaterialAmount: materialAmount, customCategoryAmount, otherAmount, directAmount, managementFee, taxAmount, discount, finalAmount };
+}
+
+const quotaSyncFields = [
+  { key: "name", label: "工程项目名称", itemKey: "name", quotaKey: "name" },
+  { key: "unit", label: "单位", itemKey: "unit", quotaKey: "unit" },
+  { key: "material_cost", label: "材料单价", itemKey: "material_cost", quotaKey: "material_price" },
+  { key: "labor_cost", label: "人工单价", itemKey: "labor_cost", quotaKey: "labor_price" },
+  { key: "spec", label: "施工工艺及材料说明", itemKey: "spec", quotaKey: "construction_description" },
+] as const;
+
+function normalizeComparableText(value: unknown) {
+  return String(value ?? "").trim();
+}
+
+function normalizeComparableMoney(value: unknown) {
+  return toMoney(Number(value || 0));
+}
+
+function extractQuotaCode(item: any) {
+  const fromCostSource = String(item?.cost_source || "").trim();
+  if (fromCostSource.startsWith("quota:")) return fromCostSource.slice("quota:".length).trim();
+  const fromRemark = String(item?.remark || "").match(/定额编号[:：]\s*([^\s，,]+)/);
+  return fromRemark?.[1]?.trim() || "";
+}
+
+function normalizeStandardQuotaRow(row: any) {
+  if (!row) return null;
+  const payload = parseJsonObject(row.payload);
+  const materialPrice = safeNonNegativeNumber(payload.materialPrice ?? payload.material_price);
+  const laborPrice = safeNonNegativeNumber(payload.laborPrice ?? payload.labor_price);
+  return {
+    id: String(payload.id || row.quota_item_id || row.id || "").trim(),
+    code: String(payload.code || row.code || "").trim(),
+    name: String(payload.name || row.name || "").trim(),
+    unit: String(payload.unit || "").trim(),
+    material_price: materialPrice,
+    labor_price: laborPrice,
+    construction_description: String(payload.constructionDescription || payload.construction_description || "").trim(),
+  };
+}
+
+function getQuotaUpdateCandidates(db: any, quotationId: string, companyId: string, itemIds?: string[]) {
+  const items = db.prepare(`
+    SELECT * FROM quotation_items
+    WHERE quotation_id = ?
+    ORDER BY sort_order ASC, created_at ASC
+  `).all(quotationId) as any[];
+  const itemIdSet = Array.isArray(itemIds) && itemIds.length > 0 ? new Set(itemIds.map((id) => String(id || "").trim()).filter(Boolean)) : null;
+  const standardByItemId = db.prepare(`
+    SELECT *
+    FROM standard_quota_items
+    WHERE quota_item_id = ?
+      AND company_id = ?
+      AND deleted_at IS NULL
+      AND COALESCE(status, 'enabled') != 'disabled'
+    LIMIT 1
+  `);
+  const standardByCode = db.prepare(`
+    SELECT *
+    FROM standard_quota_items
+    WHERE company_id = ?
+      AND deleted_at IS NULL
+      AND COALESCE(status, 'enabled') != 'disabled'
+      AND code = ?
+    ORDER BY datetime(COALESCE(updated_at, created_at, '1970-01-01')) DESC
+    LIMIT 1
+  `);
+  return items
+    .filter((item) => isBaseCategory(item.category) && (!itemIdSet || itemIdSet.has(String(item.id || ""))))
+    .map((item) => {
+      const sourceId = String(item.quota_source_id || "").trim();
+      const sourceType = String(item.quota_source_type || "").trim();
+      const code = extractQuotaCode(item);
+      const legacyQuotaRemark = !sourceType && !sourceId && code && /定额编号[:：]/.test(String(item.remark || ""));
+      const hasStandardSource = sourceType === "standard" && (sourceId || code);
+      const hasLegacyStandardSource = !sourceType && (sourceId || legacyQuotaRemark);
+      if (!hasStandardSource && !hasLegacyStandardSource) return null;
+      const quota = normalizeStandardQuotaRow(sourceId ? standardByItemId.get(sourceId, companyId) : null)
+        || normalizeStandardQuotaRow(code ? standardByCode.get(companyId, code) : null);
+      if (!quota) return null;
+      const differences = quotaSyncFields
+        .map((field) => {
+          const current = field.key === "material_cost" || field.key === "labor_cost"
+            ? normalizeComparableMoney(item[field.itemKey])
+            : normalizeComparableText(item[field.itemKey]);
+          const latest = field.key === "material_cost" || field.key === "labor_cost"
+            ? normalizeComparableMoney(quota[field.quotaKey])
+            : normalizeComparableText(quota[field.quotaKey]);
+          return current === latest ? null : { field: field.key, label: field.label, current, latest };
+        })
+        .filter(Boolean);
+      if (differences.length === 0) return null;
+      return {
+        item,
+        quota,
+        differences,
+        code: code || String(quota.code || "").trim(),
+      };
+    })
+    .filter(Boolean) as Array<{ item: any; quota: any; differences: any[]; code: string }>;
+}
+
+function getNormalizedQuotationItemsForTotals(db: any, quotationId: string) {
+  const rawItems = db.prepare("SELECT * FROM quotation_items WHERE quotation_id = ? ORDER BY sort_order ASC, created_at ASC").all(quotationId) as any[];
+  return rawItems.map((item) => {
+    const category = String(item.category || "base").trim() || "base";
+    const isBase = isBaseCategory(category);
+    const isCustomCabinet = isCustomCabinetCategory(category);
+    const quantity = isOtherCategory(category) ? Number(item.quantity || 0) : safeNonNegativeNumber(item.quantity);
+    const materialCost = isOtherCategory(category) ? Number(item.material_cost || 0) : safeNonNegativeNumber(item.material_cost);
+    const laborCost = isOtherCategory(category) ? Number(item.labor_cost || 0) : safeNonNegativeNumber(item.labor_cost);
+    const unitPrice = isBase ? materialCost + laborCost : safeNonNegativeNumber(item.unit_price);
+    const cabinetArea = getCustomCabinetArea({ material_cost: materialCost, labor_cost: laborCost });
+    const totalPrice = isCustomCabinet
+      ? toMoney(quantity * (cabinetArea > 0 ? cabinetArea : 1) * unitPrice)
+      : toMoney(quantity * unitPrice);
+    return { ...item, category, quantity, unit_price: unitPrice, total_price: totalPrice, material_cost: materialCost, labor_cost: laborCost };
+  });
 }
 
 export async function GET(req: NextRequest, { params: paramsPromise }: { params: Promise<{ id: string }> }) {
@@ -531,6 +1004,11 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   const migration = migrateManagementFeeToOtherItem(rawItems, rawSettings);
   const items = migration.items;
   const branchSettings = getBranchSettingsForCustomer(db, quotation.customer_id);
+  const recipientReadonly = Boolean(shareClaims) || isReadonlyQuotationRecipient(db, params.id, userId);
+  const contentLockReason = getQuotationContentLockReason(db, quotation);
+  const readonlyMessage = recipientReadonly
+    ? "该报价单由他人发送给你，仅支持查看、打印和导出，不能修改报价内容。"
+    : getQuotationContentLockMessage(contentLockReason);
   const settings = {
     ...migration.settings,
     signatureLabels: normalizeQuotationSignatureLabels(branchSettings.settings.printSettings.quotationSignatureLabels),
@@ -540,11 +1018,14 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
     branch_company_logo_url: branchSettings.settings.printSettings.quotationLogoUrl || branchSettings.settings.basicInfo.companyLogoUrl || "",
     branch_company_legal_name: branchSettings.settings.basicInfo.legalCompanyName || "",
     branch_company_short_name: branchSettings.settings.basicInfo.companyShortName || "",
+    branch_company_phone: branchSettings.settings.basicInfo.contactPhone || "",
     settings,
     items,
     totals: calculate(items, { ...settings, discount: quotation.discount ?? settings.discount }),
     legacyManagementFeeMigrated: migration.migrated,
-    readonly: Boolean(shareClaims) || isReadonlyQuotationRecipient(db, params.id, userId),
+    readonly: recipientReadonly || Boolean(contentLockReason),
+    readonlyReason: recipientReadonly ? "recipient" : contentLockReason || "",
+    readonlyMessage,
   });
 }
 
@@ -557,6 +1038,7 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
     const db = getDb();
     ensureQuotationColumns(db);
     ensureQuotationItemColumns(db);
+    ensureQuotationChangeLogSchema(db);
     const existing = db.prepare("SELECT * FROM quotations WHERE id = ? AND company_id = ?").get(params.id, auth.companyId) as any;
     if (!existing) return NextResponse.json({ message: "报价不存在" }, { status: 404 });
 
@@ -565,6 +1047,111 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
     const userId = auth.userId;
     if (isReadonlyQuotationRecipient(db, params.id, userId)) {
       return NextResponse.json({ message: "设计师只能查看、打印和下载报价单，不能修改报价内容" }, { status: 403 });
+    }
+
+    if (action === "checkQuotaUpdates") {
+      const candidates = getQuotaUpdateCandidates(db, params.id, auth.companyId);
+      const budgetCompilationUpdate = getTemplateBudgetCompilationState(db, existing, auth.companyId);
+      return NextResponse.json({
+        updates: candidates.map(({ item, quota, differences, code }) => ({
+          itemId: item.id,
+          itemName: item.name,
+          space: item.space || "",
+          quotaId: quota.id,
+          quotaCode: code,
+          latestName: quota.name || "",
+          differences,
+        })),
+        budgetCompilationUpdate: budgetCompilationUpdate ? {
+          templateId: budgetCompilationUpdate.templateId,
+          templateName: budgetCompilationUpdate.templateName,
+          currentExists: budgetCompilationUpdate.currentExists,
+        } : null,
+      });
+    }
+
+    if (action === "syncQuotaItems") {
+      const selectedItemIds = Array.isArray(body.itemIds) ? body.itemIds.map((id: unknown) => String(id || "").trim()).filter(Boolean) : [];
+      const candidates = getQuotaUpdateCandidates(db, params.id, auth.companyId, selectedItemIds.length ? selectedItemIds : undefined);
+      if (candidates.length === 0) return NextResponse.json({ success: true, updatedCount: 0, items: getNormalizedQuotationItemsForTotals(db, params.id), totals: calculate(getNormalizedQuotationItemsForTotals(db, params.id), parseSettings(existing.settings)) });
+      const beforeItems = getQuotationItemsForChangeLog(db, params.id);
+
+      const updateItem = db.prepare(`
+        UPDATE quotation_items
+        SET name = ?,
+          spec = ?,
+          unit = ?,
+          unit_price = ?,
+          total_price = ?,
+          material_cost = ?,
+          labor_cost = ?,
+          quota_source_id = ?,
+          quota_source_type = 'standard'
+        WHERE id = ? AND quotation_id = ?
+      `);
+      const tx = (db as any).transaction(() => {
+        candidates.forEach(({ item, quota }) => {
+          const materialCost = safeNonNegativeNumber(quota.material_price);
+          const laborCost = safeNonNegativeNumber(quota.labor_price);
+          const unitPrice = toMoney(materialCost + laborCost);
+          const quantity = safeNonNegativeNumber(item.quantity);
+          updateItem.run(
+            String(quota.name || "").trim(),
+            String(quota.construction_description || "").trim(),
+            String(quota.unit || "").trim(),
+            unitPrice,
+            toMoney(quantity * unitPrice),
+            materialCost,
+            laborCost,
+            quota.id,
+            item.id,
+            params.id,
+          );
+        });
+        const nextItems = getNormalizedQuotationItemsForTotals(db, params.id);
+        const nextSettings = parseSettings(existing.settings);
+        const totals = calculate(nextItems, { ...nextSettings, discount: existing.discount ?? nextSettings.discount });
+        db.prepare(`
+          UPDATE quotations
+          SET total_amount = ?, final_amount = ?, updated_at = datetime('now')
+          WHERE id = ? AND company_id = ?
+        `).run(totals.directAmount + totals.taxAmount, totals.finalAmount, params.id, auth.companyId);
+        if (existing.project_id) {
+          db.prepare("UPDATE projects SET contract_amount = ?, status = CASE WHEN status = 'LEAD' THEN 'QUOTED' ELSE status END, updated_at = datetime('now') WHERE id = ?")
+            .run(totals.finalAmount, existing.project_id);
+        }
+      });
+      tx();
+      safelyRecordQuotationItemChanges({
+        db,
+        companyId: auth.companyId,
+        quotationId: params.id,
+        userId,
+        action: "quota_sync",
+        beforeItems,
+        afterItems: getQuotationItemsForChangeLog(db, params.id),
+      });
+      if (String(existing.status || "").toUpperCase() === "APPROVED") {
+        syncProjectCostSnapshotForQuotation(db, params.id);
+      }
+      const nextItems = getNormalizedQuotationItemsForTotals(db, params.id);
+      const nextSettings = parseSettings(existing.settings);
+      const totals = calculate(nextItems, { ...nextSettings, discount: existing.discount ?? nextSettings.discount });
+      const customerId = getQuotationCustomerId(db, params.id);
+      if (customerId) {
+        recordCustomerOperation(db, {
+          userId,
+          customerId,
+          action: "customer.quotation.quota_sync",
+          module: "预算报价",
+          title: "更新定额项目",
+          content: `${existing.title || "装修报价单"} 更新了 ${candidates.length} 条基装定额`,
+          targetName: existing.title || "",
+          metadata: { quotationId: params.id, itemIds: candidates.map(({ item }) => item.id) },
+          ipAddress: getRequestIp(req),
+        });
+      }
+      return NextResponse.json({ success: true, updatedCount: candidates.length, items: nextItems, totals });
     }
 
     if (action === "restore") {
@@ -595,6 +1182,7 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
       const customerId = getQuotationCustomerId(db, params.id);
       const ipAddress = getRequestIp(req);
       const tx = (db as any).transaction(() => {
+        clearQuotationHardDeleteDependencies(db, params.id);
         db.prepare("DELETE FROM quotation_items WHERE quotation_id = ?").run(params.id);
         db.prepare("DELETE FROM quotations WHERE id = ?").run(params.id);
         archiveQuotationCreatedCustomerIfEmpty(db, {
@@ -623,6 +1211,61 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
     }
 
     if (existing.deleted_at) return NextResponse.json({ message: "报价已在回收站，请先恢复后再操作" }, { status: 400 });
+    const contentLockMessage = getQuotationContentLockMessage(getQuotationContentLockReason(db, existing));
+    const contentMutationActions = new Set(["syncQuotaItems", "updateProjectInfo", "bindCustomer", "updateNotes", "applyTemplateBudgetCompilation"]);
+    if (contentLockMessage && contentMutationActions.has(action)) {
+      return NextResponse.json({ message: contentLockMessage }, { status: 423 });
+    }
+
+    if (action === "applyTemplateBudgetCompilation") {
+      const currentSettings = parseSettings(existing.settings);
+      const hasTemplateRef = String(currentSettings.quotaTemplateId || "").trim() || String(currentSettings.quotaTemplateName || "").trim();
+      if (!hasTemplateRef) {
+        return NextResponse.json({ message: "当前报价没有记录关联定额模板，无法自动补入预算编制。" }, { status: 400 });
+      }
+      const budgetCompilationUpdate = getTemplateBudgetCompilationState(db, existing, auth.companyId);
+      if (!budgetCompilationUpdate) {
+        const templateRow = getQuotationTemplateRow(db, auth.companyId, currentSettings);
+        if (!templateRow) {
+          return NextResponse.json({ message: "关联定额模板不存在或已删除，无法补入预算编制。" }, { status: 404 });
+        }
+        const templatePayload = parseJsonObject(templateRow.payload);
+        const budgetCompilationHtml = String(templatePayload.budgetCompilationHtml || templatePayload.budgetCompilation || "").trim();
+        if (!hasReadableRichText(budgetCompilationHtml)) {
+          return NextResponse.json({ message: "关联定额模板暂无预算编制内容。" }, { status: 400 });
+        }
+        return NextResponse.json({ message: "当前报价的预算编制已是最新。" }, { status: 400 });
+      }
+
+      const nextSettings = {
+        ...budgetCompilationUpdate.settings,
+        quotaTemplateId: budgetCompilationUpdate.templateId,
+        quotaTemplateName: budgetCompilationUpdate.templateName,
+        budgetCompilationHtml: budgetCompilationUpdate.latestHtml,
+      };
+      db.prepare(`
+        UPDATE quotations
+        SET settings = ?, updated_at = datetime('now')
+        WHERE id = ? AND company_id = ?
+      `).run(JSON.stringify(nextSettings), params.id, auth.companyId);
+
+      const customerId = getQuotationCustomerId(db, params.id);
+      if (customerId) {
+        recordCustomerOperation(db, {
+          userId,
+          customerId,
+          action: "customer.quotation.budget_compilation_apply",
+          module: "预算报价",
+          title: budgetCompilationUpdate.currentExists ? "更新预算编制" : "补入预算编制",
+          content: `${existing.title || "装修报价单"} ${budgetCompilationUpdate.currentExists ? "更新" : "补入"}预算编制`,
+          targetName: existing.title || "",
+          metadata: { quotationId: params.id, quotaTemplateId: nextSettings.quotaTemplateId || null },
+          ipAddress: getRequestIp(req),
+        });
+      }
+
+      return NextResponse.json({ success: true, settings: nextSettings, mode: budgetCompilationUpdate.currentExists ? "update" : "insert" });
+    }
 
     if (action === "updateProjectInfo") {
       const customerName = String(body.customer_name || "").trim();
@@ -811,6 +1454,8 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
 
     if (action === "copy") {
       const targetCustomerId = String(body.target_customer_id || body.customer_id || "").trim();
+      const copyContentMode = body.copy_content_mode === "items_only" ? "items_only" : "full";
+      const copyItemsOnly = copyContentMode === "items_only";
       const sourceCustomerId = getQuotationCustomerId(db, params.id);
       const copyToOtherCustomer = Boolean(targetCustomerId && targetCustomerId !== sourceCustomerId);
       let targetCustomer: any = null;
@@ -854,6 +1499,19 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
       const nextTitle = copyToOtherCustomer && targetCustomer
         ? `${buildDefaultQuotationTitle(targetCustomer)} 副本`
         : `${existing.title || "装修报价单"} 副本`;
+      const nextSettings = copyItemsOnly
+        ? {
+            ...parseSettings(existing.settings),
+            discount: 0,
+            discountMode: "amount",
+            discountRate: 1,
+            discountScope: "total",
+            discountSpace: "",
+            discountWorkType: "",
+            discountRules: [],
+            excludeSpecificDiscountAmount: 0,
+          }
+        : parseSettings(existing.settings);
 
       const tx = (db as any).transaction(() => {
         db.prepare(`
@@ -869,13 +1527,13 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
           existing.company_id,
           nextTitle,
           Number(latest?.version || 0) + 1,
-          Number(existing.total_amount || 0),
-          Number(existing.discount || 0),
-          Number(existing.final_amount ?? 0),
+          copyItemsOnly ? 0 : Number(existing.total_amount || 0),
+          copyItemsOnly ? 0 : Number(existing.discount || 0),
+          copyItemsOnly ? 0 : Number(existing.final_amount ?? 0),
           existing.notes || null,
           existing.customer_visible_note || null,
           existing.terms || null,
-          existing.settings || "{}",
+          JSON.stringify(nextSettings),
           targetCustomerId ? null : existing.temp_customer_name || null,
           targetCustomerId ? null : existing.temp_customer_designer_name || null,
           targetCustomerId ? null : existing.temp_customer_phone || null,
@@ -887,8 +1545,8 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
         );
 
         const insertItem = db.prepare(`
-          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         sourceItems.forEach((item) => {
           insertItem.run(
@@ -905,9 +1563,9 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             item.material_model,
             item.remark,
             item.unit || "",
-            item.quantity || 0,
+            copyItemsOnly ? 0 : item.quantity || 0,
             item.unit_price || 0,
-            item.total_price || 0,
+            copyItemsOnly ? 0 : item.total_price || 0,
             item.material_cost || 0,
             item.labor_cost || 0,
             item.profit_margin || 0,
@@ -919,6 +1577,8 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             item.cost_labor_unit || 0,
             item.cost_loss_rate || 0,
             item.cost_source || null,
+            item.quota_source_id || null,
+            item.quota_source_type || null,
             item.sort_order || 0
           );
         });
@@ -935,14 +1595,14 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
           module: "预算报价",
           title: "复制报价",
           content: copyToOtherCustomer && targetCustomer
-            ? `从「${existing.title || "装修报价单"}」复制生成新报价，并归档到客户「${targetCustomer.name || "未命名客户"}」`
-            : `从「${existing.title || "装修报价单"}」复制生成新报价`,
+            ? `从「${existing.title || "装修报价单"}」复制生成新报价${copyItemsOnly ? "，仅复制项目" : ""}，并归档到客户「${targetCustomer.name || "未命名客户"}」`
+            : `从「${existing.title || "装修报价单"}」复制生成新报价${copyItemsOnly ? "，仅复制项目" : ""}`,
           targetName: nextTitle,
-          metadata: { sourceQuotationId: params.id, quotationId: nextQuotationId, targetCustomerId: targetCustomerId || null },
+          metadata: { sourceQuotationId: params.id, quotationId: nextQuotationId, targetCustomerId: targetCustomerId || null, copyContentMode },
           ipAddress: getRequestIp(req),
         });
       }
-      return NextResponse.json({ id: nextQuotationId });
+      return NextResponse.json({ id: nextQuotationId, customerId: customerId || null, projectId: targetProjectId || null });
     }
 
     if (action === "setStatus") {
@@ -1103,6 +1763,7 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
     const db = getDb();
     ensureQuotationColumns(db);
     ensureQuotationItemColumns(db);
+    ensureQuotationChangeLogSchema(db);
     const existing = db.prepare("SELECT * FROM quotations WHERE id = ? AND company_id = ? AND deleted_at IS NULL")
       .get(params.id, auth.companyId) as any;
     if (!existing) return NextResponse.json({ message: "报价不存在" }, { status: 404 });
@@ -1110,6 +1771,8 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
     if (isReadonlyQuotationRecipient(db, params.id, userId)) {
       return NextResponse.json({ message: "设计师只能查看、打印和下载报价单，不能修改报价内容" }, { status: 403 });
     }
+    const contentLockMessage = getQuotationContentLockMessage(getQuotationContentLockReason(db, existing));
+    if (contentLockMessage) return NextResponse.json({ message: contentLockMessage }, { status: 423 });
 
     const body = await req.json();
     const items = Array.isArray(body.items) ? body.items as ItemInput[] : [];
@@ -1124,11 +1787,15 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
 	      discountScope: String(body.settings?.discountScope || "total").trim() || "total",
 	      discountSpace: String(body.settings?.discountSpace || "").trim(),
 	      discountWorkType: String(body.settings?.discountWorkType || "").trim(),
+	      discountRules: normalizeDiscountRules(body.settings || {}),
 	      excludeSpecificDiscountAmount: Math.max(0, Number(body.settings?.excludeSpecificDiscountAmount || 0)),
 	      excludeSpecialDiscountItems: body.settings?.excludeSpecialDiscountItems === true,
 	      excludeLaborOnlyDiscountItems: body.settings?.excludeLaborOnlyDiscountItems === true,
-	      warrantyMonths: Number(body.settings?.warrantyMonths || 24),
+      warrantyMonths: Number(body.settings?.warrantyMonths || 24),
+      quotaTemplateId: String(body.settings?.quotaTemplateId ?? existingSettings.quotaTemplateId ?? "").trim(),
+      quotaTemplateName: String(body.settings?.quotaTemplateName ?? existingSettings.quotaTemplateName ?? "").trim(),
       appendixNote: String(body.settings?.appendixNote ?? existingSettings.appendixNote ?? "").trim(),
+      budgetCompilationHtml: String(body.settings?.budgetCompilationHtml ?? existingSettings.budgetCompilationHtml ?? "").trim(),
       quoteSpaces: Array.isArray(body.settings?.quoteSpaces)
         ? body.settings.quoteSpaces.map((space: unknown) => String(space || "").trim()).filter(Boolean)
         : [],
@@ -1189,6 +1856,8 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           cost_labor_unit: costLaborUnit,
           cost_loss_rate: costLossRate,
           cost_source: String(item.cost_source || "").trim() || null,
+          quota_source_id: isBase ? String(item.quota_source_id || "").trim() || null : null,
+          quota_source_type: isBase && String(item.quota_source_type || "").trim() ? String(item.quota_source_type || "").trim() : null,
           profit_margin: profitMargin,
           row_color: normalizeRowColor(item.row_color),
           fee_calc_method: isOther ? feeMethod : null,
@@ -1222,6 +1891,7 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
     });
 
     const totals = calculate(normalizedItems, settings);
+    const persistedSettings = { ...settings, discount: totals.discount };
     const existingItemCount = Number((db.prepare("SELECT COUNT(*) AS count FROM quotation_items WHERE quotation_id = ?").get(params.id) as any)?.count || 0);
     const allowEmptyItems = body.allowEmptyItems === true;
     if (existingItemCount > 0 && normalizedItems.length === 0 && !allowEmptyItems) {
@@ -1232,11 +1902,12 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
     }
 
     const shouldSyncCostSnapshot = String(body.status || existing.status || "").toUpperCase() === "APPROVED";
+    const beforeItems = getQuotationItemsForChangeLog(db, params.id);
     const tx = (db as any).transaction(() => {
       db.prepare("DELETE FROM quotation_items WHERE quotation_id = ?").run(params.id);
       const insertItem = db.prepare(`
-        INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, sort_order, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, sort_order, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       `);
       normalizedItems.forEach((item) => {
         insertItem.run(
@@ -1267,6 +1938,8 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           Number(item.cost_labor_unit || 0),
           Number(item.cost_loss_rate || 0),
           item.cost_source || null,
+          item.quota_source_id || null,
+          item.quota_source_type || null,
           item.sort_order
         );
       });
@@ -1277,13 +1950,13 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
       `).run(
         String(body.title ?? existing.title ?? "装修报价单").trim() || "装修报价单",
         totals.directAmount + totals.taxAmount,
-        settings.discount,
+        totals.discount,
         totals.finalAmount,
         body.status || existing.status || "DRAFT",
         body.notes || null,
         String(body.customer_visible_note || "").trim() || null,
         body.terms || null,
-        JSON.stringify(settings),
+        JSON.stringify(persistedSettings),
         params.id
       );
       if (existing.project_id) {
@@ -1292,6 +1965,15 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
       }
     });
     tx();
+    safelyRecordQuotationItemChanges({
+      db,
+      companyId: auth.companyId,
+      quotationId: params.id,
+      userId,
+      action: "quotation_save",
+      beforeItems,
+      afterItems: getQuotationItemsForChangeLog(db, params.id),
+    });
     if (shouldSyncCostSnapshot) {
       syncProjectCostSnapshotForQuotation(db, params.id);
     }

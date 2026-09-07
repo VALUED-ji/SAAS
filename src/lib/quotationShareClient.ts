@@ -1,3 +1,17 @@
+function normalizeShareUrlForCurrentOrigin(value: string) {
+  const url = new URL(value, window.location.origin);
+  const localHosts = new Set(["localhost", "127.0.0.1", "0.0.0.0"]);
+  const current = new URL(window.location.origin);
+  const isSharePath = url.pathname.startsWith("/quotation-share/") || url.pathname.startsWith("/q/");
+  if (isSharePath) {
+    if (localHosts.has(current.hostname) || localHosts.has(url.hostname)) {
+      url.protocol = current.protocol;
+      url.host = current.host;
+    }
+  }
+  return url.toString();
+}
+
 export async function createQuotationShareUrl(quotationId: string, expiresInDays?: number | "24h" | null) {
   const body: Record<string, string | number | null> = { quotation_id: quotationId };
   if (expiresInDays === "24h") body.expires_in_hours = 24;
@@ -10,7 +24,7 @@ export async function createQuotationShareUrl(quotationId: string, expiresInDays
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data?.url) throw new Error(data?.message || "生成报价分享链接失败");
-  return new URL(String(data.url), window.location.origin).toString();
+  return normalizeShareUrlForCurrentOrigin(String(data.url));
 }
 
 export async function createQuotationPrintPreviewUrl(quotationId: string) {

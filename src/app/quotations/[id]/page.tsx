@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { BookmarkPlus, Check, ChevronLeft, ChevronRight, Copy, Eraser, FileText, GripVertical, Home, LayoutGrid, List, Loader2, MapPin, Maximize2, Minimize2, Palette, Pencil, Phone, Plus, Replace, Ruler, Search, Tags, Trash2, X } from "lucide-react";
+import { BookmarkPlus, Calculator, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Eraser, FileText, GripVertical, Home, LayoutGrid, List, Loader2, MapPin, Maximize2, Minimize2, Palette, Pencil, Phone, Plus, RefreshCw, Replace, Ruler, Search, Tags, Trash2, X } from "lucide-react";
 import {
   calculateChargeableOtherFeeTotals,
   calculateOtherFeeDetails,
@@ -88,6 +88,36 @@ type QuotaLibraryItem = {
   status: "enabled" | "disabled" | "promoted";
   updatedAt: string;
 };
+
+type QuotaCategoryBadgeStyle = CSSProperties & {
+  "--quote-library-category-bg": string;
+  "--quote-library-category-border": string;
+  "--quote-library-category-text": string;
+};
+
+const quotaCategoryBadgePalette: Array<Pick<QuotaCategoryBadgeStyle, "--quote-library-category-bg" | "--quote-library-category-border" | "--quote-library-category-text">> = [
+  { "--quote-library-category-bg": "#EFF6FF", "--quote-library-category-border": "#BFDBFE", "--quote-library-category-text": "#1D4ED8" },
+  { "--quote-library-category-bg": "#ECFDF5", "--quote-library-category-border": "#A7F3D0", "--quote-library-category-text": "#047857" },
+  { "--quote-library-category-bg": "#FFF7ED", "--quote-library-category-border": "#FED7AA", "--quote-library-category-text": "#C2410C" },
+  { "--quote-library-category-bg": "#F5F3FF", "--quote-library-category-border": "#DDD6FE", "--quote-library-category-text": "#6D28D9" },
+  { "--quote-library-category-bg": "#FDF2F8", "--quote-library-category-border": "#FBCFE8", "--quote-library-category-text": "#BE185D" },
+  { "--quote-library-category-bg": "#ECFEFF", "--quote-library-category-border": "#A5F3FC", "--quote-library-category-text": "#0E7490" },
+  { "--quote-library-category-bg": "#F0FDF4", "--quote-library-category-border": "#BBF7D0", "--quote-library-category-text": "#15803D" },
+  { "--quote-library-category-bg": "#FFFBEB", "--quote-library-category-border": "#FDE68A", "--quote-library-category-text": "#B45309" },
+];
+
+function getQuotaCategoryBadgeStyle(category: string): QuotaCategoryBadgeStyle {
+  const normalizedCategory = category.trim();
+  if (!normalizedCategory || normalizedCategory === "未分类") {
+    return {
+      "--quote-library-category-bg": "#F8FAFC",
+      "--quote-library-category-border": "#E2E8F0",
+      "--quote-library-category-text": "#475569",
+    };
+  }
+  const paletteIndex = Array.from(normalizedCategory).reduce((sum, char) => sum + char.charCodeAt(0), 0) % quotaCategoryBadgePalette.length;
+  return quotaCategoryBadgePalette[paletteIndex];
+}
 
 type ProductLibrarySku = {
   id: string;
@@ -188,6 +218,26 @@ type CopySpaceCategoryDialogState = {
   source: string;
   target: string;
   categories: string[];
+};
+type QuotaUpdateDifference = {
+  field: string;
+  label: string;
+  current: string;
+  latest: string;
+};
+type QuotaUpdateNotice = {
+  itemId: string;
+  itemName: string;
+  space: string;
+  quotaId: string;
+  quotaCode: string;
+  latestName: string;
+  differences: QuotaUpdateDifference[];
+};
+type BudgetCompilationUpdateNotice = {
+  templateId?: string;
+  templateName?: string;
+  currentExists?: boolean;
 };
 type FindReplaceSearchScope = "name" | "description";
 type FindReplaceMatchField = "name" | "spec" | "remark";
@@ -368,6 +418,8 @@ type QuotationDetail = {
   customer_decoration_type?: string;
   designer_name?: string;
   version?: number;
+  total_amount?: number;
+  final_amount?: number;
   status?: string;
   notes?: string;
   customer_visible_note?: string | null;
@@ -382,11 +434,16 @@ type QuotationDetail = {
 	    discountScope?: string;
 	    discountSpace?: string;
 	    discountWorkType?: string;
+	    discountRules?: DiscountRule[];
 	    excludeSpecificDiscountAmount?: number;
 	    excludeSpecialDiscountItems?: boolean;
 	    excludeLaborOnlyDiscountItems?: boolean;
-	    warrantyMonths?: number;
+    warrantyMonths?: number;
     appendixNote?: string | null;
+    budgetCompilationHtml?: string | null;
+    budgetCompilation?: string | null;
+    quotaTemplateId?: string | null;
+    quotaTemplateName?: string | null;
     quoteSpaces?: string[];
     quoteCategories?: string[];
     templatePricing?: Record<string, unknown>;
@@ -395,6 +452,8 @@ type QuotationDetail = {
   items: QuotationItem[];
   legacyManagementFeeMigrated?: boolean;
   readonly?: boolean;
+  readonlyReason?: string;
+  readonlyMessage?: string;
 };
 
 type PackagePricingSegment = {
@@ -644,12 +703,29 @@ function makeClientItemKey() {
   return `quote-item-${Date.now()}-${clientItemKeySeed}`;
 }
 
+function makeClientItemId() {
+  return makeClientItemKey();
+}
+
 function getQuotationItemKey(item: QuotationItem, fallbackIndex: number) {
   return item.client_key || item.id || `${item.category}-${fallbackIndex}`;
 }
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasReadableRichText(value: unknown) {
+  const text = String(value || "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .trim();
+  return text.length > 0;
 }
 
 function buildOtherFeeSequenceByKey(items: QuotationItem[]) {
@@ -1047,8 +1123,10 @@ function SpaceSelectCell({
 
 function newItem(category: QuotationItem["category"], space?: string): QuotationItem {
   const isOther = isOtherCategory(category);
+  const itemId = makeClientItemId();
   return {
-    client_key: makeClientItemKey(),
+    id: itemId,
+    client_key: itemId,
     category,
     space: isOther ? "" : String(space || "").trim(),
     work_type_id: null,
@@ -1071,16 +1149,21 @@ function newItem(category: QuotationItem["category"], space?: string): Quotation
 function isStandardQuotaSourceItem(item?: QuotationItem | null) {
   if (!item || isOtherCategory(item.category)) return false;
   if (item.source === "standard") return true;
-  const costSource = String(item.cost_source || "").trim();
-  return costSource === "quota" || costSource.startsWith("quota:");
+  const sourceType = String(item.quota_source_type || "").trim();
+  if (sourceType === "custom") return false;
+  if (sourceType === "standard") return true;
+  if (String(item.quota_source_id || "").trim()) return true;
+  return /定额编号[:：]/.test(String(item.remark || ""));
 }
 
 function createQuotationItemFromQuota(quota: QuotaLibraryItem, category: QuotationItem["category"], space?: string): QuotationItem {
   const materialPrice = toMoney(quota.materialPrice);
   const laborPrice = toMoney(quota.laborPrice);
   const totalPrice = toMoney(quota.totalPrice || materialPrice + laborPrice);
+  const itemId = makeClientItemId();
   return {
-    client_key: makeClientItemKey(),
+    id: itemId,
+    client_key: itemId,
     source: quota.source === "custom" ? "custom" : "standard",
     category,
     space: isOtherCategory(category) ? "" : String(space || "").trim(),
@@ -1101,6 +1184,8 @@ function createQuotationItemFromQuota(quota: QuotaLibraryItem, category: Quotati
     cost_labor_unit: toMoney(quota.internalLaborCost || 0),
     cost_loss_rate: toNumber(quota.costLossRate || 0),
     cost_source: quota.code ? `quota:${quota.code}` : "quota",
+    quota_source_id: quota.id,
+    quota_source_type: quota.source === "custom" ? "custom" : "standard",
     profit_margin: 0,
     row_color: quota.isSpecialPrice ? "special" : null,
   };
@@ -1211,8 +1296,10 @@ function createProductLibraryPicks(products: ProductLibraryItem[]) {
 
 function createQuotationItemFromProduct(product: ProductLibraryPick, category: QuotationItem["category"], space?: string): QuotationItem {
   const specText = normalizeProductSpecOnly(product.spec);
+  const itemId = makeClientItemId();
   return {
-    client_key: makeClientItemKey(),
+    id: itemId,
+    client_key: itemId,
     category,
     space: isOtherCategory(category) ? "" : String(space || "").trim(),
     work_type_id: null,
@@ -1307,12 +1394,14 @@ function migrateManagementFeeToOtherItem(items: QuotationItem[], settings: Quota
   const materialAmount = items.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const managementFee = roundMoney((baseAmount + materialAmount) * managementFeeRate / 100);
   if (managementFee <= 0) return { items, settings: nextSettings, migrated: true };
+  const itemId = makeClientItemId();
 
   return {
     items: [
       ...items,
       {
-        client_key: makeClientItemKey(),
+        id: itemId,
+        client_key: itemId,
         category: "other" as const,
         space: "",
         name: "管理费",
@@ -1364,7 +1453,8 @@ function withoutStoredIdentity(item: QuotationItem): QuotationItem {
 
 function cloneItemForSpace(item: QuotationItem, space: string): QuotationItem {
   const copy = withoutStoredIdentity(item);
-  return { ...copy, client_key: makeClientItemKey(), space };
+  const itemId = makeClientItemId();
+  return { ...copy, id: itemId, client_key: itemId, space };
 }
 
 function buildFeeFormulaContext(items: QuotationItem[], categories: string[] = []): FeeFormulaContext {
@@ -1400,20 +1490,14 @@ function buildFeeFormulaContext(items: QuotationItem[], categories: string[] = [
 }
 
 function calculate(items: QuotationItem[], settings: QuotationDetail["settings"]) {
-  const baseAmount = items.filter((item) => isBaseCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
-  const materialAmount = items.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
-  const customCategoryAmount = items.filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
-  const directBaseAmount = materialAmount + customCategoryAmount;
-  const otherItems = items.filter((item) => isOtherCategory(item.category));
-  const feeFormulaContext = buildFeeFormulaContext(items, settings?.quoteCategories);
-  const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, directBaseAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
-  const totalDirectAmount = baseAmount + directBaseAmount;
-  const managementFee = 0;
-  const discount = toNumber(settings?.discount);
-  const chargeableAmount = baseAmount + directBaseAmount + otherAmount;
+  const rawTotals = calculateRawTotals(items, settings);
+  const chargeableAmount = rawTotals.directAmount;
+  const discountRules = getDiscountRules(settings);
+  const ruleDiscount = discountRules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, rawTotals)), 0);
+  const discount = Math.min(chargeableAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : toNumber(settings?.discount)));
   const taxAmount = Math.max(0, chargeableAmount - discount) * toNumber(settings?.taxRate) / 100;
   const finalAmount = Math.max(0, chargeableAmount + taxAmount - discount);
-  return { baseAmount, materialAmount: directBaseAmount, mainMaterialAmount: materialAmount, customCategoryAmount, otherAmount, directAmount: chargeableAmount, totalDirectAmount, managementFee, taxAmount, discount, finalAmount };
+  return { ...rawTotals, taxAmount, discount, finalAmount };
 }
 
 function getBaseOrMaterialItemUnitPrice(item: QuotationItem) {
@@ -1442,6 +1526,17 @@ type DiscountScopeOption = {
   value: string;
   label: string;
   amount: number;
+};
+
+type DiscountRule = {
+  id: string;
+  type: "fee" | "space" | "work_type";
+  mode: "amount" | "rate";
+  scope?: string;
+  space?: string;
+  workType?: string;
+  discount?: number;
+  rate?: number;
 };
 
 function getBaseLaborSubtotal(item: QuotationItem) {
@@ -1474,7 +1569,7 @@ function getDiscountableItems(items: QuotationItem[], settings: QuotationDetail[
   return items.filter((item) => !isExcludedFromDiscount(item, settings));
 }
 
-function getDiscountScopeOptions(items: QuotationItem[], settings: QuotationDetail["settings"], totals: ReturnType<typeof calculate>): DiscountScopeOption[] {
+function getDiscountScopeOptions(items: QuotationItem[], settings: QuotationDetail["settings"], totals: { otherAmount: number }): DiscountScopeOption[] {
   const discountableItems = getDiscountableItems(items, settings);
   const feeContext = buildFeeFormulaContext(discountableItems, settings?.quoteCategories);
   const categoryAmounts = feeContext.categoryAmounts || {};
@@ -1544,6 +1639,84 @@ function getDiscountWorkTypeOptions(items: QuotationItem[], settings: QuotationD
   }));
 }
 
+function getLegacyDiscountRule(settings: QuotationDetail["settings"]): DiscountRule | null {
+  const discount = toNumber(settings?.discount);
+  if (discount <= 0) return null;
+  const type = settings?.discountType === "space" || settings?.discountType === "work_type" ? settings.discountType : "fee";
+  return {
+    id: "legacy",
+    type,
+    mode: settings?.discountMode === "rate" ? "rate" : "amount",
+    scope: settings?.discountScope || "total",
+    space: settings?.discountSpace || "",
+    workType: settings?.discountWorkType || "",
+    discount,
+    rate: Math.min(1, Math.max(0, toNumber(settings?.discountRate || 1))),
+  };
+}
+
+function getDiscountRules(settings: QuotationDetail["settings"]): DiscountRule[] {
+  const hasRuleList = Array.isArray(settings?.discountRules);
+  const rawRules: DiscountRule[] = hasRuleList ? settings.discountRules || [] : [];
+  const rules = rawRules
+    .map((rule, index): DiscountRule => ({
+      id: String(rule?.id || `rule_${index}`),
+      type: rule?.type === "space" || rule?.type === "work_type" ? rule.type : "fee",
+      mode: rule?.mode === "rate" ? "rate" : "amount",
+      scope: String(rule?.scope || "total"),
+      space: String(rule?.space || ""),
+      workType: String(rule?.workType || ""),
+      discount: Math.max(0, toNumber(rule?.discount)),
+      rate: Math.min(1, Math.max(0, toNumber(rule?.rate || 1))),
+    }))
+    .filter((rule) => rule.mode === "rate" ? toNumber(rule.rate) < 1 : toNumber(rule.discount) > 0);
+  if (hasRuleList) return rules;
+  const legacyRule = getLegacyDiscountRule(settings);
+  return legacyRule ? [legacyRule] : [];
+}
+
+function getDiscountRuleValue(rule: DiscountRule) {
+  if (rule.type === "space") return rule.space ? `space:${rule.space}` : "";
+  if (rule.type === "work_type") return rule.workType ? `work_type:${rule.workType}` : "";
+  return rule.scope || "total";
+}
+
+function getDiscountRuleScope(rule: DiscountRule, items: QuotationItem[], settings: QuotationDetail["settings"], totals: ReturnType<typeof calculateRawTotals>) {
+  const options = rule.type === "space"
+    ? getDiscountSpaceOptions(items, settings)
+    : rule.type === "work_type"
+      ? getDiscountWorkTypeOptions(items, settings)
+      : getDiscountScopeOptions(items, settings, totals);
+  const value = getDiscountRuleValue(rule);
+  return options.find((option) => option.value === value)
+    || options.find((option) => option.value === "total")
+    || options[0];
+}
+
+function getDiscountRuleAmount(rule: DiscountRule, items: QuotationItem[], settings: QuotationDetail["settings"], totals: ReturnType<typeof calculateRawTotals>) {
+  const scope = getDiscountRuleScope(rule, items, settings, totals);
+  const scopeAmount = Math.max(0, toNumber(scope?.amount));
+  const excludedAmount = Math.min(scopeAmount, Math.max(0, toNumber(settings?.excludeSpecificDiscountAmount)));
+  const baseAmount = Math.max(0, scopeAmount - excludedAmount);
+  if (baseAmount <= 0) return 0;
+  if (rule.mode === "rate") return roundMoney(baseAmount * (1 - Math.min(1, Math.max(0, toNumber(rule.rate || 1)))));
+  return roundMoney(Math.min(Math.max(0, toNumber(rule.discount)), baseAmount));
+}
+
+function calculateRawTotals(items: QuotationItem[], settings: QuotationDetail["settings"]) {
+  const baseAmount = items.filter((item) => isBaseCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
+  const materialAmount = items.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
+  const customCategoryAmount = items.filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
+  const directBaseAmount = materialAmount + customCategoryAmount;
+  const otherItems = items.filter((item) => isOtherCategory(item.category));
+  const feeFormulaContext = buildFeeFormulaContext(items, settings?.quoteCategories);
+  const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, directBaseAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
+  const totalDirectAmount = baseAmount + directBaseAmount;
+  const managementFee = 0;
+  const chargeableAmount = baseAmount + directBaseAmount + otherAmount;
+  return { baseAmount, materialAmount: directBaseAmount, mainMaterialAmount: materialAmount, customCategoryAmount, otherAmount, directAmount: chargeableAmount, totalDirectAmount, managementFee };
+}
+
 function makeSavePayload(
   title: string,
   terms: string,
@@ -1601,10 +1774,24 @@ export default function QuotationDetailPage() {
   const [discountDraftSettings, setDiscountDraftSettings] = useState<QuotationDetail["settings"] | null>(null);
 	  const [discountRateText, setDiscountRateText] = useState("1");
   const [quotaLibraryItems, setQuotaLibraryItems] = useState<QuotaLibraryItem[]>([]);
+  const [quotaUpdateNotices, setQuotaUpdateNotices] = useState<QuotaUpdateNotice[]>([]);
+  const [quotaUpdateDialogOpen, setQuotaUpdateDialogOpen] = useState(false);
+  const [quotaUpdateChecking, setQuotaUpdateChecking] = useState(false);
+  const [quotaUpdateSyncingIds, setQuotaUpdateSyncingIds] = useState<string[]>([]);
+  const [selectedQuotaUpdateItemId, setSelectedQuotaUpdateItemId] = useState("");
+  const [quotaUpdateSpaceFilter, setQuotaUpdateSpaceFilter] = useState("all");
+  const [quotaUpdateSpacePanelOpen, setQuotaUpdateSpacePanelOpen] = useState(false);
+  const [quotaUpdateNoticeDismissed, setQuotaUpdateNoticeDismissed] = useState(false);
+  const [quotaUpdateConfirmOpen, setQuotaUpdateConfirmOpen] = useState(false);
+  const [quotaUpdateSingleConfirmId, setQuotaUpdateSingleConfirmId] = useState("");
+  const [budgetCompilationUpdateNotice, setBudgetCompilationUpdateNotice] = useState<BudgetCompilationUpdateNotice | null>(null);
+  const [budgetCompilationNoticeDismissed, setBudgetCompilationNoticeDismissed] = useState(false);
+  const [budgetCompilationApplying, setBudgetCompilationApplying] = useState(false);
   const [productLibraryItems, setProductLibraryItems] = useState<ProductLibraryPick[]>([]);
   const [workTypeOptions, setWorkTypeOptions] = useState<DictionaryOption[]>([]);
   const [materialCategoryOptions, setMaterialCategoryOptions] = useState<DictionaryOption[]>([]);
   const [quotaPickerOpen, setQuotaPickerOpen] = useState(false);
+  const [quotaReplaceTarget, setQuotaReplaceTarget] = useState<{ index: number } | null>(null);
   const [productPickerOpen, setProductPickerOpen] = useState(false);
   const [productPickerLoading, setProductPickerLoading] = useState(false);
   const [findReplaceOpen, setFindReplaceOpen] = useState(false);
@@ -1680,6 +1867,8 @@ export default function QuotationDetailPage() {
   const hiddenSpaceFrameRef = useRef<number | null>(null);
   const hiddenSpaceIdleTimerRef = useRef<number | null>(null);
   const findReplaceResultListRef = useRef<HTMLDivElement | null>(null);
+  const isReadonly = !!data?.readonly;
+  const readonlyNoticeText = data?.readonlyMessage || "该报价已锁定，仅支持查看、打印和导出，不能修改报价内容。";
 
   const updateHiddenSpaceCount = useCallback(() => {
     const container = spaceTabsRef.current;
@@ -1787,14 +1976,55 @@ export default function QuotationDetailPage() {
     load();
   }, [load]);
 
-  const returnToBudgetRecords = () => {
-    const customerId = String(data?.customer_id || "").trim();
-    if (customerId) {
-      router.push(`/quotations?openRecords=1&customerId=${encodeURIComponent(customerId)}`);
+  const checkQuotaUpdates = useCallback(async () => {
+    if (isReadonly) return;
+    setQuotaUpdateChecking(true);
+    try {
+      const res = await fetch(`/api/quotations/${quotationId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ action: "checkQuotaUpdates" }),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result?.message || "定额更新检查失败");
+      const updates = Array.isArray(result.updates) ? result.updates : [];
+      setQuotaUpdateNotices(updates);
+      const nextBudgetCompilationUpdate = result.budgetCompilationUpdate || null;
+      setBudgetCompilationUpdateNotice(nextBudgetCompilationUpdate);
+      if (nextBudgetCompilationUpdate) setBudgetCompilationNoticeDismissed(false);
+      if (updates.length > 0) setQuotaUpdateNoticeDismissed(false);
+    } catch {
+      setQuotaUpdateNotices([]);
+      setBudgetCompilationUpdateNotice(null);
+      setBudgetCompilationNoticeDismissed(false);
+    } finally {
+      setQuotaUpdateChecking(false);
+    }
+  }, [isReadonly, quotationId]);
+
+  useEffect(() => {
+    if (loading || isReadonly) return;
+    void checkQuotaUpdates();
+  }, [checkQuotaUpdates, isReadonly, loading]);
+
+  useEffect(() => {
+    if (quotaUpdateNotices.length === 0) {
+      setSelectedQuotaUpdateItemId("");
+      setQuotaUpdateSpaceFilter("all");
+      setQuotaUpdateSpacePanelOpen(false);
       return;
     }
-    router.push("/quotations");
-  };
+    setQuotaUpdateSpaceFilter((current) => (
+      current === "all" || quotaUpdateNotices.some((notice) => (String(notice.space || "未指定空间").trim() || "未指定空间") === current)
+        ? current
+        : "all"
+    ));
+    setSelectedQuotaUpdateItemId((current) => (
+      current && quotaUpdateNotices.some((notice) => notice.itemId === current)
+        ? current
+        : quotaUpdateNotices[0].itemId
+    ));
+  }, [quotaUpdateNotices]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1839,14 +2069,11 @@ export default function QuotationDetailPage() {
     };
   }, []);
 
-	  const isReadonly = !!data?.readonly;
   const totals = useMemo(() => calculate(items, settings), [items, settings]);
   const discountSettings = discountPanelOpen && discountDraftSettings ? discountDraftSettings : settings;
   const discountPreviewTotals = useMemo(() => calculate(items, discountSettings), [items, discountSettings]);
-  const undiscountedTotals = useMemo(() => calculate(items, { ...discountSettings, discount: 0 }), [items, discountSettings]);
-  const discountMode = discountSettings?.discountMode === "rate" ? "rate" : "amount";
+  const undiscountedTotals = useMemo(() => calculateRawTotals(items, { ...discountSettings, discount: 0, discountRules: [] }), [items, discountSettings]);
   const discountType = discountSettings?.discountType === "space" || discountSettings?.discountType === "work_type" ? discountSettings.discountType : "fee";
-  const discountRate = Math.min(1, Math.max(0, toNumber(discountSettings?.discountRate || 1)));
   const discountScopeOptions = useMemo(() => getDiscountScopeOptions(items, discountSettings, undiscountedTotals), [items, discountSettings, undiscountedTotals]);
   const discountSpaceOptions = useMemo(() => getDiscountSpaceOptions(items, discountSettings), [items, discountSettings]);
   const discountWorkTypeOptions = useMemo(() => getDiscountWorkTypeOptions(items, discountSettings), [items, discountSettings]);
@@ -1863,10 +2090,20 @@ export default function QuotationDetailPage() {
   const selectedDiscountScope = activeDiscountOptions.find((option) => option.value === discountSelectionValue)
     || activeDiscountOptions.find((option) => option.value === "total")
     || activeDiscountOptions[0];
+  const discountRules = useMemo(() => getDiscountRules(discountSettings), [discountSettings]);
+  const activeDiscountRule = discountRules.find((rule) => rule.type === discountType && getDiscountRuleValue(rule) === discountSelectionValue) || null;
+  const discountMode = activeDiscountRule?.mode || (discountSettings?.discountMode === "rate" ? "rate" : "amount");
+  const discountRate = Math.min(1, Math.max(0, toNumber(activeDiscountRule?.rate ?? discountSettings?.discountRate ?? 1)));
+  const currentRuleDiscountAmount = toNumber(activeDiscountRule?.discount ?? (discountRules.length === 0 ? discountSettings?.discount : 0));
   const discountBaseLabel = selectedDiscountScope?.label || "总价";
   const discountScopeBaseAmount = Math.max(0, selectedDiscountScope?.amount || 0);
   const excludeSpecificDiscountAmount = Math.min(discountScopeBaseAmount, Math.max(0, toNumber(discountSettings?.excludeSpecificDiscountAmount)));
   const discountBaseAmount = Math.max(0, discountScopeBaseAmount - excludeSpecificDiscountAmount);
+  const currentRuleCalculatedDiscount = activeDiscountRule
+    ? getDiscountRuleAmount(activeDiscountRule, items, discountSettings, undiscountedTotals)
+    : discountMode === "rate"
+      ? roundMoney(discountBaseAmount * (1 - discountRate))
+      : Math.min(currentRuleDiscountAmount, discountBaseAmount);
   const discountAfterAmount = Math.max(0, discountPreviewTotals.finalAmount);
   const discountExcludeMeta = useMemo(() => {
     const specialItems = items.filter((item) => !isOtherCategory(item.category) && isSpecialQuoteItem(item));
@@ -1877,29 +2114,78 @@ export default function QuotationDetailPage() {
     };
   }, [items]);
   const updateDiscountDraftSettings = useCallback((updater: (current: QuotationDetail["settings"]) => QuotationDetail["settings"]) => {
-    setDiscountDraftSettings((current) => updater(current || settings));
+    setDiscountDraftSettings((current) => updater(current || settings || {}));
   }, [settings]);
+  const recomputeDiscountSettings = useCallback((nextSettings: QuotationDetail["settings"]) => {
+    const rawTotals = calculateRawTotals(items, { ...nextSettings, discount: 0 });
+    const rules = getDiscountRules(nextSettings);
+    const nextDiscount = rules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, nextSettings, rawTotals)), 0);
+    return {
+      ...nextSettings,
+      discount: Math.min(rawTotals.directAmount, Math.max(0, nextDiscount)),
+    };
+  }, [items]);
+  const upsertDiscountRule = useCallback((patch: Partial<DiscountRule>) => {
+    updateDiscountDraftSettings((current) => {
+      const currentSettings = current || {};
+      const type = currentSettings.discountType === "space" || currentSettings.discountType === "work_type" ? currentSettings.discountType : "fee";
+      const options = type === "space"
+        ? getDiscountSpaceOptions(items, currentSettings)
+        : type === "work_type"
+          ? getDiscountWorkTypeOptions(items, currentSettings)
+          : getDiscountScopeOptions(items, currentSettings, calculateRawTotals(items, { ...currentSettings, discount: 0, discountRules: [] }));
+      const value = type === "space"
+        ? (currentSettings.discountSpace ? `space:${currentSettings.discountSpace}` : options[0]?.value || "")
+        : type === "work_type"
+          ? (currentSettings.discountWorkType ? `work_type:${currentSettings.discountWorkType}` : options[0]?.value || "")
+          : currentSettings.discountScope || "total";
+      const scope = options.find((option) => option.value === value) || options.find((option) => option.value === "total") || options[0];
+      const ruleId = `${type}:${scope?.value || value || "total"}`;
+      const rule: DiscountRule = {
+        id: ruleId,
+        type,
+        mode: patch.mode || (currentSettings.discountMode === "rate" ? "rate" : "amount"),
+        scope: type === "fee" ? scope?.value || "total" : undefined,
+        space: type === "space" ? String(scope?.label || "").trim() : undefined,
+        workType: type === "work_type" ? String(scope?.label || "").trim() : undefined,
+        discount: Math.max(0, toNumber(patch.discount ?? currentSettings.discount)),
+        rate: Math.min(1, Math.max(0, toNumber(patch.rate ?? currentSettings.discountRate ?? 1))),
+      };
+      const shouldKeep = rule.mode === "rate" ? toNumber(rule.rate) < 1 : toNumber(rule.discount) > 0;
+      const nextRules = getDiscountRules(currentSettings)
+        .filter((item) => !(item.type === rule.type && getDiscountRuleValue(item) === getDiscountRuleValue(rule)));
+      if (shouldKeep) nextRules.push(rule);
+      return recomputeDiscountSettings({
+        ...currentSettings,
+        discountRules: nextRules,
+        discountMode: rule.mode,
+        discountRate: rule.rate,
+        discount: rule.discount,
+      });
+    });
+  }, [items, recomputeDiscountSettings, updateDiscountDraftSettings]);
+  const removeDiscountRule = useCallback((rule: DiscountRule) => {
+    updateDiscountDraftSettings((current) => {
+      const currentSettings = current || {};
+      const nextRules = getDiscountRules(currentSettings)
+        .filter((item) => !(item.type === rule.type && getDiscountRuleValue(item) === getDiscountRuleValue(rule)));
+      return recomputeDiscountSettings({
+        ...currentSettings,
+        discountRules: nextRules,
+      });
+    });
+  }, [recomputeDiscountSettings, updateDiscountDraftSettings]);
   const applyDiscountAmount = useCallback((value: number) => {
     const nextDiscount = roundMoney(Math.min(Math.max(0, value), discountBaseAmount));
     const nextRate = discountBaseAmount > 0 ? roundMoney(Math.max(0, 1 - nextDiscount / discountBaseAmount)) : 1;
-    updateDiscountDraftSettings((current) => ({
-      ...current,
-      discountMode: "amount",
-      discountRate: nextRate,
-      discount: nextDiscount,
-    }));
-  }, [discountBaseAmount, updateDiscountDraftSettings]);
+    upsertDiscountRule({ mode: "amount", discount: nextDiscount, rate: nextRate });
+  }, [discountBaseAmount, upsertDiscountRule]);
   const applyDiscountRate = useCallback((value: number) => {
     const nextRate = Math.min(1, Math.max(0, value));
     const nextDiscount = roundMoney(discountBaseAmount * (1 - nextRate));
     setDiscountRateText(formatEditableNumber(nextRate));
-    updateDiscountDraftSettings((current) => ({
-      ...current,
-      discountMode: "rate",
-      discountRate: nextRate,
-      discount: nextDiscount,
-    }));
-  }, [discountBaseAmount, updateDiscountDraftSettings]);
+    upsertDiscountRule({ mode: "rate", rate: nextRate, discount: nextDiscount });
+  }, [discountBaseAmount, upsertDiscountRule]);
   const getAdjustedDiscountBaseAmount = useCallback((scopeAmount: number, nextSettings: QuotationDetail["settings"] = discountSettings) => {
     const baseAmount = Math.max(0, scopeAmount);
     const excludedAmount = Math.min(baseAmount, Math.max(0, toNumber(nextSettings?.excludeSpecificDiscountAmount)));
@@ -1908,23 +2194,13 @@ export default function QuotationDetailPage() {
 
   const applyExcludeSpecificDiscountAmount = useCallback((value: number) => {
     const nextExcludedAmount = roundMoney(Math.max(0, value));
-    const nextBaseAmount = getAdjustedDiscountBaseAmount(discountScopeBaseAmount, {
-      ...discountSettings,
-      excludeSpecificDiscountAmount: nextExcludedAmount,
-    });
-    const nextDiscount = discountMode === "rate"
-      ? roundMoney(nextBaseAmount * (1 - discountRate))
-      : roundMoney(Math.min(toNumber(discountSettings?.discount), nextBaseAmount));
-    const nextRate = discountMode === "rate"
-      ? discountRate
-      : nextBaseAmount > 0 ? roundMoney(Math.max(0, 1 - nextDiscount / nextBaseAmount)) : 1;
     updateDiscountDraftSettings((current) => ({
-      ...current,
-      excludeSpecificDiscountAmount: nextExcludedAmount,
-      discountRate: nextRate,
-      discount: nextDiscount,
+      ...recomputeDiscountSettings({
+        ...(current || {}),
+        excludeSpecificDiscountAmount: nextExcludedAmount,
+      }),
     }));
-  }, [discountMode, discountRate, discountScopeBaseAmount, discountSettings, getAdjustedDiscountBaseAmount, updateDiscountDraftSettings]);
+  }, [recomputeDiscountSettings, updateDiscountDraftSettings]);
   const getDiscountOptionsForType = useCallback((type: "fee" | "space" | "work_type", nextSettings: QuotationDetail["settings"] = discountSettings) => {
     if (type === "space") return getDiscountSpaceOptions(items, nextSettings);
     if (type === "work_type") return getDiscountWorkTypeOptions(items, nextSettings);
@@ -1949,89 +2225,54 @@ export default function QuotationDetailPage() {
     const nextScope = nextOptions.find((option) => option.value === nextValue)
       || nextOptions.find((option) => option.value === "total")
       || nextOptions[0];
-    const nextBaseAmount = getAdjustedDiscountBaseAmount(nextScope?.amount || 0);
-    const nextDiscount = discountMode === "rate"
-      ? roundMoney(nextBaseAmount * (1 - discountRate))
-      : roundMoney(Math.min(toNumber(discountSettings?.discount), nextBaseAmount));
-    const nextRate = discountMode === "rate"
-      ? discountRate
-      : nextBaseAmount > 0 ? roundMoney(Math.max(0, 1 - nextDiscount / nextBaseAmount)) : 1;
-    updateDiscountDraftSettings((current) => ({
-      ...current,
+    const existingRule = getDiscountRules(discountSettings).find((rule) => rule.type === type && getDiscountRuleValue(rule) === (nextScope?.value || nextValue));
+    const nextMode = existingRule?.mode || discountMode;
+    const nextRate = Math.min(1, Math.max(0, toNumber(existingRule?.rate ?? discountRate)));
+    updateDiscountDraftSettings((current) => recomputeDiscountSettings({
+      ...(current || {}),
       discountType: type,
       ...getDiscountSelectionPatch(type, nextScope),
+      discountMode: nextMode,
       discountRate: nextRate,
-      discount: nextDiscount,
     }));
-  }, [discountMode, discountRate, discountSettings?.discount, getAdjustedDiscountBaseAmount, getDiscountOptionsForType, getDiscountSelectionPatch, getDiscountValueForType, updateDiscountDraftSettings]);
+    setDiscountRateText(formatEditableNumber(nextRate));
+  }, [discountMode, discountRate, discountSettings, getDiscountOptionsForType, getDiscountSelectionPatch, getDiscountValueForType, recomputeDiscountSettings, updateDiscountDraftSettings]);
 
   const changeDiscountScope = useCallback((value: string) => {
     const nextScope = activeDiscountOptions.find((option) => option.value === value)
       || activeDiscountOptions.find((option) => option.value === "total")
       || activeDiscountOptions[0];
-    const nextBaseAmount = getAdjustedDiscountBaseAmount(nextScope?.amount || 0);
-    if (discountMode === "rate") {
-      const nextDiscount = roundMoney(nextBaseAmount * (1 - discountRate));
-      updateDiscountDraftSettings((current) => ({
-        ...current,
-        ...getDiscountSelectionPatch(discountType, nextScope),
-        discount: nextDiscount,
-      }));
-      return;
-    }
-    const nextDiscount = roundMoney(Math.min(toNumber(discountSettings?.discount), nextBaseAmount));
-    const nextRate = nextBaseAmount > 0 ? roundMoney(Math.max(0, 1 - nextDiscount / nextBaseAmount)) : 1;
-    updateDiscountDraftSettings((current) => ({
-      ...current,
+    const existingRule = getDiscountRules(discountSettings).find((rule) => rule.type === discountType && getDiscountRuleValue(rule) === (nextScope?.value || value));
+    const nextMode = existingRule?.mode || discountMode;
+    const nextRate = Math.min(1, Math.max(0, toNumber(existingRule?.rate ?? discountRate)));
+    updateDiscountDraftSettings((current) => recomputeDiscountSettings({
+      ...(current || {}),
       ...getDiscountSelectionPatch(discountType, nextScope),
+      discountMode: nextMode,
       discountRate: nextRate,
-      discount: nextDiscount,
     }));
-  }, [activeDiscountOptions, discountMode, discountRate, discountType, discountSettings?.discount, getAdjustedDiscountBaseAmount, getDiscountSelectionPatch, updateDiscountDraftSettings]);
+    setDiscountRateText(formatEditableNumber(nextRate));
+  }, [activeDiscountOptions, discountMode, discountRate, discountType, discountSettings, getDiscountSelectionPatch, recomputeDiscountSettings, updateDiscountDraftSettings]);
 
   const changeDiscountExcludeRule = useCallback((key: "excludeSpecialDiscountItems" | "excludeLaborOnlyDiscountItems", enabled: boolean) => {
-    const nextSettings = { ...discountSettings, [key]: enabled };
-    const nextOptions = getDiscountOptionsForType(discountType, nextSettings);
-    const nextValue = getDiscountValueForType(discountType, nextSettings);
-    const nextScope = nextOptions.find((option) => option.value === nextValue)
-      || nextOptions.find((option) => option.value === "total")
-      || nextOptions[0];
-    const nextBaseAmount = getAdjustedDiscountBaseAmount(nextScope?.amount || 0, nextSettings);
-    if (discountMode === "rate") {
-      updateDiscountDraftSettings((current) => ({
-        ...current,
-        [key]: enabled,
-        ...getDiscountSelectionPatch(discountType, nextScope),
-        discount: roundMoney(nextBaseAmount * (1 - discountRate)),
-      }));
-      return;
-    }
-    const nextDiscount = roundMoney(Math.min(toNumber(discountSettings?.discount), nextBaseAmount));
-    const nextRate = nextBaseAmount > 0 ? roundMoney(Math.max(0, 1 - nextDiscount / nextBaseAmount)) : 1;
     updateDiscountDraftSettings((current) => ({
-      ...current,
-      [key]: enabled,
-      ...getDiscountSelectionPatch(discountType, nextScope),
-      discountRate: nextRate,
-      discount: nextDiscount,
+      ...recomputeDiscountSettings({
+        ...(current || {}),
+        [key]: enabled,
+      }),
     }));
-  }, [discountMode, discountRate, discountType, discountSettings, getAdjustedDiscountBaseAmount, getDiscountOptionsForType, getDiscountSelectionPatch, getDiscountValueForType, updateDiscountDraftSettings]);
+  }, [recomputeDiscountSettings, updateDiscountDraftSettings]);
 
   const switchDiscountMode = useCallback((mode: "amount" | "rate") => {
     if (mode === "amount") {
-      updateDiscountDraftSettings((current) => ({ ...current, discountMode: "amount" }));
+      upsertDiscountRule({ mode: "amount", discount: currentRuleCalculatedDiscount, rate: discountRate });
       return;
     }
-    const currentDiscount = Math.min(Math.max(0, toNumber(discountSettings?.discount)), discountBaseAmount);
+    const currentDiscount = Math.min(Math.max(0, currentRuleCalculatedDiscount), discountBaseAmount);
     const nextRate = discountBaseAmount > 0 ? roundMoney(Math.max(0, 1 - currentDiscount / discountBaseAmount)) : 1;
     setDiscountRateText(formatEditableNumber(nextRate));
-    updateDiscountDraftSettings((current) => ({
-      ...current,
-      discountMode: "rate",
-      discountRate: nextRate,
-      discount: roundMoney(discountBaseAmount * (1 - nextRate)),
-    }));
-  }, [discountBaseAmount, discountSettings?.discount, updateDiscountDraftSettings]);
+    upsertDiscountRule({ mode: "rate", rate: nextRate, discount: roundMoney(discountBaseAmount * (1 - nextRate)) });
+  }, [currentRuleCalculatedDiscount, discountBaseAmount, discountRate, upsertDiscountRule]);
   const handleDiscountRateTextChange = useCallback((rawValue: string) => {
     if (!isValidDecimalInput(rawValue)) return;
     setDiscountRateText(rawValue);
@@ -2040,13 +2281,8 @@ export default function QuotationDetailPage() {
     if (!Number.isFinite(parsed)) return;
     const nextRate = Math.min(1, Math.max(0, parsed));
     const nextDiscount = roundMoney(discountBaseAmount * (1 - nextRate));
-    updateDiscountDraftSettings((current) => ({
-      ...current,
-      discountMode: "rate",
-      discountRate: nextRate,
-      discount: nextDiscount,
-    }));
-  }, [discountBaseAmount, updateDiscountDraftSettings]);
+    upsertDiscountRule({ mode: "rate", rate: nextRate, discount: nextDiscount });
+  }, [discountBaseAmount, upsertDiscountRule]);
 	  const commitDiscountRateText = useCallback(() => {
 	    discountRateEditingRef.current = false;
 	    const parsed = Number(discountRateText || 1);
@@ -2055,11 +2291,15 @@ export default function QuotationDetailPage() {
 	    applyDiscountRate(nextRate);
 	  }, [applyDiscountRate, discountRateText]);
   const openDiscountPanel = useCallback(() => {
-    const nextDraft = { ...settings };
+    const materializedRules = getDiscountRules(settings);
+    const nextDraft = recomputeDiscountSettings({
+      ...settings,
+      discountRules: materializedRules.length > 0 ? materializedRules : settings?.discountRules,
+    });
     setDiscountDraftSettings(nextDraft);
     setDiscountRateText(formatEditableNumber(Math.min(1, Math.max(0, toNumber(nextDraft.discountRate || 1)))));
     setDiscountPanelOpen(true);
-  }, [settings]);
+  }, [recomputeDiscountSettings, settings]);
   const closeDiscountPanel = useCallback(() => {
     setDiscountPanelOpen(false);
     setDiscountDraftSettings(null);
@@ -2067,13 +2307,17 @@ export default function QuotationDetailPage() {
     setDiscountRateText(formatEditableNumber(Math.min(1, Math.max(0, toNumber(settings?.discountRate || 1)))));
   }, [settings?.discountRate]);
   const confirmDiscountPanel = useCallback(() => {
-    const nextSettings = discountDraftSettings || settings;
+    if (isReadonly) {
+      closeDiscountPanel();
+      return;
+    }
+    const nextSettings = recomputeDiscountSettings(discountDraftSettings || settings);
     setSettings(nextSettings);
     setDiscountPanelOpen(false);
     setDiscountDraftSettings(null);
     discountRateEditingRef.current = false;
     setDiscountRateText(formatEditableNumber(Math.min(1, Math.max(0, toNumber(nextSettings?.discountRate || 1)))));
-  }, [discountDraftSettings, settings]);
+  }, [closeDiscountPanel, discountDraftSettings, isReadonly, recomputeDiscountSettings, settings]);
   const packagePricingSummary = useMemo(
     () => normalizePackagePricingSummary(settings?.templatePricing),
     [settings?.templatePricing],
@@ -2100,11 +2344,12 @@ export default function QuotationDetailPage() {
 	  useEffect(() => {
 	    if (loading || isReadonly) return;
     if (discountPanelOpen) return;
+    if (Array.isArray(settings?.discountRules) && settings.discountRules.length > 0) return;
 	    if (settings?.discountMode !== "rate") return;
     const nextDiscount = roundMoney(discountBaseAmount * (1 - discountRate));
     if (Math.abs(nextDiscount - toNumber(settings?.discount)) < 0.005) return;
     setSettings((current) => ({ ...current, discount: nextDiscount }));
-  }, [discountBaseAmount, discountPanelOpen, discountRate, isReadonly, loading, settings?.discount, settings?.discountMode]);
+  }, [discountBaseAmount, discountPanelOpen, discountRate, isReadonly, loading, settings?.discount, settings?.discountMode, settings?.discountRules]);
 
   useEffect(() => {
     if (packageDetailOpen && packagePricingSummary) {
@@ -2332,6 +2577,64 @@ export default function QuotationDetailPage() {
       }
     }
   }, [isReadonly, loading, quotationId]);
+
+  const waitForLatestAutoSave = useCallback(async () => {
+    if (isReadonly || loading) return;
+    if (autoSaveTimerRef.current) {
+      window.clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    await runAutoSave();
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (!saveInFlightRef.current && !queuedSaveRef.current && lastSavedPayloadRef.current === latestSavePayloadTextRef.current) return;
+      await new Promise((resolve) => window.setTimeout(resolve, 120));
+      if (!saveInFlightRef.current && lastSavedPayloadRef.current !== latestSavePayloadTextRef.current) {
+        await runAutoSave();
+      }
+    }
+  }, [isReadonly, loading, runAutoSave]);
+
+  const syncQuotaUpdates = useCallback(async (itemIds?: string[]) => {
+    if (isReadonly) return;
+    const ids = Array.isArray(itemIds) ? itemIds.filter(Boolean) : [];
+    setQuotaUpdateSyncingIds(ids.length ? ids : ["__all__"]);
+    try {
+      await waitForLatestAutoSave();
+      const res = await fetch(`/api/quotations/${quotationId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ action: "syncQuotaItems", itemIds: ids }),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result?.message || "定额更新失败");
+      if (Array.isArray(result.items)) {
+        const nextItems = normalizeQuotationItems(result.items);
+        setItems(nextItems);
+        setData((current) => current ? {
+          ...current,
+          total_amount: result.totals ? result.totals.directAmount + result.totals.taxAmount : current.total_amount,
+          final_amount: result.totals ? result.totals.finalAmount : current.final_amount,
+        } : current);
+      }
+      await checkQuotaUpdates();
+      if (!ids.length || quotaUpdateNotices.length <= 1) setQuotaUpdateDialogOpen(false);
+      showAlert("已更新", ids.length === 1 ? "这一条已按最新基装定额更新。" : `已更新 ${Number(result.updatedCount || 0)} 条基装定额。`);
+    } catch (error: any) {
+      showAlert("更新失败", error?.message || "定额更新失败，请稍后再试。", "danger");
+    } finally {
+      setQuotaUpdateSyncingIds([]);
+    }
+  }, [checkQuotaUpdates, isReadonly, quotationId, quotaUpdateNotices.length, waitForLatestAutoSave]);
+
+  const returnToBudgetRecords = async () => {
+    await waitForLatestAutoSave();
+    const customerId = String(data?.customer_id || "").trim();
+    if (customerId) {
+      router.push(`/quotations?openRecords=1&refreshRecords=1&customerId=${encodeURIComponent(customerId)}&fromQuotationId=${encodeURIComponent(quotationId)}&t=${Date.now()}`);
+      return;
+    }
+    router.push(`/quotations?refreshRecords=1&fromQuotationId=${encodeURIComponent(quotationId)}&t=${Date.now()}`);
+  };
 
   useEffect(() => {
     if (!visibleQuoteCategories.some((category) => sameQuoteCategory(category, activeCategory))) {
@@ -2565,13 +2868,14 @@ export default function QuotationDetailPage() {
 
   const copyItem = (index: number) => {
     if (isReadonly) return;
-    const copiedKey = makeClientItemKey();
+    const copiedKey = makeClientItemId();
     setItems((current) => {
       const source = current[index];
       if (!source) return current;
       const copy = withoutStoredIdentity(source);
       const copiedItem: QuotationItem = {
         ...copy,
+        id: copiedKey,
         client_key: copiedKey,
         name: source.name ? `${source.name} 副本` : "",
       };
@@ -2607,9 +2911,11 @@ export default function QuotationDetailPage() {
   const makeInsertedItem = (source: QuotationItem): QuotationItem => {
     const copy = withoutStoredIdentity(source);
     const isOther = isOtherCategory(source.category);
+    const itemId = makeClientItemId();
     return {
       ...copy,
-      client_key: makeClientItemKey(),
+      id: itemId,
+      client_key: itemId,
       name: "",
       spec: "",
       material_model: "",
@@ -2620,6 +2926,8 @@ export default function QuotationDetailPage() {
       material_cost: 0,
       labor_cost: 0,
       profit_margin: 0,
+      quota_source_id: null,
+      quota_source_type: null,
       fee_rate: 0,
       row_color: null,
       ...(isOther ? getFeeCalcMethodPatch(normalizeFeeCalcMethod(source.fee_calc_method), { ...source, unit_price: 0, fee_rate: 0, quantity: 1 }) : {}),
@@ -2715,6 +3023,8 @@ export default function QuotationDetailPage() {
         material_cost: 0,
         labor_cost: 0,
         profit_margin: 0,
+        quota_source_id: null,
+        quota_source_type: null,
         row_color: null,
       };
     }));
@@ -2739,6 +3049,11 @@ export default function QuotationDetailPage() {
     if (isReadonly) return;
     const item = items[index];
     if (!item || isOtherCategory(item.category)) return;
+    if (!isBaseCategory(item.category)) {
+      showAlert("无法保存到自定义库", "只有基装项目可以保存到自定义库。");
+      setRowMenu(null);
+      return;
+    }
     if (isStandardQuotaSourceItem(item)) {
       showAlert("无法保存到自定义库", "该项目来源于基装定额库，不能重复保存到自定义库。");
       setRowMenu(null);
@@ -2793,6 +3108,20 @@ export default function QuotationDetailPage() {
     setSpaceCopyMenu(null);
     setRowMenu(null);
     setRowCopyMenu(null);
+    setQuotaReplaceTarget(null);
+    setQuotaLibraryItems(loadQuotaLibraryItemsFromStorage());
+    setQuotaPickerOpen(true);
+  };
+
+  const openQuotaReplacePicker = (index: number) => {
+    if (isReadonly) return;
+    const item = items[index];
+    if (!item || !isBaseCategory(item.category)) return;
+    setSpaceMenu(null);
+    setSpaceCopyMenu(null);
+    setRowMenu(null);
+    setRowCopyMenu(null);
+    setQuotaReplaceTarget({ index });
     setQuotaLibraryItems(loadQuotaLibraryItemsFromStorage());
     setQuotaPickerOpen(true);
   };
@@ -2810,6 +3139,33 @@ export default function QuotationDetailPage() {
       setRecentlyMovedItemKey(insertedKey);
       if (movedItemTimerRef.current) window.clearTimeout(movedItemTimerRef.current);
       movedItemTimerRef.current = window.setTimeout(() => setRecentlyMovedItemKey(null), 650);
+    }
+  };
+
+  const replaceQuotaLibraryItem = (selectedItems: QuotaLibraryItem[]) => {
+    if (isReadonly || !quotaReplaceTarget || selectedItems.length === 0) return;
+    const quota = selectedItems[0];
+    let replacedKey = "";
+    setItems((current) => current.map((item, index) => {
+      if (index !== quotaReplaceTarget.index || !isBaseCategory(item.category)) return item;
+      const replacement = createQuotationItemFromQuota(quota, item.category, inferItemSpace(item));
+      replacedKey = getQuotationItemKey(item, index);
+      return {
+        ...replacement,
+        id: item.id,
+        client_key: item.client_key,
+        category: item.category,
+        space: inferItemSpace(item),
+        quantity: item.quantity,
+      };
+    }));
+    setQuotaPickerOpen(false);
+    setQuotaReplaceTarget(null);
+    setRowMenu(null);
+    if (replacedKey) {
+      setRecentlyMovedItemKey(replacedKey);
+      if (movedItemTimerRef.current) window.clearTimeout(movedItemTimerRef.current);
+      movedItemTimerRef.current = window.setTimeout(() => setRecentlyMovedItemKey(null), 900);
     }
   };
 
@@ -2944,6 +3300,53 @@ export default function QuotationDetailPage() {
     setSystemDialog({ title, message, tone, confirmText, cancelText, onConfirm });
   };
 
+  const applyTemplateBudgetCompilation = async () => {
+    if (isReadonly || budgetCompilationApplying) return;
+    setBudgetCompilationApplying(true);
+    try {
+      await waitForLatestAutoSave();
+      const res = await fetch(`/api/quotations/${quotationId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ action: "applyTemplateBudgetCompilation" }),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result?.message || "补入预算编制失败");
+      const nextSettings = { ...settings, ...(result.settings || {}) };
+      setSettings(nextSettings);
+      setData((current) => current ? { ...current, settings: nextSettings } : current);
+      setBudgetCompilationUpdateNotice(null);
+      setBudgetCompilationNoticeDismissed(false);
+      const nextSavedPayload = JSON.stringify(makeSavePayload(title, terms, notes, customerVisibleNote, status, nextSettings, customSpaces, items));
+      lastSavedPayloadRef.current = nextSavedPayload;
+      latestSavePayloadTextRef.current = nextSavedPayload;
+      setAutoSaveStatus("saved");
+      setAutoSaveErrorMessage("");
+      showAlert(result.mode === "update" ? "已更新预算编制" : "已补入预算编制", "已按关联定额模板处理预算编制，只影响当前这一份报价。");
+    } catch (error: any) {
+      showAlert("处理失败", error?.message || "预算编制处理失败，请稍后再试。", "danger");
+    } finally {
+      setBudgetCompilationApplying(false);
+    }
+  };
+
+  const confirmApplyTemplateBudgetCompilation = () => {
+    if (isReadonly) {
+      showAlert("报价已锁定", readonlyNoticeText);
+      return;
+    }
+    const isUpdate = Boolean(budgetCompilationUpdateNotice?.currentExists);
+    showConfirm({
+      title: isUpdate ? "更新预算编制" : "补入预算编制",
+      message: `将从当前报价关联的定额模板中${isUpdate ? "更新" : "补入"}预算编制内容。\n\n本次只处理当前报价，不会同步其他报价，也不会修改项目、数量、价格和优惠。`,
+      tone: "info",
+      confirmText: isUpdate ? "确认更新" : "确认补入",
+      onConfirm: () => {
+        void applyTemplateBudgetCompilation();
+      },
+    });
+  };
+
   const deleteSelectedQuoteItems = useCallback(() => {
     if (isReadonly || selectedActiveItemKeys.length === 0) return;
     const keysToDelete = new Set(selectedActiveItemKeys);
@@ -3044,6 +3447,10 @@ export default function QuotationDetailPage() {
   };
 
   const submitProjectInfo = async () => {
+    if (isReadonly) {
+      showAlert("报价已锁定", readonlyNoticeText);
+      return;
+    }
     if (projectInfoSaving) return;
     const customerName = projectInfoForm.customerName.trim();
     const customerAddress = projectInfoForm.customerAddress.trim();
@@ -3125,7 +3532,10 @@ export default function QuotationDetailPage() {
 
   const deleteCustomCategory = (category: string) => {
     if (isReadonly) return;
-    if (defaultQuoteCategories.includes(category)) return;
+    if (defaultQuoteCategories.includes(category) && activeSpace === allSpacesValue) {
+      showAlert("请先选择空间", "系统内置大类需要在具体空间里删除，避免误删全部空间的报价明细。");
+      return;
+    }
     const categoryLabel = getCategoryLabel(category);
     if (!isOtherCategory(category) && activeSpace !== allSpacesValue) {
       const count = items.filter((item) => sameQuoteCategory(item.category, category) && inferItemSpace(item) === activeSpace).length;
@@ -3649,9 +4059,11 @@ export default function QuotationDetailPage() {
     }));
     setItems((current) => {
       const packageItemIndex = current.findIndex((item) => isPackagePricingCategory(item.category) || String(item.name || "").trim() === "一口价套餐报价");
+      const packageItemId = packageItemIndex >= 0 ? (current[packageItemIndex].id || makeClientItemId()) : makeClientItemId();
       const patch: QuotationItem = {
         ...(packageItemIndex >= 0 ? current[packageItemIndex] : {}),
-        client_key: packageItemIndex >= 0 ? current[packageItemIndex].client_key : makeClientItemKey(),
+        id: packageItemId,
+        client_key: packageItemIndex >= 0 ? (current[packageItemIndex].client_key || packageItemId) : packageItemId,
         category: "一口价",
         space: "",
         name: "一口价套餐报价",
@@ -3713,6 +4125,22 @@ export default function QuotationDetailPage() {
   const canAddCategoryInCurrentView = !isAllSpaceView && availableCategoryCreateOptions.length > 0;
   const showCategoryNavigation = activeCategory !== noQuoteCategoryValue && !isOtherCategory(activeCategory) && (displayedProjectQuoteCategories.length > 0 || (!isReadonly && canAddCategoryInCurrentView));
   const shouldShowCategoryChooser = !isOtherCategory(activeCategory) && displayedProjectQuoteCategories.length === 0;
+  const quotaUpdateGroups = (() => {
+    const groups = new Map<string, QuotaUpdateNotice[]>();
+    quotaUpdateNotices.forEach((notice) => {
+      const space = String(notice.space || "未指定空间").trim() || "未指定空间";
+      groups.set(space, [...(groups.get(space) || []), notice]);
+    });
+    return Array.from(groups.entries()).map(([space, notices]) => ({ space, notices }));
+  })();
+  const filteredQuotaUpdateNotices = quotaUpdateSpaceFilter === "all"
+    ? quotaUpdateNotices
+    : quotaUpdateNotices.filter((notice) => (String(notice.space || "未指定空间").trim() || "未指定空间") === quotaUpdateSpaceFilter);
+  const activeQuotaUpdateNotice = filteredQuotaUpdateNotices.find((notice) => notice.itemId === selectedQuotaUpdateItemId) || filteredQuotaUpdateNotices[0] || null;
+  const quotaUpdateSingleConfirmNotice = quotaUpdateNotices.find((notice) => notice.itemId === quotaUpdateSingleConfirmId) || null;
+  const activeQuotaUpdateSpaceLabel = quotaUpdateSpaceFilter === "all" ? "全部空间" : quotaUpdateSpaceFilter;
+  const quotaUpdateDifferenceCount = quotaUpdateNotices.reduce((total, notice) => total + notice.differences.length, 0);
+  const shouldShowBudgetCompilationApplyNotice = !isReadonly && Boolean(budgetCompilationUpdateNotice) && !budgetCompilationNoticeDismissed;
 
   return (
     <div className="quotation-detail-ui quote-workbench-shell -m-5 min-h-[calc(100vh-72px)] w-[calc(100%+2.5rem)] max-w-none bg-[#f4f7fb] px-4 pb-4 pt-2 text-[#162033] lg:-m-7 lg:w-[calc(100%+3.5rem)] lg:px-5 lg:pb-5 lg:pt-3" onClick={handlePageClick}>
@@ -3802,6 +4230,373 @@ export default function QuotationDetailPage() {
                 className="inline-flex h-10 min-w-[96px] items-center justify-center rounded-[10px] border border-[#159863] bg-[#159863] px-5 text-sm font-bold text-white shadow-[0_8px_18px_rgba(21,152,99,0.20)] transition hover:border-[#0f8155] hover:bg-[#0f8155] disabled:cursor-not-allowed disabled:border-[#c7d3e3] disabled:bg-[#c7d3e3] disabled:shadow-none"
               >
                 确认复制
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {quotaUpdateDialogOpen && (
+        <div
+          className="fixed inset-0 z-[10000] flex items-center justify-center bg-[#101828]/30 px-4 py-6 backdrop-blur-sm no-print"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setQuotaUpdateDialogOpen(false);
+          }}
+        >
+          <div
+            className="grid max-h-[calc(100dvh-72px)] w-full max-w-[1060px] overflow-hidden rounded-[16px] border border-[#d8e1ee] bg-white shadow-[0_24px_70px_rgba(15,23,42,0.22)] md:grid-cols-[320px_1fr] md:grid-rows-[auto_minmax(0,1fr)_auto]"
+            onMouseDown={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="基装定额更新"
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-[#edf1f6] bg-white px-5 py-4 md:col-span-2">
+              <div className="flex min-w-0 flex-1 items-start gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] border border-[#d8eadf] bg-[#f3fbf6] text-[#159863]">
+                  <BookmarkPlus className="h-[18px] w-[18px]" />
+                </span>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="text-[16px] font-semibold leading-6 text-[#182230]">基装定额有更新</div>
+                    <div className="inline-flex items-center gap-1.5 rounded-full bg-[#eefaf4] px-2.5 py-1 text-xs font-semibold text-[#027a48]">
+                      <span>{quotaUpdateNotices.length} 项待确认</span>
+                      <span className="h-1 w-1 rounded-full bg-[#75c89c]" />
+                      <span>{quotaUpdateDifferenceCount} 处差异</span>
+                    </div>
+                  </div>
+                  <p className="mt-1.5 text-xs leading-5 text-[#667085]">
+                    对比当前报价和新版定额，只覆盖名称、单位、人工单价、材料单价和施工说明。
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setQuotaUpdateDialogOpen(false)}
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[#667085] transition hover:bg-[#f3f6fa] hover:text-[#172033]"
+                aria-label="关闭定额更新"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="contents">
+              <div className="flex min-h-0 flex-col border-b border-[#dfe7f2] bg-white md:border-b-0 md:border-r">
+                <div className="border-b border-[#edf1f6] px-4 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs font-semibold text-[#344054]">待处理项目</span>
+                    <span className="rounded-full bg-[#f2f5f9] px-2 py-0.5 text-[11px] font-medium text-[#667085]">
+                      {filteredQuotaUpdateNotices.length}/{quotaUpdateNotices.length} 项
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-4 text-[#8a98aa]">选择空间后，在下方逐项确认需要同步的定额。</p>
+                </div>
+                <div className="relative border-b border-[#edf1f6] bg-[#fbfcfe] px-3 py-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setQuotaUpdateSpacePanelOpen((current) => !current)}
+                    className="flex h-9 w-full items-center justify-between gap-2 rounded-[9px] border border-[#d8e1ee] bg-white px-3 text-left transition hover:border-[#b7c5d8]"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate text-xs font-semibold text-[#344054]">{activeQuotaUpdateSpaceLabel}</span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-2">
+                      <span className="rounded-full bg-[#f2f5f9] px-2 py-0.5 text-[11px] font-medium text-[#667085]">{filteredQuotaUpdateNotices.length} 项</span>
+                      <ChevronDown className={cn("h-3.5 w-3.5 text-[#8a98aa] transition", quotaUpdateSpacePanelOpen ? "rotate-180" : "")} />
+                    </span>
+                  </button>
+                  {quotaUpdateSpacePanelOpen ? (
+                    <div className="absolute left-3 right-3 top-[52px] z-20 max-h-[220px] overflow-y-auto rounded-[10px] border border-[#d8e1ee] bg-white p-1.5 shadow-[0_14px_34px_rgba(15,23,42,0.16)]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setQuotaUpdateSpaceFilter("all");
+                          setSelectedQuotaUpdateItemId(quotaUpdateNotices[0]?.itemId || "");
+                          setQuotaUpdateSpacePanelOpen(false);
+                        }}
+                        className={cn(
+                          "flex w-full items-center justify-between rounded-[8px] px-2.5 py-2 text-left text-xs transition",
+                          quotaUpdateSpaceFilter === "all" ? "bg-[#f4fbf7] font-semibold text-[#159863]" : "font-medium text-[#52647b] hover:bg-[#f7f9fc]",
+                        )}
+                      >
+                        <span>全部空间</span>
+                        <span className="text-[11px] text-[#98a2b3]">{quotaUpdateNotices.length}</span>
+                      </button>
+                      {quotaUpdateGroups.map((group) => (
+                        <button
+                          key={group.space}
+                          type="button"
+                          onClick={() => {
+                            setQuotaUpdateSpaceFilter(group.space);
+                            setSelectedQuotaUpdateItemId(group.notices[0]?.itemId || "");
+                            setQuotaUpdateSpacePanelOpen(false);
+                          }}
+                          className={cn(
+                            "mt-0.5 flex w-full items-center justify-between gap-2 rounded-[8px] px-2.5 py-2 text-left text-xs transition",
+                            quotaUpdateSpaceFilter === group.space ? "bg-[#f4fbf7] font-semibold text-[#159863]" : "font-medium text-[#52647b] hover:bg-[#f7f9fc]",
+                          )}
+                        >
+                          <span className="min-w-0 truncate">{group.space}</span>
+                          <span className="shrink-0 text-[11px] text-[#98a2b3]">{group.notices.length}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+                  <div className="space-y-1">
+                    {filteredQuotaUpdateNotices.map((notice) => {
+                      const globalIndex = quotaUpdateNotices.findIndex((item) => item.itemId === notice.itemId);
+                      const selected = activeQuotaUpdateNotice?.itemId === notice.itemId;
+                      const syncing = quotaUpdateSyncingIds.includes(notice.itemId) || quotaUpdateSyncingIds.includes("__all__");
+                      return (
+                        <button
+                          key={notice.itemId}
+                          type="button"
+                          onClick={() => setSelectedQuotaUpdateItemId(notice.itemId)}
+                          className={cn(
+                            "group grid w-full grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-2 rounded-[9px] border px-2.5 py-2 text-left transition",
+                            selected
+                              ? "border-[#a8d6bc] bg-[#f4fbf7]"
+                              : "border-transparent bg-white hover:border-[#dbe4ef] hover:bg-[#f8fafc]",
+                          )}
+                        >
+                          <span className={cn(
+                            "flex h-5 w-5 items-center justify-center rounded-full text-[11px] font-semibold",
+                            selected ? "bg-[#159863] text-white" : "bg-[#eef2f7] text-[#667085]",
+                          )}>
+                            {globalIndex + 1}
+                          </span>
+                          <span className="min-w-0">
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              <span className="truncate text-xs font-semibold leading-5 text-[#172033]">{notice.itemName || notice.latestName || "未命名项目"}</span>
+                              {syncing ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[#159863]" /> : null}
+                            </span>
+                            {notice.quotaCode ? (
+                              <span className="mt-0.5 block truncate text-[11px] leading-4 text-[#7a8797]">{notice.quotaCode}</span>
+                            ) : null}
+                          </span>
+                          <span className="shrink-0 rounded-full bg-[#fff7ed] px-2 py-0.5 text-[11px] font-semibold text-[#b54708]">
+                            {notice.differences.length} 处
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+              <div className="min-h-0 overflow-y-auto p-4">
+                {activeQuotaUpdateNotice ? (
+                  <div className="flex min-h-full flex-col overflow-hidden rounded-[14px] border border-[#dbe4ef] bg-white">
+                    <div className="border-b border-[#edf1f6] bg-[#fbfcfe] px-4 py-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="shrink-0 rounded-full bg-[#eefaf4] px-2 py-0.5 text-[11px] font-medium text-[#148554]">当前项目</span>
+                            <span className="truncate text-[15px] font-semibold leading-6 text-[#172033]">{activeQuotaUpdateNotice.itemName || activeQuotaUpdateNotice.latestName || "未命名项目"}</span>
+                          </div>
+                          <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11px] leading-4 text-[#667085]">
+                            {activeQuotaUpdateNotice.quotaCode ? (
+                              <span className="min-w-0 truncate">编号：{activeQuotaUpdateNotice.quotaCode}</span>
+                            ) : null}
+                            <span className="min-w-0 truncate">空间：{activeQuotaUpdateNotice.space || "未指定空间"}</span>
+                            <span className="text-[#b54708]">差异：{activeQuotaUpdateNotice.differences.length} 处待确认</span>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setQuotaUpdateSingleConfirmId(activeQuotaUpdateNotice.itemId)}
+                          disabled={quotaUpdateSyncingIds.includes(activeQuotaUpdateNotice.itemId) || quotaUpdateSyncingIds.includes("__all__")}
+                          className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-[9px] border border-[#bdd8c9] bg-white px-3.5 text-xs font-medium text-[#137a4a] transition hover:border-[#8fc3a5] hover:bg-[#f5fbf8] disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {quotaUpdateSyncingIds.includes(activeQuotaUpdateNotice.itemId) || quotaUpdateSyncingIds.includes("__all__") ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                          更新当前项目
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex min-h-0 flex-1 p-4">
+                      <div className="flex min-h-full flex-1 flex-col overflow-hidden rounded-[12px] border border-[#e2e8f0]">
+                        <div className="grid grid-cols-[150px_minmax(0,1fr)_minmax(0,1fr)] border-b border-[#e2e8f0] bg-[#f8fafc] text-center text-xs font-semibold text-[#52647b]">
+                          <div className="flex items-center justify-center px-3 py-2.5">更新字段</div>
+                          <div className="flex items-center justify-center border-l border-[#e2e8f0] px-3 py-2.5">当前报价</div>
+                          <div className="flex items-center justify-center border-l border-[#e2e8f0] px-3 py-2.5">新版定额</div>
+                        </div>
+                        <div className="flex flex-1 flex-col">
+                        {activeQuotaUpdateNotice.differences.map((diff, index) => (
+                          <div
+                            key={`${activeQuotaUpdateNotice.itemId}-${diff.field}`}
+                            className={cn(
+                              "grid grid-cols-[150px_minmax(0,1fr)_minmax(0,1fr)] border-b border-[#edf1f6] last:border-b-0",
+                              index === activeQuotaUpdateNotice.differences.length - 1 ? "flex-1" : "",
+                            )}
+                          >
+                            <div className="flex items-center justify-center bg-[#fbfcfe] px-3 py-3 text-center text-xs font-semibold text-[#344054]">{diff.label}</div>
+                            <div className="min-w-0 border-l border-[#edf1f6] px-3 py-3">
+                              <div className="flex h-full items-center justify-center whitespace-pre-wrap break-words text-center text-xs leading-5 text-[#667085]">{diff.current || "-"}</div>
+                            </div>
+                            <div className="min-w-0 border-l border-[#edf1f6] bg-[#fffaf5] px-3 py-3">
+                              <div className="flex h-full items-center justify-center whitespace-pre-wrap break-words text-center text-xs font-medium leading-5 text-[#9a3412]">{diff.latest || "-"}</div>
+                            </div>
+                          </div>
+                        ))}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-auto border-t border-[#edf1f6] bg-[#fbfcfe] px-4 py-3">
+                      <div className="flex items-start gap-2 text-xs font-medium leading-5 text-[#667085]">
+                        <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#159863]" />
+                        <span>更新后只覆盖差异字段，原报价中的数量、空间归属、备注和特殊项目状态会保留。</span>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex h-full min-h-[360px] items-center justify-center rounded-[14px] border border-dashed border-[#cfd8e6] bg-white text-sm font-medium text-[#667085]">
+                    暂无需要更新的基装定额
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-3 border-t border-[#edf1f6] bg-white px-5 py-3.5 md:col-span-2">
+              <button
+                type="button"
+                onClick={checkQuotaUpdates}
+                disabled={quotaUpdateChecking || quotaUpdateSyncingIds.length > 0}
+                className="inline-flex h-9 items-center justify-center gap-1.5 rounded-[9px] border border-[#d8e1ee] bg-white px-3 text-xs font-medium text-[#52647b] transition hover:border-[#c4cfdd] hover:bg-[#f6f8fb] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {quotaUpdateChecking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+                重新检查
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setQuotaUpdateDialogOpen(false)}
+                  className="inline-flex h-9 items-center justify-center rounded-[9px] border border-[#d8e1ee] bg-white px-4 text-xs font-medium text-[#52647b] transition hover:bg-[#f6f8fb]"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setQuotaUpdateConfirmOpen(true)}
+                  disabled={quotaUpdateNotices.length === 0 || quotaUpdateSyncingIds.length > 0}
+                  className="inline-flex h-9 min-w-[104px] items-center justify-center gap-1.5 rounded-[9px] bg-[#159863] px-4 text-xs font-semibold text-white shadow-[0_8px_18px_rgba(21,152,99,0.18)] transition hover:bg-[#0f8155] disabled:cursor-not-allowed disabled:bg-[#c9d4e2] disabled:shadow-none"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  全部更新
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {quotaUpdateSingleConfirmNotice && (
+        <div
+          className="fixed inset-0 z-[10010] flex items-center justify-center bg-[#101828]/35 px-4 py-6 backdrop-blur-[2px] no-print"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setQuotaUpdateSingleConfirmId("");
+          }}
+        >
+          <div
+            className="w-full max-w-[440px] overflow-hidden rounded-[16px] border border-[#d8e1ee] bg-white shadow-[0_24px_70px_rgba(15,23,42,0.24)]"
+            onMouseDown={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="确认更新当前定额"
+          >
+            <div className="px-5 pb-4 pt-5">
+              <div className="flex items-start gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] border border-[#d6e7de] bg-[#f5fbf7] text-[#159863]">
+                  <Check className="h-5 w-5" />
+                </span>
+                <div className="min-w-0">
+                  <div className="text-[15px] font-semibold leading-6 text-[#172033]">确认更新当前项目？</div>
+                  <div className="mt-1 text-xs leading-5 text-[#667085]">
+                    将更新“{quotaUpdateSingleConfirmNotice.itemName || quotaUpdateSingleConfirmNotice.latestName || "未命名项目"}”，共 {quotaUpdateSingleConfirmNotice.differences.length} 处差异。
+                  </div>
+                </div>
+              </div>
+              <div className="mt-4 rounded-[12px] border border-[#e5ebf3] bg-[#f8fafc] p-3 text-xs leading-5 text-[#52647b]">
+                <div>会更新：名称、单位、人工单价、材料单价、施工说明。</div>
+                <div className="mt-1">不会改动：数量、空间归属、备注、特殊项目状态。</div>
+              </div>
+              <div className="mt-3 rounded-[12px] border border-[#fed7aa] bg-[#fff8f1] p-3 text-xs leading-5 text-[#9a3412]">
+                更新后该项目会按新版定额重新计算，请确认差异无误后再继续。
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-[#edf1f6] bg-[#fbfcfe] px-5 py-3.5">
+              <button
+                type="button"
+                onClick={() => setQuotaUpdateSingleConfirmId("")}
+                className="inline-flex h-9 items-center justify-center rounded-[9px] border border-[#d8e1ee] bg-white px-4 text-xs font-medium text-[#52647b] transition hover:bg-[#f6f8fb]"
+              >
+                再看看
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const itemId = quotaUpdateSingleConfirmNotice.itemId;
+                  setQuotaUpdateSingleConfirmId("");
+                  void syncQuotaUpdates([itemId]);
+                }}
+                disabled={quotaUpdateSyncingIds.includes(quotaUpdateSingleConfirmNotice.itemId) || quotaUpdateSyncingIds.includes("__all__")}
+                className="inline-flex h-9 min-w-[118px] items-center justify-center gap-1.5 rounded-[9px] bg-[#159863] px-4 text-xs font-semibold text-white shadow-[0_8px_18px_rgba(21,152,99,0.18)] transition hover:bg-[#0f8155] disabled:cursor-not-allowed disabled:bg-[#c9d4e2] disabled:shadow-none"
+              >
+                {quotaUpdateSyncingIds.includes(quotaUpdateSingleConfirmNotice.itemId) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                确认更新
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {quotaUpdateConfirmOpen && (
+        <div
+          className="fixed inset-0 z-[10010] flex items-center justify-center bg-[#101828]/35 px-4 py-6 backdrop-blur-[2px] no-print"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setQuotaUpdateConfirmOpen(false);
+          }}
+        >
+          <div
+            className="w-full max-w-[440px] overflow-hidden rounded-[16px] border border-[#d8e1ee] bg-white shadow-[0_24px_70px_rgba(15,23,42,0.24)]"
+            onMouseDown={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="确认全部更新定额"
+          >
+            <div className="px-5 pb-4 pt-5">
+              <div className="flex items-start gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] border border-[#d6e7de] bg-[#f5fbf7] text-[#159863]">
+                  <Check className="h-5 w-5" />
+                </span>
+                <div className="min-w-0">
+                  <div className="text-[15px] font-semibold leading-6 text-[#172033]">确认更新全部基装定额？</div>
+                  <div className="mt-1 text-xs leading-5 text-[#667085]">
+                    将更新 {quotaUpdateNotices.length} 条基装项目，共 {quotaUpdateDifferenceCount} 处差异。
+                  </div>
+                </div>
+              </div>
+              <div className="mt-4 rounded-[12px] border border-[#e5ebf3] bg-[#f8fafc] p-3 text-xs leading-5 text-[#52647b]">
+                <div>会更新：名称、单位、人工单价、材料单价、施工说明。</div>
+                <div className="mt-1">不会改动：数量、空间归属、备注、特殊项目状态。</div>
+              </div>
+              <div className="mt-3 rounded-[12px] border border-[#fed7aa] bg-[#fff8f1] p-3 text-xs leading-5 text-[#9a3412]">
+                更新后当前报价会按新版定额重新计算，请确认差异无误后再继续。
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-[#edf1f6] bg-[#fbfcfe] px-5 py-3.5">
+              <button
+                type="button"
+                onClick={() => setQuotaUpdateConfirmOpen(false)}
+                className="inline-flex h-9 items-center justify-center rounded-[9px] border border-[#d8e1ee] bg-white px-4 text-xs font-medium text-[#52647b] transition hover:bg-[#f6f8fb]"
+              >
+                再看看
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setQuotaUpdateConfirmOpen(false);
+                  void syncQuotaUpdates();
+                }}
+                disabled={quotaUpdateNotices.length === 0 || quotaUpdateSyncingIds.length > 0}
+                className="inline-flex h-9 min-w-[118px] items-center justify-center gap-1.5 rounded-[9px] bg-[#159863] px-4 text-xs font-semibold text-white shadow-[0_8px_18px_rgba(21,152,99,0.18)] transition hover:bg-[#0f8155] disabled:cursor-not-allowed disabled:bg-[#c9d4e2] disabled:shadow-none"
+              >
+                {quotaUpdateSyncingIds.includes("__all__") ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                确认全部更新
               </button>
             </div>
           </div>
@@ -3952,7 +4747,7 @@ export default function QuotationDetailPage() {
                 </span>
                 <div className="min-w-0">
                   <div className="text-[15px] font-bold leading-6 text-[#182230]">报价优惠</div>
-	                  <p className="mt-1 text-xs font-medium text-[#667085]">先确定优惠对象，再设置排除规则和优惠方式，系统自动核算金额。</p>
+	                  <p className="mt-1 text-xs font-medium text-[#667085]">可分别给基装、产品、定制柜等对象设置不同优惠方式，系统自动汇总优惠金额。</p>
                 </div>
               </div>
 	              <button
@@ -4136,7 +4931,7 @@ export default function QuotationDetailPage() {
                 <div className="quote-discount-fields rounded-[12px] border border-[#dfe7f1] bg-white p-2.5">
                   {discountMode === "amount" ? (
                     <div className="space-y-2">
-	                      <NumberField label="输入优惠金额" suffix="元" value={discountSettings?.discount || 0} onChange={applyDiscountAmount} readOnly={isReadonly} />
+	                      <NumberField label="输入优惠金额" suffix="元" value={currentRuleDiscountAmount} onChange={applyDiscountAmount} readOnly={isReadonly} />
 	                      <p className="text-[11px] font-medium text-surface-400">从{discountBaseLabel}中直接减去该金额，最高不超过 {formatQuoteAmount(discountBaseAmount)}</p>
                     </div>
                   ) : (
@@ -4165,7 +4960,38 @@ export default function QuotationDetailPage() {
               </div>
               {discountMode === "rate" && (
                 <div className="quote-discount-rate-hint rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-700">
-		                  当前按{discountBaseLabel}的 {formatEditableNumber(discountRate)} 折扣系数计算，自动优惠 {formatQuoteAmount(discountSettings?.discount || 0)}
+		                  当前按{discountBaseLabel}的 {formatEditableNumber(discountRate)} 折扣系数计算，自动优惠 {formatQuoteAmount(currentRuleCalculatedDiscount)}
+                </div>
+              )}
+              {discountRules.length > 0 && (
+                <div className="quote-discount-step">
+                  <div className="quote-discount-step-title mb-2">
+                    <span className="quote-discount-step-badge"><List className="h-3.5 w-3.5" /></span>
+                    <span>已设置优惠</span>
+                  </div>
+                  <div className="quote-discount-rule-list">
+                    {discountRules.map((rule) => {
+                      const scope = getDiscountRuleScope(rule, items, discountSettings, undiscountedTotals);
+                      const amount = getDiscountRuleAmount(rule, items, discountSettings, undiscountedTotals);
+                      return (
+                        <div key={rule.id} className="quote-discount-rule-row">
+                          <span className="quote-discount-rule-row-name">{scope?.label || "优惠对象"}</span>
+                          <span className="quote-discount-rule-row-mode">{rule.mode === "rate" ? `${formatEditableNumber(rule.rate || 1)} 折扣系数` : "优惠金额"}</span>
+                          <span className="quote-discount-rule-row-amount">-{formatQuoteAmount(amount)}</span>
+                          <button
+                            type="button"
+                            className="quote-discount-rule-row-remove"
+                            onClick={() => removeDiscountRule(rule)}
+                            disabled={isReadonly}
+                            aria-label={`删除${scope?.label || "该项"}优惠`}
+                            title="删除这条优惠"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
               <div className="quote-discount-result-grid grid grid-cols-3 gap-3">
@@ -4175,7 +5001,7 @@ export default function QuotationDetailPage() {
                 </div>
                 <div className="quote-discount-result-card quote-discount-result-card-warn">
                   <p className="text-[11px] font-semibold text-orange-600">优惠金额</p>
-	                  <p className="mt-1 text-sm font-semibold tabular-nums text-orange-700">{formatQuoteAmount(discountSettings?.discount || 0)}</p>
+	                  <p className="mt-1 text-sm font-semibold tabular-nums text-orange-700">{formatQuoteAmount(discountPreviewTotals.discount || 0)}</p>
                 </div>
                 <div className="quote-discount-result-card quote-discount-result-card-danger">
                   <p className="text-[11px] font-semibold text-red-500">优惠后总费用</p>
@@ -4189,8 +5015,8 @@ export default function QuotationDetailPage() {
 	                onClick={confirmDiscountPanel}
                 className="inline-flex h-10 min-w-[92px] items-center justify-center gap-1.5 rounded-[10px] bg-[#159863] px-5 text-xs font-bold text-white shadow-[0_8px_18px_rgba(21,152,99,0.22)] transition hover:bg-[#0f8155]"
               >
-                <Check className="h-3.5 w-3.5" />
-	                确认
+                {isReadonly ? <X className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}
+	                {isReadonly ? "关闭" : "确认"}
               </button>
             </div>
           </div>
@@ -4390,7 +5216,7 @@ export default function QuotationDetailPage() {
       )}
       {isReadonly && (
         <section className="no-print rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-700">
-          该报价单由他人发送给你，仅支持查看、打印和导出，不能修改报价内容。
+          {readonlyNoticeText}
         </section>
       )}
 
@@ -4480,24 +5306,22 @@ export default function QuotationDetailPage() {
                   编辑资料
                 </button>
               )}
-              {!isReadonly && (
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setPackageDetailOpen(false);
-                    openDiscountPanel();
-                  }}
-                  className={`quote-discount-action inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md border px-3 font-semibold transition ${
-                    discountPanelOpen ? "quote-discount-action-active" : ""
-                  }`}
-                  title="设置报价优惠"
-                >
-                  <Tags className="h-3.5 w-3.5" />
-                  <span>报价优惠</span>
-                  <span className="quote-discount-action-amount tabular-nums">{formatQuoteAmount(settings?.discount || 0)}</span>
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setPackageDetailOpen(false);
+                  openDiscountPanel();
+                }}
+                className={`quote-discount-action inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md border px-3 font-semibold transition ${
+                  discountPanelOpen ? "quote-discount-action-active" : ""
+                }`}
+                title={isReadonly ? "查看报价优惠" : "设置报价优惠"}
+              >
+                <Tags className="h-3.5 w-3.5" />
+                <span>报价优惠</span>
+                <span className="quote-discount-action-amount tabular-nums">{formatQuoteAmount(settings?.discount || 0)}</span>
+              </button>
               <button
                 type="button"
                 onClick={() => setActiveCategory("other")}
@@ -4505,6 +5329,7 @@ export default function QuotationDetailPage() {
                   isOtherCategory(activeCategory) ? "quote-comprehensive-fee-active" : ""
                 }`}
               >
+                <Calculator className="h-3.5 w-3.5" />
                 <span>综合费用</span>
                 <span className="quote-comprehensive-fee-amount tabular-nums">{formatQuoteAmount(totals.otherAmount)}</span>
               </button>
@@ -4669,20 +5494,20 @@ export default function QuotationDetailPage() {
 
         {spaceMenu && (
           <div
-            className="quote-floating-menu fixed z-[9997] w-60 rounded-lg border border-surface-200 bg-white p-1 shadow-[0_18px_38px_rgba(31,41,53,0.16)]"
+            className="quote-floating-menu fixed z-[9997] w-72 rounded-lg border border-surface-200 bg-white p-1 shadow-[0_18px_38px_rgba(31,41,53,0.16)]"
             style={{
-              left: typeof window === "undefined" ? spaceMenu.x : Math.max(8, Math.min(spaceMenu.x, window.innerWidth - 248)),
+              left: typeof window === "undefined" ? spaceMenu.x : Math.max(8, Math.min(spaceMenu.x, window.innerWidth - 296)),
               top: spaceMenu.y,
             }}
             onClick={(event) => event.stopPropagation()}
           >
             <button onClick={() => copySpace(spaceMenu.space)} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
               <Copy className="h-4 w-4" />
-              复制报价
+              复制空间/类别
             </button>
             <button onClick={(event) => openCopySpaceMenu(event, spaceMenu.space)} className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
               <Copy className="h-4 w-4" />
-              复制到其他空间/类别
+              复制本空间项目到其他空间/类别
             </button>
             <button onClick={() => renameSpace(spaceMenu.space)} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
               <Pencil className="h-4 w-4" />
@@ -4758,6 +5583,7 @@ export default function QuotationDetailPage() {
               setRowMenu(null);
             }}
             onCopyToSpace={(event) => openCopyRowMenu(event, rowMenu.index)}
+            onReplaceQuota={() => openQuotaReplacePicker(rowMenu.index)}
             onSetAttribution={() => openAttributionDialog(rowMenu.index)}
             onSaveToCustomLibrary={() => saveItemToCustomLibrary(rowMenu.index)}
             onClear={() => {
@@ -4814,6 +5640,86 @@ export default function QuotationDetailPage() {
           </div>
         )}
 
+        {quotaUpdateNotices.length > 0 && !quotaUpdateNoticeDismissed && !isReadonly && (
+          <div className="no-print relative z-[1] mb-3 mt-3 flex flex-wrap items-center justify-between gap-3 overflow-visible rounded-[12px] border border-[#dbeadf] bg-[#f5fbf7] px-4 py-3 text-[#173426]">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-[#bee4cc] bg-white text-[#159863]">
+                <Replace className="h-4 w-4" />
+              </span>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold leading-5">定额库有更新，当前报价中 {quotaUpdateNotices.length} 条基装项目可同步</div>
+                <div className="mt-0.5 text-xs font-medium text-[#5f7468]">点“查看差异”先看看哪些内容变了，再决定是否更新当前报价。</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setQuotaUpdateDialogOpen(true)}
+                className="inline-flex h-8 items-center gap-1.5 rounded-[9px] border border-[#bdd8c9] bg-white px-3 text-xs font-medium text-[#137a4a] transition hover:bg-[#eef8f2]"
+              >
+                <Search className="h-3.5 w-3.5" />
+                查看差异
+              </button>
+              <button
+                type="button"
+                onClick={() => setQuotaUpdateDialogOpen(true)}
+                disabled={quotaUpdateSyncingIds.length > 0}
+                className="inline-flex h-8 items-center gap-1.5 rounded-[9px] bg-[#159863] px-3 text-xs font-semibold text-white transition hover:bg-[#0f8155] disabled:cursor-not-allowed disabled:bg-[#c9d4e2]"
+              >
+                <Check className="h-3.5 w-3.5" />
+                全部更新
+              </button>
+              <button
+                type="button"
+                onClick={() => setQuotaUpdateNoticeDismissed(true)}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-[9px] text-[#6b7f73] transition hover:bg-white hover:text-[#173426]"
+                aria-label="关闭基装定额更新提醒"
+                title="关闭提醒"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+        {shouldShowBudgetCompilationApplyNotice && (
+          <div className="no-print relative z-[1] mb-3 mt-3 flex flex-wrap items-center justify-between gap-3 overflow-visible rounded-[12px] border border-[#f1d7a8] bg-[#fff8ec] px-4 py-3 text-[#3b2a12]">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-[#efd093] bg-white text-[#c47a16]">
+                <FileText className="h-4 w-4" />
+              </span>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold leading-5">
+                  {budgetCompilationUpdateNotice?.currentExists ? "预算编制有更新" : "当前报价还没有预算编制"}
+                </div>
+                <div className="mt-0.5 text-xs font-medium text-[#7d663f]">
+                  {budgetCompilationUpdateNotice?.currentExists
+                    ? "关联定额模板中的预算编制已调整，可手动更新到当前报价。"
+                    : "关联定额模板后续已补充预算编制，可手动补入到当前报价。"}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={confirmApplyTemplateBudgetCompilation}
+                disabled={budgetCompilationApplying}
+                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[9px] border border-[#e8c27f] bg-white px-3 text-xs font-semibold text-[#a96208] transition hover:bg-[#fff2d8] disabled:cursor-not-allowed disabled:border-[#eadfca] disabled:text-[#b8ad98]"
+              >
+                {budgetCompilationApplying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                {budgetCompilationUpdateNotice?.currentExists ? "更新预算编制" : "补入预算编制"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setBudgetCompilationNoticeDismissed(true)}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-[9px] text-[#8a7148] transition hover:bg-white hover:text-[#3b2a12]"
+                aria-label="关闭预算编制更新提醒"
+                title="关闭提醒"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
         {shouldShowCategoryChooser ? (
           <QuoteCategoryChooser
             readOnly={isReadonly}
@@ -4852,11 +5758,16 @@ export default function QuotationDetailPage() {
               ? () => appendManualItem(activeCategory, isAllSpaceView ? "" : activeSpace)
               : undefined}
             onOpenFindReplace={openFindReplaceDialog}
+            quotaUpdateEntry={quotaUpdateNotices.length > 0 && quotaUpdateNoticeDismissed && !isReadonly ? {
+              count: quotaUpdateNotices.length,
+              onOpen: () => setQuotaUpdateDialogOpen(true),
+            } : undefined}
             categoryNavigation={showCategoryNavigation ? (
               <div className="quote-section-category-tabs no-print">
                 {displayedProjectQuoteCategories.map((category) => {
                   const active = sameQuoteCategory(activeCategory, category);
-                  const canDelete = !defaultQuoteCategories.includes(category) && !builtInDirectCategories.some((item) => sameQuoteCategory(item, category));
+                  const canDelete = activeSpace !== allSpacesValue || (!defaultQuoteCategories.includes(category) && !builtInDirectCategories.some((item) => sameQuoteCategory(item, category)));
+                  const CategoryIcon = isBaseCategory(category) ? FileText : isMainMaterialCategory(category) ? Tags : isCustomCabinetCategory(category) ? Ruler : LayoutGrid;
                   return (
                     <button
                       key={category}
@@ -4864,6 +5775,9 @@ export default function QuotationDetailPage() {
                       onClick={() => setActiveCategory(category)}
                       className={`quote-section-category-tab ${active ? "quote-section-category-tab-active" : ""}`}
                     >
+                      <span className="quote-section-category-tab-icon">
+                        <CategoryIcon className="h-3.5 w-3.5" />
+                      </span>
                       <span className="min-w-0 truncate">{getCategoryLabel(category)}</span>
                       {canDelete && !isReadonly && (
                         <span
@@ -4917,6 +5831,7 @@ export default function QuotationDetailPage() {
             onDeleteSelectedItems={deleteSelectedQuoteItems}
             onChange={updateItem}
             onOpenRowMenu={openRowMenu}
+            onReplaceBaseItem={openQuotaReplacePicker}
             readOnly={isReadonly}
             draggingItemIndex={draggingItemIndex}
             dragOverItem={dragOverItem}
@@ -4932,8 +5847,13 @@ export default function QuotationDetailPage() {
           items={quotaLibraryItems}
           targetText={`${isAllSpaceView ? "全部空间" : activeSpace || "未指定空间"} · ${getCategoryLabel(activeCategory)}`}
           isAllSpaceView={isAllSpaceView}
-          onClose={() => setQuotaPickerOpen(false)}
-          onConfirm={insertQuotaLibraryItems}
+          mode={quotaReplaceTarget ? "replace" : "add"}
+          targetItem={quotaReplaceTarget ? items[quotaReplaceTarget.index] : undefined}
+          onClose={() => {
+            setQuotaPickerOpen(false);
+            setQuotaReplaceTarget(null);
+          }}
+          onConfirm={quotaReplaceTarget ? replaceQuotaLibraryItem : insertQuotaLibraryItems}
         />
       )}
 
@@ -5088,9 +6008,11 @@ export default function QuotationDetailPage() {
         }
         .quotation-detail-ui .quote-discount-scope-panel {
           background: #ffffff !important;
+          overflow: visible;
         }
         .quotation-detail-ui .quote-discount-step {
           min-width: 0;
+          overflow: visible;
           border: 1px solid #e2e8f0;
           border-radius: 12px;
           background: rgba(255, 255, 255, 0.78);
@@ -5099,6 +6021,8 @@ export default function QuotationDetailPage() {
         }
         .quotation-detail-ui .quote-discount-step-title {
           display: inline-flex;
+          position: relative;
+          z-index: 1;
           align-items: center;
           gap: 7px;
           color: #172033;
@@ -5117,34 +6041,17 @@ export default function QuotationDetailPage() {
           color: #159863;
         }
         .quotation-detail-ui .quote-discount-scope-grid {
-          display: flex;
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
           gap: 8px;
-          overflow-x: auto;
-          overflow-y: hidden;
-          padding: 1px 1px 5px;
-          scroll-snap-type: x proximity;
-          scrollbar-color: #d6dde8 transparent;
-          scrollbar-width: thin;
-        }
-        .quotation-detail-ui .quote-discount-scope-grid::-webkit-scrollbar {
-          height: 4px;
-        }
-        .quotation-detail-ui .quote-discount-scope-grid::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .quotation-detail-ui .quote-discount-scope-grid::-webkit-scrollbar-thumb {
-          border-radius: 999px;
-          background: #d6dde8;
-        }
-        .quotation-detail-ui .quote-discount-scope-grid:hover::-webkit-scrollbar-thumb {
-          background: #b8c4d6;
+          overflow: visible;
+          padding: 1px;
         }
         .quotation-detail-ui .quote-discount-scope-card {
           position: relative;
           display: flex;
           min-height: 48px;
-          min-width: 146px;
-          flex: 1 0 146px;
+          min-width: 0;
           flex-direction: column;
           justify-content: center;
           gap: 3px;
@@ -5153,7 +6060,6 @@ export default function QuotationDetailPage() {
           background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
           padding: 7px 30px 7px 10px;
           text-align: left;
-          scroll-snap-align: start;
           transition: all 160ms ease;
         }
         .quotation-detail-ui .quote-discount-scope-card:hover:not(:disabled) {
@@ -5411,6 +6317,60 @@ export default function QuotationDetailPage() {
           border-color: #fecaca;
           background: #fff1f2;
         }
+        .quotation-detail-ui .quote-discount-rule-list {
+          display: grid;
+          gap: 6px;
+          border: 1px solid #dfe7f1;
+          border-radius: 12px;
+          background: #ffffff;
+          padding: 8px;
+        }
+        .quotation-detail-ui .quote-discount-rule-row {
+          display: grid;
+          min-height: 34px;
+          grid-template-columns: minmax(0, 1fr) auto auto 24px;
+          align-items: center;
+          gap: 8px;
+          border-radius: 9px;
+          background: #f8fafc;
+          padding: 0 6px 0 10px;
+          font-size: 12px;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-name {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: #34445a;
+          font-weight: 650;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-mode {
+          color: #667085;
+          font-weight: 600;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-amount {
+          color: #b45309;
+          font-weight: 800;
+          font-variant-numeric: tabular-nums;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-remove {
+          display: inline-flex;
+          height: 24px;
+          width: 24px;
+          align-items: center;
+          justify-content: center;
+          border-radius: 7px;
+          color: #94a3b8;
+          transition: background 140ms ease, color 140ms ease;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-remove:hover:not(:disabled) {
+          background: #fee2e2;
+          color: #dc2626;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-remove:disabled {
+          cursor: not-allowed;
+          opacity: 0.45;
+        }
         .quotation-detail-ui .quote-discount-modal .input-field,
         .quotation-detail-ui .quote-search-field {
           min-height: 36px !important;
@@ -5666,7 +6626,7 @@ export default function QuotationDetailPage() {
           display: flex;
           flex-direction: column;
           align-items: center;
-          gap: 18px;
+          gap: 16px;
           margin: auto;
           padding: 24px;
           text-align: center;
@@ -5687,27 +6647,44 @@ export default function QuotationDetailPage() {
           display: grid;
           width: min(760px, 100%);
           grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 12px;
+          gap: 14px;
         }
         .quotation-detail-ui .quote-category-chooser-card {
           display: flex;
-          min-height: 136px;
-          flex-direction: column;
-          align-items: flex-start;
-          justify-content: center;
-          gap: 8px;
-          border: 1px solid #dbe6f5;
-          border-radius: 10px;
-          background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
-          padding: 18px 22px;
+          position: relative;
+          min-height: 82px;
+          flex-direction: row;
+          align-items: center;
+          justify-content: flex-start;
+          gap: 12px;
+          overflow: hidden;
+          border: 1px solid #d7e1ee;
+          border-radius: 12px;
+          background: #ffffff;
+          padding: 14px 14px 14px 16px;
           text-align: left;
-          transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease, background 0.16s ease;
+          color: #43566f;
+          box-shadow: none;
+          transition: border-color 0.16s ease, color 0.16s ease, background 0.16s ease;
+        }
+        .quotation-detail-ui .quote-category-chooser-card::before {
+          content: "";
+          position: absolute;
+          inset: 0;
+          border-radius: inherit;
+          background: linear-gradient(135deg, rgba(64, 122, 255, 0.08), transparent 46%);
+          opacity: 0;
+          pointer-events: none;
         }
         .quotation-detail-ui .quote-category-chooser-card:hover {
-          border-color: #9fc0ff;
-          background: #ffffff;
-          box-shadow: 0 16px 34px rgba(64, 122, 255, 0.12);
-          transform: translateY(-1px);
+          border-color: #9fb7dc;
+          background: #fbfdff;
+          color: #1f3350;
+          box-shadow: none;
+          transform: none;
+        }
+        .quotation-detail-ui .quote-category-chooser-card:hover::before {
+          opacity: 1;
         }
         .quotation-detail-ui .quote-category-chooser-card:disabled {
           cursor: not-allowed;
@@ -5717,23 +6694,58 @@ export default function QuotationDetailPage() {
         }
         .quotation-detail-ui .quote-category-chooser-icon {
           display: inline-flex;
-          height: 32px;
-          width: 32px;
+          height: 36px;
+          width: 36px;
           align-items: center;
           justify-content: center;
-          border-radius: 8px;
-          background: #edf4ff;
+          flex-shrink: 0;
+          border: 1px solid #dce7f5;
+          border-radius: 10px;
+          background: #f3f7fc;
           color: #407aff;
+          box-shadow: none;
+        }
+        .quotation-detail-ui .quote-category-chooser-copy {
+          position: relative;
+          z-index: 1;
+          display: flex;
+          min-width: 0;
+          flex: 1 1 auto;
+          flex-direction: column;
+          gap: 4px;
         }
         .quotation-detail-ui .quote-category-chooser-name {
           color: #162033;
           font-size: 14px;
-          font-weight: 750;
+          font-weight: 800;
+          line-height: 1.2;
         }
         .quotation-detail-ui .quote-category-chooser-desc {
-          color: #667085;
-          font-size: 12px;
-          line-height: 1.6;
+          display: block;
+          color: #7a8aa0;
+          font-size: 11px;
+          line-height: 1.35;
+        }
+        .quotation-detail-ui .quote-category-chooser-arrow {
+          position: relative;
+          z-index: 1;
+          flex: 0 0 auto;
+          color: #9aa8bb;
+        }
+        .quotation-detail-ui .quote-category-chooser-card[data-category="base"] .quote-category-chooser-icon {
+          border-color: #cfe8dc;
+          background: #f2fbf6;
+          color: #159863;
+        }
+        .quotation-detail-ui .quote-category-chooser-card[data-category="main_material"] .quote-category-chooser-icon {
+          border-color: #d6e2ff;
+          background: #f3f7ff;
+          color: #407aff;
+        }
+        .quotation-detail-ui .quote-category-chooser-card[data-category="custom_cabinet"] .quote-category-chooser-icon {
+          border-color: #f0dec7;
+          background: #fff8ed;
+          color: #b45309;
         }
         @media (max-width: 900px) {
           .quotation-detail-ui .quote-category-chooser-grid {
@@ -5778,13 +6790,13 @@ export default function QuotationDetailPage() {
           min-width: 0;
           max-width: min(620px, 62vw);
           align-items: center;
-          gap: 3px;
+          gap: 8px;
           margin-top: 0;
           margin-bottom: 0;
-          border: 1px solid #d9e2ee;
-          border-radius: 9px;
-          background: #f3f6fa;
-          padding: 3px;
+          border: 0;
+          border-radius: 0;
+          background: transparent;
+          padding: 0;
           overflow-x: auto;
           scrollbar-width: none;
         }
@@ -5794,61 +6806,107 @@ export default function QuotationDetailPage() {
         .quotation-detail-ui .quote-section-category-tab,
         .quotation-detail-ui .quote-section-category-create {
           display: inline-flex;
-          height: 26px !important;
-          min-height: 26px !important;
+          height: 40px !important;
+          min-height: 40px !important;
           flex: 0 0 auto;
           align-items: center;
           justify-content: center;
-          gap: 5px;
-          border-radius: 7px !important;
-          padding: 0 14px !important;
+          gap: 7px;
+          border-radius: 10px !important;
+          padding: 0 18px !important;
           font-size: 12px !important;
-          font-weight: 600 !important;
+          font-weight: 800 !important;
           line-height: 1 !important;
           transform: none;
+          box-sizing: border-box !important;
           transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
         }
         .quotation-detail-ui .quote-section-category-tab {
           position: relative;
-          min-width: 72px;
-          border: 1px solid transparent !important;
-          background: transparent !important;
-          color: #526174 !important;
-          box-shadow: none;
+          min-width: 96px;
+          border: 1px solid #cfdbea !important;
+          background: #ffffff !important;
+          color: #43566f !important;
+          box-shadow: none !important;
+          overflow: hidden;
+        }
+        .quotation-detail-ui .quote-section-category-tab::after {
+          display: none;
         }
         .quotation-detail-ui .quote-section-category-tab:hover {
-          background: rgba(255, 255, 255, 0.72) !important;
-          color: #1f2937 !important;
+          border-color: #9fb7dc !important;
+          background: #f6f9fd !important;
+          color: #1f3350 !important;
+          box-shadow: none !important;
+          transform: none !important;
+        }
+        .quotation-detail-ui .quote-section-category-tab-icon {
+          display: inline-flex;
+          height: 22px;
+          width: 22px;
+          flex: 0 0 22px;
+          align-items: center;
+          justify-content: center;
+          border-radius: 7px;
+          background: #f0f5fb;
+          color: #55708f;
         }
         .quotation-detail-ui .quote-section-category-tab-active,
         .quotation-detail-ui .quote-section-category-tab-active:hover {
           z-index: 1;
-          border-color: #00875a !important;
-          background: #00875a !important;
-          color: #ffffff !important;
-          font-weight: 700 !important;
-          box-shadow: 0 1px 2px rgba(0, 135, 90, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+          border-color: #8bd0aa !important;
+          background: #f3fbf6 !important;
+          color: #137a58 !important;
+          font-weight: 800 !important;
+          box-shadow: none !important;
+          transform: none !important;
+        }
+        .quotation-detail-ui .quote-section-category-tab-active .quote-section-category-tab-icon {
+          background: #159863;
+          color: #ffffff;
+        }
+        .quotation-detail-ui .quote-section-category-tab-active:hover {
+          color: #0f6d4d !important;
+          border-color: #5fc891 !important;
+          background: #ecf8f1 !important;
+          box-shadow: none !important;
+          transform: none !important;
         }
         .quotation-detail-ui .quote-section-category-delete {
           display: inline-flex;
-          height: 18px;
-          width: 18px;
+          height: 24px;
+          width: 24px;
           flex: 0 0 auto;
           align-items: center;
           justify-content: center;
-          border-radius: 6px;
-          color: #98a2b3;
+          margin-left: 2px;
+          border: 1px solid transparent;
+          border-radius: 8px;
+          background: rgba(255, 255, 255, 0.64);
+          color: #7a8a9e;
+          opacity: 0;
+          transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease, opacity 0.16s ease;
+        }
+        .quotation-detail-ui .quote-section-category-delete svg {
+          height: 14px;
+          width: 14px;
+          stroke-width: 2.2;
+        }
+        .quotation-detail-ui .quote-section-category-tab:hover .quote-section-category-delete,
+        .quotation-detail-ui .quote-section-category-delete:focus-visible {
+          opacity: 1;
         }
         .quotation-detail-ui .quote-section-category-delete:hover {
-          background: #ffffff;
+          border-color: #fecaca;
+          background: #fff1f1;
           color: #dc2626;
         }
         .quotation-detail-ui .quote-section-category-delete-active {
-          color: rgba(255, 255, 255, 0.78);
+          color: #66977f;
         }
         .quotation-detail-ui .quote-section-category-delete-active:hover {
-          background: rgba(255, 255, 255, 0.18);
-          color: #ffffff;
+          background: #fff1f1;
+          color: #dc2626;
         }
         .quotation-detail-ui .quote-section-category-create {
           min-width: 34px;
@@ -6326,6 +7384,40 @@ export default function QuotationDetailPage() {
           white-space: nowrap;
           pointer-events: none;
           z-index: -1;
+        }
+        .quotation-detail-ui .quote-name-cell-wrap {
+          isolation: isolate;
+        }
+        .quotation-detail-ui .quote-name-quick-replace {
+          position: absolute;
+          left: 7px;
+          top: 50%;
+          z-index: 4;
+          display: inline-flex;
+          height: 24px;
+          width: 24px;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid rgba(64, 122, 255, 0.24);
+          border-radius: 7px;
+          background: rgba(255, 255, 255, 0.96);
+          color: #407AFF;
+          opacity: 0;
+          pointer-events: none;
+          transform: translateY(-50%) scale(0.92);
+          transition: opacity 140ms ease, transform 140ms ease, border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+        }
+        .quotation-detail-ui .quote-name-quick-replace:hover {
+          border-color: rgba(64, 122, 255, 0.42);
+          background: #edf4ff;
+          color: #245ee8;
+        }
+        .quotation-detail-ui .quote-item-row:hover .quote-name-quick-replace,
+        .quotation-detail-ui .quote-name-cell-wrap:focus-within .quote-name-quick-replace,
+        .quotation-detail-ui .quote-name-quick-replace:focus-visible {
+          opacity: 1;
+          pointer-events: auto;
+          transform: translateY(-50%) scale(1);
         }
         .quotation-detail-ui .quote-special-mark {
           position: absolute;
@@ -7208,11 +8300,11 @@ export default function QuotationDetailPage() {
           max-width: 100%;
           height: 22px;
           align-items: center;
-          border: 1px solid #e5ebf3;
+          border: 1px solid var(--quote-library-category-border, #e5ebf3) !important;
           border-radius: 7px;
-          background: #f8fafc;
+          background: var(--quote-library-category-bg, #f8fafc) !important;
           padding: 0 7px;
-          color: #52647b;
+          color: var(--quote-library-category-text, #52647b) !important;
           font-size: 11px;
           font-weight: 600;
           line-height: 1;
@@ -7480,7 +8572,9 @@ export default function QuotationDetailPage() {
           font-weight: 700 !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-manual-add,
+        .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-bulk-delete,
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-find-replace-button,
+        .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-quota-update-button,
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-search-field {
           height: 40px !important;
           min-height: 40px !important;
@@ -7489,20 +8583,58 @@ export default function QuotationDetailPage() {
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-section-category-tabs {
           min-height: 40px !important;
           height: 40px !important;
-          padding: 2px !important;
+          gap: 8px !important;
+          border: 0 !important;
+          background: transparent !important;
+          padding: 0 !important;
           box-sizing: border-box !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-section-category-tab,
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-section-category-create {
-          height: 34px !important;
-          min-height: 34px !important;
+          height: 40px !important;
+          min-height: 40px !important;
           box-sizing: border-box !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-manual-add,
-        .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-find-replace-button {
+        .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-bulk-delete,
+        .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-find-replace-button,
+        .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-quota-update-button {
           padding-top: 0 !important;
           padding-bottom: 0 !important;
           align-items: center !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-bulk-delete {
+          gap: 8px !important;
+          border-color: #f4b4b4 !important;
+          background: linear-gradient(180deg, #ffffff 0%, #fff6f6 100%) !important;
+          color: #c83333 !important;
+          font-size: 12px !important;
+          font-weight: 800 !important;
+          padding-left: 12px !important;
+          padding-right: 14px !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-bulk-delete:hover {
+          border-color: #ef8f8f !important;
+          background: linear-gradient(180deg, #ffffff 0%, #ffeded 100%) !important;
+          color: #b42323 !important;
+          box-shadow: none !important;
+          transform: none !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-bulk-delete-icon {
+          display: inline-flex;
+          height: 22px;
+          width: 22px;
+          align-items: center;
+          justify-content: center;
+          border-radius: 7px;
+          background: #e5484d;
+          color: #ffffff;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-bulk-delete:hover .quote-bulk-delete-icon {
+          background: #c83333;
+          box-shadow: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-manual-add {
           gap: 8px !important;
@@ -7513,14 +8645,14 @@ export default function QuotationDetailPage() {
           font-weight: 850 !important;
           padding-left: 12px !important;
           padding-right: 15px !important;
-          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.88), 0 7px 16px rgba(21, 152, 99, 0.11) !important;
+          box-shadow: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-manual-add:hover {
           border-color: #5fc891 !important;
           background: linear-gradient(180deg, #ffffff 0%, #e6f8ee 100%) !important;
           color: #0f6d4d !important;
-          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92), 0 9px 20px rgba(21, 152, 99, 0.16) !important;
-          transform: translateY(-1px);
+          box-shadow: none !important;
+          transform: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-manual-add-icon {
           display: inline-flex;
@@ -7531,11 +8663,11 @@ export default function QuotationDetailPage() {
           border-radius: 7px;
           background: #159863;
           color: #ffffff;
-          box-shadow: 0 5px 12px rgba(21, 152, 99, 0.24);
+          box-shadow: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-manual-add:hover .quote-manual-add-icon {
           background: #0f8155;
-          box-shadow: 0 6px 14px rgba(21, 152, 99, 0.28);
+          box-shadow: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-search-field {
           padding-top: 0 !important;
@@ -7551,7 +8683,7 @@ export default function QuotationDetailPage() {
           font-weight: 800 !important;
           padding-left: 13px !important;
           padding-right: 14px !important;
-          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85), 0 6px 14px rgba(32, 55, 85, 0.07) !important;
+          box-shadow: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-find-replace-button svg {
           color: #407aff !important;
@@ -7561,8 +8693,30 @@ export default function QuotationDetailPage() {
           border-color: #9fb7dc !important;
           background: linear-gradient(180deg, #ffffff 0%, #eef5ff 100%) !important;
           color: #1f3350 !important;
-          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 8px 18px rgba(64, 122, 255, 0.13) !important;
-          transform: translateY(-1px);
+          box-shadow: none !important;
+          transform: none !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-quota-update-button {
+          gap: 7px !important;
+          border-color: #f2c27a !important;
+          background: linear-gradient(180deg, #ffffff 0%, #fff8eb 100%) !important;
+          color: #9a5b12 !important;
+          font-size: 12px !important;
+          font-weight: 800 !important;
+          padding-left: 13px !important;
+          padding-right: 14px !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-quota-update-button svg {
+          color: #d97706 !important;
+          filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.75));
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-quota-update-button:hover {
+          border-color: #e39b3a !important;
+          background: linear-gradient(180deg, #ffffff 0%, #fff1d6 100%) !important;
+          color: #854d0e !important;
+          box-shadow: none !important;
+          transform: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-header .quote-toolbar-search {
           min-width: 260px;
@@ -8139,35 +9293,37 @@ export default function QuotationDetailPage() {
           margin-top: -2px !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-compact-navigation .quote-nav-arrow {
-          border-color: #cfdbea !important;
-          background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%) !important;
-          color: #52647b !important;
+          border-color: #d6e0ec !important;
+          background: #f8fafc !important;
+          color: #5f6f84 !important;
           box-shadow: none !important;
+          transform: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-compact-navigation .quote-nav-arrow:hover {
-          border-color: #9fb7dc !important;
-          background: linear-gradient(180deg, #ffffff 0%, #eef5ff 100%) !important;
-          color: #407aff !important;
+          border-color: #b8c7da !important;
+          background: #f1f5f9 !important;
+          color: #335475 !important;
           box-shadow: none !important;
-          transform: translateY(-1px) !important;
+          transform: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-compact-navigation .quote-space-tab {
           position: relative !important;
           z-index: 1 !important;
           gap: 7px !important;
           min-width: 76px !important;
-          border-color: #d6e2f0 !important;
-          background: linear-gradient(180deg, #ffffff 0%, #f9fbfe 100%) !important;
+          border-color: #d6e0ec !important;
+          background: #ffffff !important;
           color: #52647b !important;
           font-weight: 780 !important;
           box-shadow: none !important;
+          transform: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-compact-navigation .quote-space-tab:hover {
-          border-color: #b9cce5 !important;
-          background: linear-gradient(180deg, #ffffff 0%, #f1f6fd 100%) !important;
+          border-color: #b8c7da !important;
+          background: #f8fafc !important;
           color: #223249 !important;
           box-shadow: none !important;
-          transform: translateY(-1px) !important;
+          transform: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-compact-navigation .quote-space-tab-icon,
         .quotation-detail-ui.quote-workbench-shell .quote-compact-navigation .quote-add-space-icon {
@@ -8178,17 +9334,18 @@ export default function QuotationDetailPage() {
           align-items: center;
           justify-content: center;
           border-radius: 7px;
-          background: #eef4f8;
+          background: #eef3f8;
           color: #667085;
-          transition: background-color 160ms ease, color 160ms ease, box-shadow 160ms ease;
+          box-shadow: none;
+          transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-compact-navigation .quote-space-tab-active,
         .quotation-detail-ui.quote-workbench-shell .quote-compact-navigation .quote-space-tab-active:hover {
-          border-color: #407aff !important;
-          background: linear-gradient(180deg, #4f86ff 0%, #3572f4 100%) !important;
+          border-color: #3b74f2 !important;
+          background: #3f7af6 !important;
           color: #ffffff !important;
           box-shadow: none !important;
-          transform: translateY(-1px) !important;
+          transform: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-compact-navigation .quote-space-tab-active .quote-space-tab-icon {
           background: rgba(255, 255, 255, 0.18);
@@ -8198,12 +9355,13 @@ export default function QuotationDetailPage() {
         .quotation-detail-ui.quote-workbench-shell .quote-compact-navigation .quote-add-space {
           gap: 8px !important;
           border-color: #a9c2ff !important;
-          background: linear-gradient(180deg, #ffffff 0%, #f4f8ff 100%) !important;
+          background: #f8fbff !important;
           color: #2f66e8 !important;
           font-weight: 820 !important;
           padding-left: 10px !important;
           padding-right: 14px !important;
           box-shadow: none !important;
+          transform: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-compact-navigation .quote-add-space-icon {
           background: #edf4ff;
@@ -8212,10 +9370,10 @@ export default function QuotationDetailPage() {
         }
         .quotation-detail-ui.quote-workbench-shell .quote-compact-navigation .quote-add-space:hover {
           border-color: #7fa2ff !important;
-          background: linear-gradient(180deg, #ffffff 0%, #eaf2ff 100%) !important;
+          background: #eef5ff !important;
           color: #2458d8 !important;
           box-shadow: none !important;
-          transform: translateY(-1px) !important;
+          transform: none !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-compact-navigation .quote-add-space:hover .quote-add-space-icon {
           background: #407aff;
@@ -8251,50 +9409,85 @@ export default function QuotationDetailPage() {
           line-height: 1 !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions {
-          gap: 4px !important;
-          border: 1px solid #d9e2ee !important;
-          border-radius: 16px !important;
-          background: #f3f6fa !important;
-          padding: 4px !important;
-          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8) !important;
+          gap: 3px !important;
+          border: 1px solid #d8e1ee !important;
+          border-radius: 14px !important;
+          background: #f8fafc !important;
+          padding: 3px !important;
+          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9) !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-project-info-edit,
         .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-discount-action,
         .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-comprehensive-fee {
-          height: 42px !important;
-          min-height: 42px !important;
+          height: 36px !important;
+          min-height: 36px !important;
           border: 1px solid transparent !important;
-          border-radius: 13px !important;
+          border-radius: 11px !important;
           background: transparent !important;
-          padding: 0 18px !important;
-          color: #4f5f75 !important;
-          font-size: 13px !important;
-          font-weight: 700 !important;
+          padding: 0 12px !important;
+          color: #56657a !important;
+          font-size: 12px !important;
+          font-weight: 650 !important;
           letter-spacing: 0 !important;
           box-shadow: none !important;
+          gap: 7px !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-project-info-edit svg,
+        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-discount-action svg,
+        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-comprehensive-fee svg {
+          width: 14px !important;
+          height: 14px !important;
+          stroke-width: 2.2 !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-project-info-edit:hover,
         .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-discount-action:hover,
         .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-comprehensive-fee:hover {
+          border-color: #c9d5e6 !important;
+          background: #ffffff !important;
+          color: #1f2a3d !important;
+          box-shadow: 0 4px 10px rgba(15, 23, 42, 0.06) !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-project-info-edit,
+        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-project-info-edit:hover {
           border-color: #00875a !important;
           background: #00875a !important;
           color: #ffffff !important;
-          box-shadow: 0 6px 14px rgba(0, 135, 90, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.18) !important;
+          box-shadow: 0 5px 12px rgba(0, 135, 90, 0.18) !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-discount-action-active,
-        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-discount-action-active:hover,
+        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-discount-action-active:hover {
+          border-color: #407aff !important;
+          background: #edf4ff !important;
+          color: #2257d4 !important;
+          box-shadow: inset 0 0 0 1px rgba(64, 122, 255, 0.08) !important;
+        }
         .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-comprehensive-fee-active,
         .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-comprehensive-fee-active:hover {
-          border-color: #00875a !important;
-          background: #00875a !important;
-          color: #ffffff !important;
-          box-shadow: 0 6px 14px rgba(0, 135, 90, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.18) !important;
+          border-color: #f59e0b !important;
+          background: #fff7ed !important;
+          color: #b45309 !important;
+          box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.08) !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-discount-action-amount,
         .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-comprehensive-fee-amount {
-          color: inherit !important;
-          font-size: 13px !important;
+          display: inline-flex !important;
+          height: 20px !important;
+          align-items: center !important;
+          border-radius: 999px !important;
+          background: rgba(255, 255, 255, 0.72) !important;
+          padding: 0 6px !important;
+          color: #344054 !important;
+          font-size: 12px !important;
           font-weight: 700 !important;
+          line-height: 1 !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-discount-action-active .quote-discount-action-amount {
+          background: #ffffff !important;
+          color: #2257d4 !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-comprehensive-fee-active .quote-comprehensive-fee-amount {
+          background: #ffffff !important;
+          color: #b45309 !important;
         }
         .quotation-detail-ui.quote-workbench-shell .screen-quote-sections > section.quote-compact-navigation-single-row {
           position: sticky !important;
@@ -8708,6 +9901,7 @@ function RowContextMenu({
   onInsertAfter,
   onCopy,
   onCopyToSpace,
+  onReplaceQuota,
   onSetAttribution,
   onSaveToCustomLibrary,
   onClear,
@@ -8721,6 +9915,7 @@ function RowContextMenu({
   onInsertAfter: () => void;
   onCopy: () => void;
   onCopyToSpace: (event: MouseEvent<HTMLButtonElement>) => void;
+  onReplaceQuota: () => void;
   onSetAttribution: () => void;
   onSaveToCustomLibrary: () => void;
   onClear: () => void;
@@ -8731,8 +9926,9 @@ function RowContextMenu({
   const activeColor = getQuotationRowColor(item.row_color);
   const special = isSpecialQuoteItem(item);
   const canCopyToSpace = !isOtherCategory(item.category);
+  const canReplaceQuota = isBaseCategory(item.category);
   const canSetAttribution = !isOtherCategory(item.category);
-  const canSaveToCustomLibrary = canSetAttribution && !isStandardQuotaSourceItem(item);
+  const canSaveToCustomLibrary = isBaseCategory(item.category) && !isStandardQuotaSourceItem(item);
 
   return (
     <div
@@ -8760,6 +9956,12 @@ function RowContextMenu({
             复制到其他空间/类别
           </span>
           <ChevronRight className="h-4 w-4 text-surface-300" />
+        </button>
+      )}
+      {canReplaceQuota && (
+        <button type="button" onClick={onReplaceQuota} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-primary-50 hover:text-primary-700">
+          <Replace className="h-4 w-4" />
+          替换定额
         </button>
       )}
       {canSetAttribution && (
@@ -8834,6 +10036,7 @@ function QuoteNameTextarea({
   readOnly,
   special,
   highlight,
+  onQuickReplace,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -8841,6 +10044,7 @@ function QuoteNameTextarea({
   readOnly?: boolean;
   special?: boolean;
   highlight?: Pick<FindReplaceActiveHighlight, "start" | "length"> | null;
+  onQuickReplace?: () => void;
 }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -8869,8 +10073,27 @@ function QuoteNameTextarea({
     textarea.style.height = `${textarea.scrollHeight}px`;
   }, [multiline, value]);
 
-	  return (
-	    <div ref={wrapperRef} className="relative flex min-h-[56px] w-full items-center">
+		  return (
+		    <div ref={wrapperRef} className="quote-name-cell-wrap relative flex min-h-[56px] w-full items-center">
+        {onQuickReplace && !readOnly ? (
+          <button
+            type="button"
+            onMouseDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onQuickReplace();
+            }}
+            className="quote-name-quick-replace no-print"
+            title="替换定额"
+            aria-label="替换定额"
+          >
+            <Replace className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
 	      {special && <span className="quote-special-mark" title="特价项目">特</span>}
 	      <span ref={measureRef} className={`quote-name-measure ${className}`}>{value || " "}</span>
 	      {highlight && value ? (
@@ -9084,12 +10307,16 @@ function QuoteCategoryChooser({
                   disabled={readOnly}
                   onClick={() => onSelect(option.value)}
                   className="quote-category-chooser-card"
+                  data-category={option.value}
                 >
                   <span className="quote-category-chooser-icon">
                     <Icon className="h-4 w-4" />
                   </span>
-                  <span className="quote-category-chooser-name">{option.title}</span>
-                  <span className="quote-category-chooser-desc">{option.text}</span>
+                  <span className="quote-category-chooser-copy">
+                    <span className="quote-category-chooser-name">{option.title}</span>
+                    <span className="quote-category-chooser-desc">{option.text}</span>
+                  </span>
+                  <ChevronRight className="quote-category-chooser-arrow h-4 w-4" />
                 </button>
               );
             })}
@@ -9100,7 +10327,7 @@ function QuoteCategoryChooser({
   );
 }
 
-function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, spaceOptions, otherFeeRows, baseAmount, materialAmount, feeFormulaContext, isAllSpaceView, searchValue, onSearchChange, onAdd, onManualAdd, onOpenFindReplace, categoryNavigation, useQuotaLibraryAction, selectedItemKeys, selectedItemCount, onToggleItemSelection, onToggleAllItemSelection, onDeleteSelectedItems, onChange, onOpenRowMenu, readOnly, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onItemPointerDown }: {
+function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, spaceOptions, otherFeeRows, baseAmount, materialAmount, feeFormulaContext, isAllSpaceView, searchValue, onSearchChange, onAdd, onManualAdd, onOpenFindReplace, quotaUpdateEntry, categoryNavigation, useQuotaLibraryAction, selectedItemKeys, selectedItemCount, onToggleItemSelection, onToggleAllItemSelection, onDeleteSelectedItems, onChange, onOpenRowMenu, onReplaceBaseItem, readOnly, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onItemPointerDown }: {
   title: string;
   category: QuotationItem["category"];
   activeSpace?: string;
@@ -9117,6 +10344,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
   onAdd: () => void;
   onManualAdd?: () => void;
   onOpenFindReplace?: () => void;
+  quotaUpdateEntry?: { count: number; onOpen: () => void };
   categoryNavigation?: React.ReactNode;
   useQuotaLibraryAction?: boolean;
   selectedItemKeys: Set<string>;
@@ -9126,6 +10354,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
   onDeleteSelectedItems: () => void;
   onChange: (index: number, patch: Partial<QuotationItem>) => void;
   onOpenRowMenu: RowMenuOpenHandler;
+  onReplaceBaseItem?: (index: number) => void;
   readOnly?: boolean;
   draggingItemIndex: number | null;
   dragOverItem: DragOverItemState;
@@ -9200,8 +10429,10 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
               onClick={onDeleteSelectedItems}
               className="quote-bulk-delete inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-[10px] border border-red-200 bg-white px-3 text-sm font-semibold text-red-600 transition hover:border-red-300 hover:bg-red-50"
             >
-              <Trash2 className="h-4 w-4" />
-              删除已选 {selectedItemCount}
+              <span className="quote-bulk-delete-icon">
+                <Trash2 className="h-3.5 w-3.5" />
+              </span>
+              <span>删除已选 {selectedItemCount}</span>
             </button>
           )}
           {!readOnly && canAddInCurrentView && onManualAdd && (
@@ -9225,6 +10456,18 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
             >
               <Replace className="h-4 w-4" />
               查找替换
+            </button>
+          )}
+          {!readOnly && quotaUpdateEntry && (
+            <button
+              type="button"
+              onClick={quotaUpdateEntry.onOpen}
+              className="quote-quota-update-button inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-[10px] border px-3 text-sm font-semibold transition"
+              title="查看定额更新差异"
+            >
+              <RefreshCw className="h-4 w-4" />
+              定额更新
+              <span className="rounded-full bg-white px-1.5 py-0.5 text-[11px] leading-4 text-[#b45309]">{quotaUpdateEntry.count}</span>
             </button>
           )}
           <div className="quote-toolbar-search relative w-full md:w-72">
@@ -9259,6 +10502,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           activeFindReplaceHighlight={activeFindReplaceHighlight}
           onChange={onChange}
           onOpenRowMenu={onOpenRowMenu}
+          onReplaceBaseItem={onReplaceBaseItem}
           selectedItemKeys={selectedItemKeys}
           onToggleItemSelection={onToggleItemSelection}
           onToggleAllItemSelection={onToggleAllItemSelection}
@@ -9328,12 +10572,16 @@ function QuotaLibraryPickerModal({
   items,
   targetText,
   isAllSpaceView,
+  mode = "add",
+  targetItem,
   onClose,
   onConfirm,
 }: {
   items: QuotaLibraryItem[];
   targetText: string;
   isAllSpaceView: boolean;
+  mode?: "add" | "replace";
+  targetItem?: QuotationItem;
   onClose: () => void;
   onConfirm: (items: QuotaLibraryItem[]) => void;
 }) {
@@ -9385,15 +10633,20 @@ function QuotaLibraryPickerModal({
     () => selectedItems.reduce((sum, item) => toMoney(sum + toNumber(item.totalPrice)), 0),
     [selectedItems],
   );
+  const isReplaceMode = mode === "replace";
   const categoryLabel = categoryFilter === "all" ? "全部分类" : categoryFilter;
   const allFilteredSelected = filteredItems.length > 0 && filteredItems.every((item) => selectedIdSet.has(item.id));
   const shouldUseTallPicker = filteredItems.length > 8;
 
   const toggleItem = (id: string) => {
-    setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+    setSelectedIds((current) => {
+      if (isReplaceMode) return current.includes(id) ? [] : [id];
+      return current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
+    });
   };
 
   const toggleFilteredItems = () => {
+    if (isReplaceMode) return;
     const filteredIds = filteredItems.map((item) => item.id);
     setSelectedIds((current) => {
       if (allFilteredSelected) return current.filter((id) => !filteredIds.includes(id));
@@ -9412,21 +10665,28 @@ function QuotaLibraryPickerModal({
       }}
     >
       <div
-        className={`quote-library-picker-modal quote-base-library-picker-modal flex w-full max-w-[1240px] flex-col overflow-hidden rounded-[16px] border border-[#d9e2ef] bg-white shadow-[0_24px_70px_rgba(15,35,70,0.20)] ${shouldUseTallPicker ? "h-[78vh]" : "max-h-[78vh]"}`}
+        className={`quote-library-picker-modal quote-base-library-picker-modal flex w-full max-w-[1500px] flex-col overflow-hidden rounded-[16px] border border-[#d9e2ef] bg-white shadow-[0_24px_70px_rgba(15,35,70,0.20)] ${shouldUseTallPicker ? "h-[78vh]" : "max-h-[78vh]"}`}
         onClick={(event) => event.stopPropagation()}
       >
         <div className="quote-library-header flex items-center justify-between gap-4 border-b border-[#e8eef6] bg-[#fbfcff] px-5 py-3.5">
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-3">
-              <div className="quote-library-title text-base font-semibold leading-6 text-[#182230]">添加基础项目</div>
+              <div className="quote-library-title text-base font-semibold leading-6 text-[#182230]">{isReplaceMode ? "替换基装定额" : "添加基础项目"}</div>
               <span className="quote-library-target-pill max-w-full truncate">{targetText}</span>
             </div>
+            {isReplaceMode && targetItem && (
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[#6f7f96]">
+                <span className="rounded-md bg-white px-2 py-1 ring-1 ring-[#e4eaf3]">当前：<b className="font-semibold text-[#182230]">{targetItem.name || "未命名项目"}</b></span>
+                <span className="rounded-md bg-white px-2 py-1 ring-1 ring-[#e4eaf3]">数量：<b className="font-semibold text-[#182230]">{formatQuoteAmount(toNumber(targetItem.quantity))} {targetItem.unit || ""}</b></span>
+                <span className="rounded-md bg-white px-2 py-1 ring-1 ring-[#e4eaf3]">空间：<b className="font-semibold text-[#182230]">{inferItemSpace(targetItem) || "未指定空间"}</b></span>
+              </div>
+            )}
           </div>
           <button
             type="button"
             onClick={onClose}
             className="quote-library-close inline-flex h-9 w-9 items-center justify-center text-[#667085] transition hover:bg-[#edf4ff] hover:text-[#407AFF]"
-            aria-label="关闭添加基础项目"
+            aria-label={isReplaceMode ? "关闭替换基装定额" : "关闭添加基础项目"}
           >
             <X className="h-4 w-4" />
           </button>
@@ -9459,14 +10719,20 @@ function QuotaLibraryPickerModal({
               ))}
             </SystemSelect>
           </label>
-          <button
-            type="button"
-            onClick={toggleFilteredItems}
-            disabled={filteredItems.length === 0}
-            className="quote-library-select-all quote-library-primary-text inline-flex h-10 items-center justify-center rounded-[10px] border border-[#cfe0ff] bg-white px-4 text-sm font-semibold text-[#407AFF] transition hover:bg-[#edf4ff] disabled:cursor-not-allowed disabled:border-[#e9eff7] disabled:text-[#9aa8bb]"
-          >
-            {allFilteredSelected ? "取消全选" : "全选当前"}
-          </button>
+          {isReplaceMode ? (
+            <div className="quote-library-select-all inline-flex h-10 items-center justify-center rounded-[10px] border border-[#e8eef6] bg-white px-4 text-sm font-semibold text-[#6f7f96]">
+              单选替换
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={toggleFilteredItems}
+              disabled={filteredItems.length === 0}
+              className="quote-library-select-all quote-library-primary-text inline-flex h-10 items-center justify-center rounded-[10px] border border-[#cfe0ff] bg-white px-4 text-sm font-semibold text-[#407AFF] transition hover:bg-[#edf4ff] disabled:cursor-not-allowed disabled:border-[#e9eff7] disabled:text-[#9aa8bb]"
+            >
+              {allFilteredSelected ? "取消全选" : "全选当前"}
+            </button>
+          )}
           <div className="quote-library-filter-note">
             <b>{categoryLabel}</b><span>{filteredItems.length} 项</span><span>已选 {selectedItems.length}</span>
           </div>
@@ -9485,22 +10751,23 @@ function QuotaLibraryPickerModal({
             </div>
           ) : (
             <div className={`quote-library-table-wrap overflow-auto bg-white ${shouldUseTallPicker ? "h-full" : "max-h-[420px]"}`}>
-              <table className="quote-library-table quote-base-library-table w-full min-w-[1280px] border-separate border-spacing-0 text-sm">
+              <table className="quote-library-table quote-base-library-table w-full min-w-[1500px] border-separate border-spacing-0 text-sm">
                 <thead className="sticky top-0 z-10 bg-[#f4f7fb] text-left text-xs font-semibold text-[#34445a]">
                   <tr>
-                    <th className="quote-library-sticky-select w-14 px-3 py-0 text-center whitespace-nowrap">选择</th>
+                    <th className="quote-library-sticky-select w-14 px-3 py-0 text-center whitespace-nowrap">{isReplaceMode ? "替换" : "选择"}</th>
                     <th className="quote-library-sticky-category w-28 px-3 py-0 whitespace-nowrap">分类</th>
                     <th className="quote-library-sticky-name w-80 px-3 py-0 whitespace-nowrap">项目名称</th>
                     <th className="w-28 px-3 py-0 text-right whitespace-nowrap">材料单价</th>
                     <th className="w-28 px-3 py-0 text-right whitespace-nowrap">人工单价</th>
                     <th className="w-28 px-3 py-0 text-right whitespace-nowrap">总价</th>
                     <th className="w-[520px] px-3 py-0 whitespace-nowrap">施工说明</th>
-                    <th className="w-32 px-3 py-0 whitespace-nowrap">编号</th>
+                    <th className="quote-library-code-column w-44 px-3 py-0 whitespace-nowrap">编号</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredItems.map((item) => {
                     const checked = selectedIdSet.has(item.id);
+                    const categoryName = item.category || "未分类";
                     return (
                       <tr
                         key={item.id}
@@ -9509,16 +10776,17 @@ function QuotaLibraryPickerModal({
                       >
                         <td className="quote-library-sticky-select px-3 py-0 text-center whitespace-nowrap">
                           <input
-                            type="checkbox"
+                            type={isReplaceMode ? "radio" : "checkbox"}
+                            name={isReplaceMode ? "quota-replace-item" : undefined}
                             checked={checked}
                             onChange={() => toggleItem(item.id)}
                             onClick={(event) => event.stopPropagation()}
                             className="h-4 w-4 rounded border-[#cfe0ff] accent-[#407AFF]"
-                            aria-label={`选择${item.name}`}
+                            aria-label={`${isReplaceMode ? "替换为" : "选择"}${item.name}`}
                           />
                         </td>
                         <td className="quote-library-sticky-category px-3 py-0 text-[#52647b] whitespace-nowrap">
-                          <span className="quote-library-category-badge">{item.category || "未分类"}</span>
+                          <span className="quote-library-category-badge" style={getQuotaCategoryBadgeStyle(categoryName)}>{categoryName}</span>
                         </td>
                         <td className="quote-library-sticky-name px-3 py-0">
                           <div className="quote-library-item-title min-w-0">
@@ -9536,7 +10804,7 @@ function QuotaLibraryPickerModal({
                             {item.constructionDescription || "暂无施工说明"}
                           </div>
                         </td>
-                        <td className="px-3 py-0 whitespace-nowrap">{item.code || "-"}</td>
+                        <td className="quote-library-code-column px-3 py-0 whitespace-nowrap" title={item.code || "-"}>{item.code || "-"}</td>
                       </tr>
                     );
                   })}
@@ -9548,9 +10816,19 @@ function QuotaLibraryPickerModal({
 
         <div className="quote-library-footer flex min-h-[64px] flex-col gap-3 border-t border-[#e8eef6] bg-[#fbfcff] px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="quote-library-footer-summary text-xs text-[#6f7f96]">
-            <span>已选择 <b>{selectedItems.length}</b> 项</span>
-            <span>合计 {formatQuoteAmount(selectedTotal)}</span>
-            <span>添加后数量默认为 0，可在报价表内继续填写</span>
+            {isReplaceMode ? (
+              <>
+                <span>已选择 <b>{selectedItems.length}</b> 项</span>
+                <span>会保留当前数量、空间和所在位置</span>
+                <span>仅替换定额内容、单位、价格和施工说明</span>
+              </>
+            ) : (
+              <>
+                <span>已选择 <b>{selectedItems.length}</b> 项</span>
+                <span>合计 {formatQuoteAmount(selectedTotal)}</span>
+                <span>添加后数量默认为 0，可在报价表内继续填写</span>
+              </>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -9566,7 +10844,7 @@ function QuotaLibraryPickerModal({
               disabled={selectedItems.length === 0}
               className="quote-library-primary-action inline-flex h-10 items-center justify-center rounded-[10px] border border-[#407AFF] bg-[#407AFF] px-4 text-sm font-semibold text-white transition hover:bg-[#2f66e8] disabled:cursor-not-allowed disabled:border-[#cfe0ff] disabled:bg-[#cfe0ff]"
             >
-              添加到报价
+              {isReplaceMode ? "确认替换" : "添加到报价"}
             </button>
           </div>
         </div>
@@ -10164,6 +11442,7 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
   readOnly,
   onChange,
   onOpenRowMenu,
+  onReplaceBaseItem,
   selected,
   onToggleItemSelection,
   onItemPointerDown,
@@ -10181,6 +11460,7 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
   readOnly?: boolean;
   onChange: (index: number, patch: Partial<QuotationItem>) => void;
   onOpenRowMenu: RowMenuOpenHandler;
+  onReplaceBaseItem?: (index: number) => void;
   selected: boolean;
   onToggleItemSelection: (key: string) => void;
   onItemPointerDown: (event: ReactPointerEvent<HTMLButtonElement>, index: number) => void;
@@ -10226,7 +11506,15 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
         </td>
       )}
       <td className="border border-surface-200 p-0 align-middle" style={cellStyle}>
-        <QuoteNameTextarea value={item.name} onChange={(value) => handleChange({ name: value })} className="text-center font-medium" readOnly={readOnly} special={isSpecialQuoteItem(item)} highlight={findReplaceHighlight?.field === "name" ? findReplaceHighlight : null} />
+        <QuoteNameTextarea
+          value={item.name}
+          onChange={(value) => handleChange({ name: value })}
+          className="text-center font-medium"
+          readOnly={readOnly}
+          special={isSpecialQuoteItem(item)}
+          highlight={findReplaceHighlight?.field === "name" ? findReplaceHighlight : null}
+          onQuickReplace={!readOnly && onReplaceBaseItem ? () => onReplaceBaseItem(index) : undefined}
+        />
       </td>
       <td className="border border-surface-200 p-0" style={cellStyle}><QuoteNumberInput value={item.quantity} onChange={(value) => handleChange({ quantity: value })} className="text-center font-semibold text-red-600" disabled={readOnly} allowFormula /></td>
       <td className="border border-surface-200 p-0" style={cellStyle}><UnitInputCell value={item.unit} onChange={(value) => handleChange({ unit: value })} className="text-center" readOnly={readOnly} /></td>
@@ -10252,7 +11540,7 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
 });
 
 
-function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
+function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onReplaceBaseItem, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
   items: { item: QuotationItem; index: number }[];
   showSpace?: boolean;
   spaceOptions: string[];
@@ -10263,6 +11551,7 @@ function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingIte
   activeFindReplaceHighlight?: FindReplaceActiveHighlight | null;
   onChange: (index: number, patch: Partial<QuotationItem>) => void;
   onOpenRowMenu: RowMenuOpenHandler;
+  onReplaceBaseItem?: (index: number) => void;
   selectedItemKeys: Set<string>;
   onToggleItemSelection: (key: string) => void;
   onToggleAllItemSelection: (keys: string[]) => void;
@@ -10310,6 +11599,7 @@ function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingIte
                 readOnly={readOnly}
                 onChange={onChange}
                 onOpenRowMenu={onOpenRowMenu}
+                onReplaceBaseItem={onReplaceBaseItem}
                 selected={selectedItemKeys.has(itemKey)}
                 onToggleItemSelection={onToggleItemSelection}
                 onItemPointerDown={onItemPointerDown}
@@ -10613,7 +11903,12 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
             {isOtherFees ? (
               <>
                 <th className="w-28 py-1.5">计算方式</th>
-                <th className="w-36 py-1.5">基础公式</th>
+                <th className="w-36 py-1.5">
+                  <span className="inline-flex items-center justify-center gap-1">
+                    基础公式
+                    <FeeFormulaHelp />
+                  </span>
+                </th>
                 <th className="w-24 py-1.5">金额/比例</th>
                 <th className="w-48 py-1.5">公式</th>
               </>
@@ -10714,7 +12009,6 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
 	                          placeholder={feeMethod === "fixed" ? "" : "如 直接费 或 A+B"}
 	                          title={feeBaseError || (feeMethod === "fixed" ? "" : "可输入 直接费、基装、产品、A+B、(直接费+A) 等")}
 	                        />
-	                        {feeMethod === "reference" && <FeeFormulaHelp />}
 	                      </div>
                         {feeBaseError && <div className="px-3 pb-1 text-xs font-medium text-red-600">{feeBaseError}</div>}
 	                    </td>

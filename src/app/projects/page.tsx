@@ -73,22 +73,23 @@ const filterActiveButtonClass = styles.segmentActive;
 const customerColumnWidths: Record<string, number> = {
   name: 150,
   address: 210,
-  contact: 150,
+  contact: 156,
   area_size: 82,
-  duplicate: 88,
+  duplicate: 104,
   budget: 116,
-  status: 126,
+  status: 150,
   business_department: 112,
   advisor: 118,
   designer: 108,
   design_department: 112,
   created_at: 120,
   last_followup: 132,
-  next_followup: 132,
+  next_followup: 144,
   service_store: 112,
   followup_status: 126,
   intention: 96,
 };
+const actionColumnClass = `${styles.tableCell} ${styles.actionColumnCell}`;
 
 type CustomerColumnDropSide = "before" | "after";
 type CustomerExportScope = "selected" | "page" | "filtered" | "all";
@@ -870,6 +871,72 @@ export default function CustomerManagementPage() {
     }
   };
 
+  const renderActionContent = (customer: Customer) => {
+    const isOpening = openingCustomerId === customer.id;
+    const customerStatus = normalizeCustomerStatus(customer.status);
+    const isDeleting = deletingCustomerId === customer.id;
+    const isRestoring = restoringCustomerId === customer.id;
+
+    if (listMode === "deleted") {
+      return (
+        <button
+          type="button"
+          onClick={(event) => restoreDeletedCustomer(customer, event)}
+          disabled={isRestoring}
+          className={`${styles.rowAction} disabled:cursor-not-allowed disabled:opacity-60`}
+          title="恢复客户"
+        >
+          {isRestoring ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
+          {isRestoring ? "恢复中" : "恢复"}
+        </button>
+      );
+    }
+
+    if (isOpening) {
+      return (
+        <span className={styles.rowActionQuiet}>
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          打开中
+        </span>
+      );
+    }
+
+    if (customerStatus === "SIGNED") {
+      return (
+        <span className={styles.rowActionQuiet} title="签约客户资料不允许编辑">
+          已签约
+        </span>
+      );
+    }
+
+    return (
+      <div className={styles.actionCellContent}>
+        <button
+          type="button"
+          onClick={(event) => openProfileEditor(customer, event)}
+          disabled={isDeleting}
+          className={`${styles.rowAction} disabled:cursor-not-allowed disabled:opacity-60`}
+          title="编辑客户资料"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+          编辑
+        </button>
+        {customerStatus === "LOST" && (
+          <button
+            type="button"
+            onClick={(event) => deleteLostCustomer(customer, event)}
+            disabled={isDeleting}
+            className={`${styles.rowActionDanger} disabled:cursor-not-allowed disabled:opacity-60`}
+            title="删除失败/流失客户"
+          >
+            {isDeleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+            {isDeleting ? "删除中" : "删除"}
+          </button>
+        )}
+      </div>
+    );
+  };
+
   const openProfileEditor = (customer: Customer, event?: React.MouseEvent) => {
     event?.stopPropagation();
     if (normalizeCustomerStatus(customer.status) === "SIGNED") return;
@@ -1285,7 +1352,7 @@ export default function CustomerManagementPage() {
                     </th>
                   );
                 })}
-                <th className={`${styles.tableHeaderCell} ${styles.stickyAction} whitespace-nowrap`}>
+                <th className={`${styles.tableHeaderCell} ${styles.actionColumnHeader} whitespace-nowrap`}>
                   操作
                 </th>
               </tr>
@@ -1294,8 +1361,6 @@ export default function CustomerManagementPage() {
               {customerList.map((customer) => {
                 const isOpening = openingCustomerId === customer.id;
                 const customerStatus = normalizeCustomerStatus(customer.status);
-                const isDeleting = deletingCustomerId === customer.id;
-                const isRestoring = restoringCustomerId === customer.id;
                 return (
                   <tr
                     key={customer.id}
@@ -1321,58 +1386,8 @@ export default function CustomerManagementPage() {
                       </label>
                     </td>
                     {visibleColumnOrder.map((colKey) => renderCell(customer, colKey))}
-                    <td
-                      className={`${styles.tableCell} ${styles.stickyAction} ${
-                        isOpening ? "bg-[#edf4ff]" : "bg-white group-hover:bg-[#f4f8ff]"
-                      }`}
-                      onClick={(event) => event.stopPropagation()}
-                    >
-                      {listMode === "deleted" ? (
-                        <button
-                          type="button"
-                          onClick={(event) => restoreDeletedCustomer(customer, event)}
-                          disabled={isRestoring}
-                          className={`${styles.rowAction} disabled:cursor-not-allowed disabled:opacity-60`}
-                          title="恢复客户"
-                        >
-                          {isRestoring ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
-                          {isRestoring ? "恢复中" : "恢复"}
-                        </button>
-                      ) : isOpening ? (
-                        <span className={styles.rowActionQuiet}>
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          打开中
-                        </span>
-                      ) : customerStatus === "SIGNED" ? (
-                        <span className={styles.rowActionQuiet} title="签约客户资料不允许编辑">
-                          已签约
-                        </span>
-                      ) : (
-                        <div className="flex items-center justify-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={(event) => openProfileEditor(customer, event)}
-                            disabled={isDeleting}
-                            className={`${styles.rowAction} disabled:cursor-not-allowed disabled:opacity-60`}
-                            title="编辑客户资料"
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                            编辑
-                          </button>
-                          {customerStatus === "LOST" && (
-                            <button
-                              type="button"
-                              onClick={(event) => deleteLostCustomer(customer, event)}
-                              disabled={isDeleting}
-                              className={`${styles.rowActionDanger} disabled:cursor-not-allowed disabled:opacity-60`}
-                              title="删除失败/流失客户"
-                            >
-                              {isDeleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-                              {isDeleting ? "删除中" : "删除"}
-                            </button>
-                          )}
-                        </div>
-                      )}
+                    <td className={actionColumnClass} onClick={(event) => event.stopPropagation()}>
+                      {renderActionContent(customer)}
                     </td>
                   </tr>
                 );
