@@ -15,11 +15,14 @@ import {
   getLegacyManagementFeeRate,
   normalizeFeeCalcBase,
   normalizeFeeCalcMethod,
+  normalizeFeeScopeMode,
+  parseFeeScopeValues,
   toMoney,
   toNumber,
   type FeeCalcBase,
   type FeeCalcMethod,
   type FeeFormulaContext,
+  type FeeScopeMode,
 } from "@/lib/quotationFeeFormulas";
 import { getQuotationRowColor, quotationRowColors } from "@/lib/quotationRowColors";
 import { formatAlphaSequence } from "@/lib/quotationSequence";
@@ -266,9 +269,8 @@ type QuoteProjectInfoForm = {
   roomNo: string;
   noRoomNumber: boolean;
   areaSize: string;
+  quotationType: string;
   decorationType: string;
-  notes: string;
-  customerVisibleNote: string;
 };
 
 function normalizeProjectInfoPhone(value: unknown) {
@@ -398,6 +400,7 @@ type QuotationDetail = {
   project_id?: string;
   is_unbound?: number | boolean;
   title?: string;
+  quotation_type?: string | null;
   project_name?: string;
   project_address?: string;
   project_area?: number;
@@ -442,9 +445,10 @@ type QuotationDetail = {
     appendixNote?: string | null;
     budgetCompilationHtml?: string | null;
     budgetCompilation?: string | null;
-    quotaTemplateId?: string | null;
-    quotaTemplateName?: string | null;
-    quoteSpaces?: string[];
+	    quotaTemplateId?: string | null;
+	    quotaTemplateName?: string | null;
+	    quotationType?: string | null;
+	    quoteSpaces?: string[];
     quoteCategories?: string[];
     templatePricing?: Record<string, unknown>;
     signatureLabels?: string[];
@@ -508,6 +512,20 @@ function authHeaders(): Record<string, string> {
 
 function getCategoryLabel(category: string) {
   return builtInCategoryLabels[getCategoryKey(category)] || category;
+}
+
+function getFeeScopeCategoryKey(category: unknown) {
+  const name = normalizeCategoryName(category);
+  if (isBaseCategory(name)) return "base";
+  if (isOtherCategory(name)) return "other";
+  if (isCustomCabinetCategory(name)) return "custom_cabinet";
+  if (name === "main_material" || name === "主材" || name === "主材项目" || name === "产品" || name === "产品项目") return "main_material";
+  return name;
+}
+
+function getFeeScopeCategoryLabel(category: unknown) {
+  const key = getFeeScopeCategoryKey(category);
+  return builtInCategoryLabels[key] || key;
 }
 
 
@@ -1092,14 +1110,24 @@ function SpaceSelectCell({
   options,
   onChange,
   readOnly,
+  displayOnly,
 }: {
   value: string;
   options: string[];
   onChange: (value: string) => void;
   readOnly?: boolean;
+  displayOnly?: boolean;
 }) {
   const currentValue = String(value || "").trim();
   const availableSpaces = uniqueValues([currentValue, ...options]);
+
+  if (displayOnly) {
+    return (
+      <div className="flex min-h-[34px] w-full items-center justify-center px-3 text-center text-sm font-medium text-[#52647b]">
+        <span className="truncate" title={currentValue || "未指定空间"}>{currentValue || "-"}</span>
+      </div>
+    );
+  }
 
   return (
     <div className="relative min-h-[34px]">
@@ -1142,7 +1170,7 @@ function newItem(category: QuotationItem["category"], space?: string): Quotation
     unit_price: 0,
     material_cost: 0,
     labor_cost: 0,
-    ...(isOther ? { fee_calc_method: "fixed" as const, fee_calc_base: "", fee_rate: 0 } : {}),
+    ...(isOther ? { fee_calc_method: "fixed" as const, fee_calc_base: "", fee_rate: 0, fee_scope_mode: "all" as const, fee_scope_space_names: [] } : {}),
   };
 }
 
@@ -1368,6 +1396,8 @@ function normalizeQuotationItems(items: QuotationItem[], options: { inferMissing
         fee_calc_method: feeMethod,
         fee_calc_base: feeMethod === "fixed" ? "" : normalizeFeeCalcBase(item.fee_calc_base) || "直接费",
         fee_rate: feeMethod === "percent" ? (isLegacyManagementFee ? getLegacyManagementFeeRate(item) : feeRate) : 0,
+        fee_scope_mode: normalizeFeeScopeMode(item.fee_scope_mode),
+        fee_scope_space_names: parseFeeScopeValues(item.fee_scope_space_names),
       } : {}),
     };
   });
@@ -1414,6 +1444,8 @@ function migrateManagementFeeToOtherItem(items: QuotationItem[], settings: Quota
         fee_calc_method: "percent" as const,
         fee_calc_base: "直接费" as const,
         fee_rate: managementFeeRate,
+        fee_scope_mode: "all" as const,
+        fee_scope_space_names: [],
       },
     ],
     settings: nextSettings,
@@ -1429,6 +1461,21 @@ function getSpacesForCategory(items: QuotationItem[], category: QuotationItem["c
   if (isOtherCategory(category)) return [];
   const itemSpaces = items.filter((item) => sameQuoteCategory(item.category, category)).map((item) => inferItemSpace(item));
   return uniqueValues([...customSpaces, ...itemSpaces]);
+}
+
+function getFeeScopeOptions(items: QuotationItem[], customSpaces: string[], categories: string[]) {
+  return uniqueValues([
+    ...customSpaces,
+    ...items
+      .filter((item) => !isOtherCategory(item.category))
+      .map((item) => inferItemSpace(item)),
+    ...categories
+      .filter((category) => isDirectItemCategory(category))
+      .map((category) => getFeeScopeCategoryLabel(category)),
+    ...items
+      .filter((item) => !isOtherCategory(item.category))
+      .map((item) => getFeeScopeCategoryLabel(item.category)),
+  ]);
 }
 
 function getNextCopyName(source: string, spaces: string[]) {
@@ -1459,6 +1506,16 @@ function cloneItemForSpace(item: QuotationItem, space: string): QuotationItem {
 
 function buildFeeFormulaContext(items: QuotationItem[], categories: string[] = []): FeeFormulaContext {
   const orderedCategories = orderQuoteCategories([...categories, ...items.map((item) => item.category)]);
+  const directItems = items
+    .filter((item) => isDirectItemCategory(item.category))
+    .map((item) => ({
+      category: getFeeScopeCategoryKey(item.category),
+      categoryLabel: getFeeScopeCategoryLabel(item.category),
+      space: inferItemSpace(item),
+      total: getBaseOrMaterialItemTotal(item),
+      laborAmount: getBaseLaborSubtotal(item),
+      materialCostAmount: getBaseMaterialSubtotal(item),
+    }));
   const mainMaterialAmount = items
     .filter((item) => isMainMaterialCategory(item.category))
     .reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
@@ -1486,7 +1543,21 @@ function buildFeeFormulaContext(items: QuotationItem[], categories: string[] = [
     laborAmount,
     materialCostAmount,
     categoryAmounts,
+    directItems,
   };
+}
+
+function shouldShowAutoOtherFeeRule(item: QuotationItem) {
+  const name = String(item.name || "").trim();
+  return name === "工程直接费" || name === "直接费" || name === "工程总造价" || name === "总造价";
+}
+
+function getOtherFeeRuleDisplay(item: QuotationItem, total: number, context?: FeeFormulaContext) {
+  const remark = String(item.remark || "").trim();
+  if (!shouldShowAutoOtherFeeRule(item)) return remark;
+
+  const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context);
+  return remark ? `${remark}；${rule}` : rule;
 }
 
 function calculate(items: QuotationItem[], settings: QuotationDetail["settings"]) {
@@ -1719,6 +1790,7 @@ function calculateRawTotals(items: QuotationItem[], settings: QuotationDetail["s
 
 function makeSavePayload(
   title: string,
+  quotationType: string,
   terms: string,
   notes: string,
   customerVisibleNote: string,
@@ -1728,7 +1800,7 @@ function makeSavePayload(
   items: QuotationItem[],
 ) {
   const quoteCategories = getQuoteCategoriesForItems(settings?.quoteCategories || [], items);
-  return { title, terms, notes, customer_visible_note: customerVisibleNote, status, settings: { ...settings, managementFeeRate: 0, quoteSpaces: customSpaces, quoteCategories }, items: items.map(withoutClientKey) };
+  return { title, quotation_type: quotationType.trim().slice(0, 20), terms, notes, customer_visible_note: customerVisibleNote, status, settings: { ...settings, managementFeeRate: 0, quotationType: quotationType.trim().slice(0, 20), quoteSpaces: customSpaces, quoteCategories }, items: items.map(withoutClientKey) };
 }
 
 export default function QuotationDetailPage() {
@@ -1738,6 +1810,7 @@ export default function QuotationDetailPage() {
   const quotationId = params.id;
   const [data, setData] = useState<QuotationDetail | null>(null);
   const [items, setItems] = useState<QuotationItem[]>([]);
+  const [quotationType, setQuotationType] = useState("");
   const [settings, setSettings] = useState<QuotationDetail["settings"]>({
     managementFeeRate: 0,
     taxRate: 0,
@@ -1828,11 +1901,10 @@ export default function QuotationDetailPage() {
     buildingNo: "",
     unitNo: "",
     roomNo: "",
-    noRoomNumber: false,
-    areaSize: "",
-    decorationType: "",
-    notes: "",
-    customerVisibleNote: "",
+	    noRoomNumber: false,
+	    areaSize: "",
+	    quotationType: "",
+	    decorationType: "",
   });
   const [categoryCreateMenu, setCategoryCreateMenu] = useState<{ x: number; y: number } | null>(null);
   const [shareUrl, setShareUrl] = useState("");
@@ -1948,8 +2020,9 @@ export default function QuotationDetailPage() {
       nextItems,
     );
     nextSettings.quoteCategories = nextCategories;
-    const nextTitle = next.title || "装修报价单";
-    const nextTerms = next.terms || "报价有效期 15 天；最终施工范围以双方确认图纸和合同为准；增减项需双方签字确认。";
+	    const nextTitle = next.title || "装修报价单";
+	    const nextQuotationType = String(next.quotation_type || nextSettings.quotationType || "").trim();
+	    const nextTerms = next.terms || "报价有效期 15 天；最终施工范围以双方确认图纸和合同为准；增减项需双方签字确认。";
     const nextNotes = next.notes || "";
     const nextCustomerVisibleNote = String(next.customer_visible_note || "").trim();
     const nextStatus = next.status || "DRAFT";
@@ -1959,12 +2032,13 @@ export default function QuotationDetailPage() {
     setCustomSpaces(nextCustomSpaces);
     setManualSpaceCategories({});
     setActiveSpace((current) => current || allSpacesValue);
-    setTitle(nextTitle);
+	    setTitle(nextTitle);
+	    setQuotationType(nextQuotationType);
     setTerms(nextTerms);
     setNotes(nextNotes);
     setCustomerVisibleNote(nextCustomerVisibleNote);
     setStatus(nextStatus);
-    const nextSavedPayload = JSON.stringify(makeSavePayload(nextTitle, nextTerms, nextNotes, nextCustomerVisibleNote, nextStatus, nextSettings, nextCustomSpaces, nextItems));
+	    const nextSavedPayload = JSON.stringify(makeSavePayload(nextTitle, nextQuotationType, nextTerms, nextNotes, nextCustomerVisibleNote, nextStatus, nextSettings, nextCustomSpaces, nextItems));
     lastSavedPayloadRef.current = next.legacyManagementFeeMigrated || migration.migrated ? "" : nextSavedPayload;
     latestSavePayloadTextRef.current = nextSavedPayload;
     setAutoSaveStatus("idle");
@@ -2433,6 +2507,7 @@ export default function QuotationDetailPage() {
     [items, quoteCategories],
   );
   const activeSpaces = useMemo(() => getSpacesForCategory(items, activeCategory, customSpaces), [activeCategory, customSpaces, items]);
+  const feeScopeOptions = useMemo(() => getFeeScopeOptions(items, customSpaces, quoteCategories), [customSpaces, items, quoteCategories]);
   const spaceTabOptions = useMemo(
     () => uniqueValues([
       ...customSpaces,
@@ -2517,14 +2592,14 @@ export default function QuotationDetailPage() {
     () => items.map((item, index) => ({ item, index })).filter(({ item }) => isOtherCategory(item.category)),
     [items],
   );
-  const printQuotation = useMemo(
-    () => data ? { ...data, title, terms, customer_visible_note: customerVisibleNote, status } : data,
-    [customerVisibleNote, data, status, terms, title],
-  );
-  const savePayload = useMemo(
-    () => makeSavePayload(title, terms, notes, customerVisibleNote, status, settings, customSpaces, items),
-    [customSpaces, customerVisibleNote, items, notes, settings, status, terms, title],
-  );
+	  const printQuotation = useMemo(
+	    () => data ? { ...data, title, quotation_type: quotationType, terms, customer_visible_note: customerVisibleNote, status } : data,
+	    [customerVisibleNote, data, quotationType, status, terms, title],
+	  );
+	  const savePayload = useMemo(
+	    () => makeSavePayload(title, quotationType, terms, notes, customerVisibleNote, status, settings, customSpaces, items),
+	    [customSpaces, customerVisibleNote, items, notes, quotationType, settings, status, terms, title],
+	  );
   const savePayloadText = useMemo(() => JSON.stringify(savePayload), [savePayload]);
 
   useEffect(() => {
@@ -3317,7 +3392,7 @@ export default function QuotationDetailPage() {
       setData((current) => current ? { ...current, settings: nextSettings } : current);
       setBudgetCompilationUpdateNotice(null);
       setBudgetCompilationNoticeDismissed(false);
-      const nextSavedPayload = JSON.stringify(makeSavePayload(title, terms, notes, customerVisibleNote, status, nextSettings, customSpaces, items));
+      const nextSavedPayload = JSON.stringify(makeSavePayload(title, quotationType, terms, notes, customerVisibleNote, status, nextSettings, customSpaces, items));
       lastSavedPayloadRef.current = nextSavedPayload;
       latestSavePayloadTextRef.current = nextSavedPayload;
       setAutoSaveStatus("saved");
@@ -3379,11 +3454,10 @@ export default function QuotationDetailPage() {
       buildingNo: String(data.customer_building_no || "").trim(),
       unitNo: String(data.customer_unit_no || "").trim(),
       roomNo: String(data.customer_room_no || "").trim(),
-      noRoomNumber: Number(data.customer_no_room_number || 0) === 1,
-      areaSize: formatProjectInfoArea(data.customer_area_size ?? data.project_area),
-      decorationType: String(data.customer_decoration_type || "").trim(),
-      notes: String(data.notes || "").trim(),
-      customerVisibleNote: String(data.customer_visible_note || "").trim(),
+	      noRoomNumber: Number(data.customer_no_room_number || 0) === 1,
+	      areaSize: formatProjectInfoArea(data.customer_area_size ?? data.project_area),
+	      quotationType,
+	      decorationType: String(data.customer_decoration_type || "").trim(),
     });
     setProjectInfoOpen(true);
   };
@@ -3406,18 +3480,17 @@ export default function QuotationDetailPage() {
       buildingNo: String(data.customer_building_no || "").trim(),
       unitNo: String(data.customer_unit_no || "").trim(),
       roomNo: String(data.customer_room_no || "").trim(),
-      noRoomNumber: Number(data.customer_no_room_number || 0) === 1,
-      areaSize: formatProjectInfoArea(data.customer_area_size ?? data.project_area),
-      decorationType: String(data.customer_decoration_type || "").trim(),
-      notes: String(data.notes || "").trim(),
-      customerVisibleNote: String(data.customer_visible_note || "").trim(),
+	      noRoomNumber: Number(data.customer_no_room_number || 0) === 1,
+	      areaSize: formatProjectInfoArea(data.customer_area_size ?? data.project_area),
+	      quotationType,
+	      decorationType: String(data.customer_decoration_type || "").trim(),
     });
     setProjectInfoOpen(true);
     const nextParams = new URLSearchParams(searchParams.toString());
     nextParams.delete("editProjectInfo");
     const nextQuery = nextParams.toString();
     router.replace(nextQuery ? `/quotations/${quotationId}?${nextQuery}` : `/quotations/${quotationId}`, { scroll: false });
-  }, [data, isReadonly, loading, projectInfoOpen, quotationId, router, searchParams]);
+	  }, [data, isReadonly, loading, projectInfoOpen, quotationId, quotationType, router, searchParams]);
 
   const updateProjectInfoAddressText = (value: string) => {
     setProjectInfoForm((current) => ({
@@ -3479,16 +3552,16 @@ export default function QuotationDetailPage() {
           unit_no: projectInfoForm.noRoomNumber ? "" : projectInfoForm.unitNo.trim(),
           room_no: projectInfoForm.noRoomNumber ? "" : projectInfoForm.roomNo.trim(),
           no_room_number: projectInfoForm.noRoomNumber,
-          area_size: toNumber(projectInfoForm.areaSize),
-          decoration_type: projectInfoForm.decorationType.trim(),
-          quote_notes: projectInfoForm.notes.trim(),
-          customer_visible_note: projectInfoForm.customerVisibleNote.trim(),
+	          area_size: toNumber(projectInfoForm.areaSize),
+	          quotation_type: projectInfoForm.quotationType.trim(),
+	          decoration_type: projectInfoForm.decorationType.trim(),
         }),
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(payload?.message || "基础信息保存失败");
-      setProjectInfoOpen(false);
-      await load();
+	      setProjectInfoOpen(false);
+	      setQuotationType(projectInfoForm.quotationType.trim());
+	      await load();
       showAlert("已保存", "本次报价客户信息已更新。");
     } catch (error: any) {
       showAlert("保存失败", error?.message || "基础信息保存失败", "danger");
@@ -4696,18 +4769,14 @@ export default function QuotationDetailPage() {
                     <em>㎡</em>
                   </div>
                 </label>
-                <label className="quote-project-info-field">
-                  <span>装修类型</span>
-                  <input list="quote-project-decoration-types" value={projectInfoForm.decorationType} onChange={(event) => setProjectInfoForm((current) => ({ ...current, decorationType: event.target.value }))} placeholder="如：全包/半包" />
-                </label>
-                <label className="quote-project-info-field quote-project-info-span-2">
-                  <span>内部备注</span>
-                  <textarea value={projectInfoForm.notes} onChange={(event) => setProjectInfoForm((current) => ({ ...current, notes: event.target.value }))} placeholder="仅内部查看，如客户关注点、沟通记录、报价口径等" rows={3} />
-                </label>
-                <label className="quote-project-info-field quote-project-info-span-2">
-                  <span>客户附注</span>
-                  <textarea value={projectInfoForm.customerVisibleNote} onChange={(event) => setProjectInfoForm((current) => ({ ...current, customerVisibleNote: event.target.value }))} placeholder="会显示在报价单底部，如优惠说明、施工范围补充、特殊约定等" rows={3} />
-                </label>
+	                <label className="quote-project-info-field">
+	                  <span>装修类型</span>
+	                  <input list="quote-project-decoration-types" value={projectInfoForm.decorationType} onChange={(event) => setProjectInfoForm((current) => ({ ...current, decorationType: event.target.value }))} placeholder="如：全包/半包" />
+	                </label>
+	                <label className="quote-project-info-field">
+	                  <span>报价类型</span>
+	                  <input maxLength={20} value={projectInfoForm.quotationType} onChange={(event) => setProjectInfoForm((current) => ({ ...current, quotationType: event.target.value }))} placeholder="如：全包、半包、全案、局改等" />
+	                </label>
                 <datalist id="quote-project-decoration-types">
                   {quoteDecorationTypeOptions.map((option) => <option key={option} value={option} />)}
                 </datalist>
@@ -5742,6 +5811,7 @@ export default function QuotationDetailPage() {
             activeSpaceAmount={activeSpaceAmount}
             items={activeItems}
             spaceOptions={activeSpaces}
+            feeScopeOptions={feeScopeOptions}
             otherFeeRows={otherFeeRows}
             baseAmount={totals.baseAmount}
             materialAmount={totals.materialAmount}
@@ -7818,13 +7888,227 @@ export default function QuotationDetailPage() {
         }
         .quotation-detail-ui .quote-space-cell-select {
           justify-content: center;
-          padding-left: 10px !important;
-          padding-right: 8px !important;
+          min-height: 34px !important;
+          width: 100% !important;
+          margin: 0 !important;
+          padding-left: 24px !important;
+          padding-right: 24px !important;
+          border-color: transparent !important;
+          background: transparent !important;
+          color: #52647b !important;
+          box-shadow: none !important;
+          border-radius: 0 !important;
+        }
+        .quotation-detail-ui .quote-space-cell-select > div {
+          justify-content: center !important;
+          position: relative;
+        }
+        .quotation-detail-ui .quote-space-cell-select > div > span {
+          flex: 1 1 auto;
+          text-align: center;
+        }
+        .quotation-detail-ui .quote-space-cell-select > div > svg {
+          position: absolute;
+          right: 0;
+        }
+        .quotation-detail-ui .quote-space-cell-select:hover {
+          border-color: transparent !important;
+          background: #f6f9fc !important;
+          color: #34445a !important;
+        }
+        .quotation-detail-ui .quote-space-cell-select[aria-expanded="true"],
+        .quotation-detail-ui .quote-space-cell-select:focus,
+        .quotation-detail-ui .quote-space-cell-select:focus-within {
+          border-color: transparent !important;
+          background: #eef4ff !important;
+          color: var(--quote-primary) !important;
+          box-shadow: inset 0 0 0 1px rgba(64, 122, 255, 0.28) !important;
         }
         .quotation-detail-ui .quote-fee-method-select {
           min-width: 104px !important;
-          padding-left: 10px !important;
+          height: 32px !important;
+          min-height: 32px !important;
+          width: auto !important;
+          margin: 4px auto !important;
+          border: 0 !important;
+          border-radius: 6px !important;
+          background: transparent !important;
+          padding-left: 8px !important;
           padding-right: 8px !important;
+          color: #34445a !important;
+          box-shadow: none !important;
+          font-size: 12px !important;
+          font-weight: 650 !important;
+          line-height: 1 !important;
+        }
+        .quotation-detail-ui .quote-fee-method-select > div {
+          position: relative !important;
+          justify-content: center !important;
+          padding-left: 18px !important;
+          padding-right: 18px !important;
+          text-align: center !important;
+        }
+        .quotation-detail-ui .quote-fee-method-select > div > span {
+          flex: 0 1 auto !important;
+          text-align: center !important;
+        }
+        .quotation-detail-ui .quote-fee-method-select > div > svg {
+          position: absolute !important;
+          right: 0 !important;
+        }
+        .quotation-detail-ui .quote-fee-method-select:hover {
+          border-color: transparent !important;
+          background: #f6f8fb !important;
+          color: #182230 !important;
+        }
+        .quotation-detail-ui .quote-fee-method-select[aria-expanded="true"],
+        .quotation-detail-ui .quote-fee-method-select:focus,
+        .quotation-detail-ui .quote-fee-method-select:focus-within {
+          border-color: transparent !important;
+          background: #f3f6fa !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui .quote-fee-scope-compact {
+          position: relative;
+          width: 100%;
+          min-width: 160px;
+        }
+        .quotation-detail-ui .quote-fee-scope-trigger {
+          display: inline-flex;
+          height: 32px;
+          width: calc(100% - 8px);
+          margin: 4px auto;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          border-radius: 8px;
+          border: 0;
+          background: transparent;
+          padding: 0 6px;
+          color: #475467;
+          font-size: 12px;
+          font-weight: 650;
+          line-height: 1;
+          transition: background-color 0.15s ease, color 0.15s ease;
+        }
+        .quotation-detail-ui .quote-fee-scope-trigger:hover:not(:disabled) {
+          background: #f6f8fb;
+          color: #182230;
+        }
+        .quotation-detail-ui .quote-fee-scope-trigger-text {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .quotation-detail-ui .quote-fee-scope-popover {
+          position: fixed;
+          z-index: 10040;
+          width: 286px;
+          border-radius: 10px;
+          border: 1px solid #c8d4e4;
+          background: #fbfdff;
+          padding: 6px;
+          box-shadow: 0 10px 28px rgba(38, 56, 84, 0.08);
+        }
+        .quotation-detail-ui .quote-fee-scope-popover-segment {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 2px;
+          border-radius: 8px;
+          background: #f4f7fb;
+          padding: 3px;
+          margin-bottom: 6px;
+        }
+        .quotation-detail-ui .quote-fee-scope-popover-segment button {
+          display: flex;
+          height: 30px;
+          align-items: center;
+          justify-content: space-between;
+          border-radius: 7px;
+          padding: 0 8px;
+          color: #526275;
+          font-size: 12px;
+          font-weight: 650;
+        }
+        .quotation-detail-ui .quote-fee-scope-popover-segment button:hover {
+          background: rgba(255, 255, 255, 0.72);
+          color: #24364b;
+        }
+        .quotation-detail-ui .quote-fee-scope-popover-segment button[data-active] {
+          background: #ffffff;
+          color: #2563eb;
+          box-shadow: inset 0 0 0 1px #d8e5ff;
+        }
+        .quotation-detail-ui .quote-fee-scope-popover-list {
+          display: grid;
+          max-height: 176px;
+          grid-template-columns: 1fr;
+          gap: 2px;
+          overflow-y: auto;
+          border-top: 1px solid #e5edf7;
+          padding-top: 6px;
+        }
+        .quotation-detail-ui .quote-fee-scope-popover-list button {
+          display: inline-flex;
+          height: 30px;
+          min-width: 0;
+          align-items: center;
+          justify-content: flex-start;
+          gap: 6px;
+          border-radius: 7px;
+          border: 0;
+          background: transparent;
+          padding: 0 8px;
+          color: #536579;
+          font-size: 12px;
+          font-weight: 600;
+        }
+        .quotation-detail-ui .quote-fee-scope-popover-list button:hover {
+          background: #f5f8fc;
+          color: #24364b;
+        }
+        .quotation-detail-ui .quote-fee-scope-popover-list button[data-active] {
+          background: #eef5ff;
+          color: #1d4ed8;
+        }
+        .quotation-detail-ui .quote-fee-scope-mode-dot {
+          height: 7px;
+          width: 7px;
+          border-radius: 999px;
+          border: 1px solid #aeb9c8;
+        }
+        .quotation-detail-ui .quote-fee-scope-popover-segment button[data-active] .quote-fee-scope-mode-dot {
+          border-color: #407aff;
+          background: #407aff;
+        }
+        .quotation-detail-ui .quote-fee-scope-check {
+          display: inline-flex;
+          height: 12px;
+          width: 12px;
+          flex: 0 0 auto;
+          align-items: center;
+          justify-content: center;
+          border-radius: 3px;
+          border: 1px solid #b8c5d6;
+          color: #ffffff;
+        }
+        .quotation-detail-ui .quote-fee-scope-popover-list button[data-active] .quote-fee-scope-check {
+          border-color: #407aff;
+          background: #407aff;
+        }
+        .quotation-detail-ui .quote-fee-scope-kind {
+          flex: 0 0 auto;
+          color: #182230;
+          font-weight: 700;
+        }
+        .quotation-detail-ui .quote-fee-scope-empty {
+          grid-column: 1 / -1;
+          padding: 2px 4px;
+          color: #98a2b3;
+          font-size: 11px;
+          font-weight: 600;
+          text-align: center;
         }
         .quote-system-select-menu {
           z-index: 10020 !important;
@@ -8279,9 +8563,20 @@ export default function QuotationDetailPage() {
           font-weight: 500 !important;
         }
         .quote-library-picker-modal .quote-base-library-table tbody td .quote-library-special-tag {
-          color: #b45309 !important;
-          font-size: 10px !important;
-          font-weight: 700 !important;
+          display: inline-flex !important;
+          height: 17px !important;
+          min-width: 17px !important;
+          align-items: center !important;
+          justify-content: center !important;
+          border: 1px solid #fed7aa !important;
+          border-radius: 5px !important;
+          background: #fff7ed !important;
+          padding: 0 !important;
+          color: #c2410c !important;
+          font-size: 11px !important;
+          font-weight: 750 !important;
+          line-height: 1 !important;
+          box-shadow: none !important;
         }
         .quote-library-picker-modal .quote-base-library-table .quote-library-description-cell {
           display: block;
@@ -8317,7 +8612,7 @@ export default function QuotationDetailPage() {
           border-radius: 4px !important;
         }
         .quote-library-picker-modal .quote-library-special-tag {
-          border-radius: 999px !important;
+          border-radius: 5px !important;
         }
         .quote-library-picker-modal .quote-library-footer-summary {
           display: flex;
@@ -8540,6 +8835,32 @@ export default function QuotationDetailPage() {
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-other-fees .quote-table-shell > .thin-scroll-area {
           overflow-y: hidden !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-other-fees .quote-other-fees-table > thead > tr > th {
+          height: 44px !important;
+          min-height: 44px !important;
+          padding-top: 0 !important;
+          padding-bottom: 0 !important;
+          vertical-align: middle !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-other-fees .quote-other-fees-table > tbody > .quote-item-row {
+          height: 56px !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-other-fees .quote-other-fees-table > tbody > .quote-item-row > td {
+          height: 56px !important;
+          padding-top: 0 !important;
+          padding-bottom: 0 !important;
+          vertical-align: middle !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-other-fees .quote-fee-method-select,
+        .quotation-detail-ui.quote-workbench-shell .quote-section-other-fees .quote-fee-scope-trigger {
+          height: 40px !important;
+          min-height: 40px !important;
+          margin-top: 8px !important;
+          margin-bottom: 8px !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-other-fees .quote-cell-input {
+          min-height: 40px !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-footer {
           border-top: 0 !important;
@@ -10327,13 +10648,14 @@ function QuoteCategoryChooser({
   );
 }
 
-function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, spaceOptions, otherFeeRows, baseAmount, materialAmount, feeFormulaContext, isAllSpaceView, searchValue, onSearchChange, onAdd, onManualAdd, onOpenFindReplace, quotaUpdateEntry, categoryNavigation, useQuotaLibraryAction, selectedItemKeys, selectedItemCount, onToggleItemSelection, onToggleAllItemSelection, onDeleteSelectedItems, onChange, onOpenRowMenu, onReplaceBaseItem, readOnly, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onItemPointerDown }: {
+function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, spaceOptions, feeScopeOptions, otherFeeRows, baseAmount, materialAmount, feeFormulaContext, isAllSpaceView, searchValue, onSearchChange, onAdd, onManualAdd, onOpenFindReplace, quotaUpdateEntry, categoryNavigation, useQuotaLibraryAction, selectedItemKeys, selectedItemCount, onToggleItemSelection, onToggleAllItemSelection, onDeleteSelectedItems, onChange, onOpenRowMenu, onReplaceBaseItem, readOnly, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onItemPointerDown }: {
   title: string;
   category: QuotationItem["category"];
   activeSpace?: string;
   activeSpaceAmount: number;
   items: { item: QuotationItem; index: number }[];
   spaceOptions: string[];
+  feeScopeOptions: string[];
   otherFeeRows: { item: QuotationItem; index: number }[];
   baseAmount: number;
   materialAmount: number;
@@ -10532,8 +10854,9 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           items={items}
           otherFeeRows={otherFeeRows}
           showSpace={!isOther}
-          editableSpace={!!isAllSpaceView}
+          editableSpace={false}
           spaceOptions={spaceOptions}
+          feeScopeOptions={feeScopeOptions}
           isOtherFees={isOther}
           baseAmount={baseAmount}
           materialAmount={materialAmount}
@@ -10792,7 +11115,7 @@ function QuotaLibraryPickerModal({
                           <div className="quote-library-item-title min-w-0">
                             <div className="flex min-w-0 items-center gap-2">
                               <span className="whitespace-nowrap" title={item.name}>{item.name}</span>
-                              {item.isSpecialPrice && <span className="quote-library-special-tag shrink-0 bg-[#fff4e5] px-1.5 py-0.5 text-[11px] font-semibold text-[#b45309]">特价</span>}
+                              {item.isSpecialPrice && <span className="quote-library-special-tag shrink-0" title="特价项目">特</span>}
                             </div>
                           </div>
                         </td>
@@ -11841,12 +12164,159 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
   );
 }
 
-function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, spaceOptions, isOtherFees, baseAmount, materialAmount, feeFormulaContext, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
+const feeScopeModeOptions: Array<{ value: FeeScopeMode; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "exclude", label: "排除" },
+  { value: "include", label: "仅含" },
+];
+
+function FeeScopeSelector({
+  mode,
+  selectedNames,
+  options,
+  readOnly,
+  onModeChange,
+  onToggleName,
+}: {
+  mode: FeeScopeMode;
+  selectedNames: string[];
+  options: string[];
+  readOnly?: boolean;
+  onModeChange: (mode: FeeScopeMode) => void;
+  onToggleName: (name: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const [popoverPosition, setPopoverPosition] = useState({ left: 0, top: 0 });
+  const selectedSet = new Set(selectedNames);
+  const selectedText = selectedNames.length > 0 ? selectedNames.join("、") : "请选择范围";
+  const modeLabel = mode === "exclude" ? "排除" : mode === "include" ? "仅含" : "";
+  const summary = mode === "all" ? "全部计入" : `${modeLabel}：${selectedText}`;
+  const updatePopoverPosition = useCallback(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const width = 286;
+    const viewportPadding = 12;
+    const currentHeight = popoverRef.current?.offsetHeight;
+    const estimatedHeight = currentHeight || (mode === "all" ? 132 : Math.min(286, 114 + Math.min(Math.max(options.length, 1), 5) * 32));
+    const left = Math.min(Math.max(rect.left + rect.width / 2 - width / 2, viewportPadding), window.innerWidth - width - viewportPadding);
+    const hasRoomAbove = rect.top >= estimatedHeight + viewportPadding;
+    const top = hasRoomAbove ? rect.top - estimatedHeight - 6 : Math.min(rect.bottom + 6, window.innerHeight - estimatedHeight - viewportPadding);
+    setPopoverPosition({ left, top: Math.max(viewportPadding, top) });
+  }, [mode, options.length]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!wrapperRef.current?.contains(target) && !popoverRef.current?.contains(target)) {
+        setOpen(false);
+      }
+    };
+    updatePopoverPosition();
+    window.addEventListener("resize", updatePopoverPosition);
+    window.addEventListener("scroll", updatePopoverPosition, true);
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.removeEventListener("resize", updatePopoverPosition);
+      window.removeEventListener("scroll", updatePopoverPosition, true);
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [open, updatePopoverPosition]);
+
+  useEffect(() => {
+    if (open) updatePopoverPosition();
+  }, [open, mode, selectedNames.length, options.length, updatePopoverPosition]);
+
+  const popover = open && !readOnly && typeof document !== "undefined" ? createPortal(
+    <div className="quotation-detail-ui">
+      <div
+        ref={popoverRef}
+        className="quote-fee-scope-popover"
+        style={{ left: popoverPosition.left, top: popoverPosition.top }}
+      >
+        <div className="quote-fee-scope-popover-segment" role="group" aria-label="计费范围">
+          {feeScopeModeOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              data-active={mode === option.value || undefined}
+              onClick={() => {
+                onModeChange(option.value);
+                if (option.value === "all") setOpen(false);
+              }}
+            >
+              <span>{option.value === "all" ? "全部空间/类别都计入" : option.value === "exclude" ? "不计入选中的空间/类别" : "只计入选中的空间/类别"}</span>
+              <span className="quote-fee-scope-mode-dot" />
+            </button>
+          ))}
+        </div>
+        {mode !== "all" && (
+          <div className="quote-fee-scope-popover-list">
+            {options.length === 0 ? (
+              <span className="quote-fee-scope-empty">暂无可选范围</span>
+            ) : options.map((name) => {
+              const checked = selectedSet.has(name);
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  data-active={checked || undefined}
+                  onClick={() => onToggleName(name)}
+                  title={name}
+                >
+                  <span className="quote-fee-scope-check">{checked && <Check className="h-2.5 w-2.5" />}</span>
+                  <span className="truncate">{name}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body,
+  ) : null;
+
+  return (
+    <>
+      <div className="quote-fee-scope-compact" ref={wrapperRef}>
+        <button
+          ref={triggerRef}
+          type="button"
+          className="quote-fee-scope-trigger"
+          disabled={readOnly}
+          onClick={() => {
+            updatePopoverPosition();
+            setOpen((current) => !current);
+          }}
+          title={summary}
+        >
+          {mode === "all" ? (
+            <span className="quote-fee-scope-trigger-text">{summary}</span>
+          ) : (
+            <>
+              <span className="quote-fee-scope-kind">{modeLabel}</span>
+              <span className="quote-fee-scope-trigger-text">{selectedText}</span>
+            </>
+          )}
+          <ChevronDown className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      {popover}
+    </>
+  );
+}
+
+function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, spaceOptions, feeScopeOptions: feeScopeOptionsInput, isOtherFees, baseAmount, materialAmount, feeFormulaContext, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
   items: { item: QuotationItem; index: number }[];
   otherFeeRows: { item: QuotationItem; index: number }[];
   showSpace?: boolean;
   editableSpace?: boolean;
   spaceOptions: string[];
+  feeScopeOptions: string[];
   isOtherFees?: boolean;
   baseAmount: number;
   materialAmount: number;
@@ -11881,19 +12351,32 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
     [baseAmount, feeFormulaContext, isOtherFees, items, materialAmount, otherFeeRowMeta],
   );
   const itemKeys = useMemo(() => items.map(({ item, index }) => getQuotationItemKey(item, index)), [items]);
+  const feeScopeOptions = useMemo(() => {
+    const names = new Set<string>();
+    feeScopeOptionsInput.forEach((item) => {
+      const name = item.trim();
+      if (name) names.add(name);
+    });
+    otherFeeRows.forEach(({ item }) => {
+      parseFeeScopeValues(item.fee_scope_space_names).forEach((name) => names.add(name));
+    });
+    return Array.from(names);
+  }, [feeScopeOptionsInput, otherFeeRows]);
+  const toggleFeeScopeName = (index: number, item: QuotationItem, name: string) => {
+    const names = new Set(parseFeeScopeValues(item.fee_scope_space_names));
+    if (names.has(name)) names.delete(name);
+    else names.add(name);
+    onChange(index, { fee_scope_space_names: Array.from(names) });
+  };
 
   return (
     <ThinScrollArea className="quote-table-shell" scrollClassName={`quote-table-freeze-scroll ${isOtherFees ? "pb-2" : ""}`}>
-      <table className={`${isOtherFees ? "w-full text-sm" : "w-full border-collapse text-sm"} ${isOtherFees ? "min-w-[1220px]" : showSpace ? "min-w-[1430px]" : "min-w-[1310px]"}`}>
-        <thead className={`bg-surface-50 text-xs text-surface-500 ${isOtherFees ? "text-left" : "text-center font-semibold text-surface-600"}`}>
+      <table className={`w-full border-collapse text-sm ${isOtherFees ? "quote-other-fees-table min-w-[1400px]" : showSpace ? "min-w-[1430px]" : "min-w-[1310px]"}`}>
+        <thead className="bg-surface-50 text-center text-xs font-semibold text-surface-600">
           <tr>
-            {isOtherFees ? (
-              <QuoteIndexHeaderCell bordered={false} itemKeys={itemKeys} selectedItemKeys={selectedItemKeys} readOnly={readOnly} onToggleAll={onToggleAllItemSelection} />
-            ) : (
-              <QuoteIndexHeaderCell itemKeys={itemKeys} selectedItemKeys={selectedItemKeys} readOnly={readOnly} onToggleAll={onToggleAllItemSelection} />
-            )}
-            {showSpace && <th className={`${isOtherFees ? "" : "border border-surface-200"} w-32 px-4 py-1.5`}>空间/类别</th>}
-            <th className={`${isOtherFees ? "w-36" : "w-44 border border-surface-200"} px-4 py-1.5`}>{isOtherFees ? "费用名称" : "材料名称"}</th>
+            <QuoteIndexHeaderCell itemKeys={itemKeys} selectedItemKeys={selectedItemKeys} readOnly={readOnly} onToggleAll={onToggleAllItemSelection} />
+            {showSpace && <th className="w-32 border border-surface-200 px-4 py-1.5">空间/类别</th>}
+            <th className={`${isOtherFees ? "h-11 w-36 border border-surface-200 px-4 py-0 text-center" : "w-44 border border-surface-200 px-4 py-1.5"}`}>{isOtherFees ? "费用名称" : "材料名称"}</th>
             {!isOtherFees && (
               <>
                 <th className="w-40 border border-surface-200 py-1.5">规格</th>
@@ -11902,15 +12385,16 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
             )}
             {isOtherFees ? (
               <>
-                <th className="w-28 py-1.5">计算方式</th>
-                <th className="w-36 py-1.5">
+                <th className="h-11 w-28 border border-surface-200 py-0 text-center">计算方式</th>
+                <th className="h-11 w-36 border border-surface-200 py-0 text-center">
                   <span className="inline-flex items-center justify-center gap-1">
                     基础公式
                     <FeeFormulaHelp />
                   </span>
                 </th>
-                <th className="w-24 py-1.5">金额/比例</th>
-                <th className="w-48 py-1.5">公式</th>
+                <th className="h-11 w-24 border border-surface-200 py-0 text-center">金额/比例</th>
+                <th className="h-11 w-44 border border-surface-200 py-0 text-center">计费范围</th>
+                <th className="h-11 w-44 border border-surface-200 py-0 text-center">公式</th>
               </>
             ) : (
               <>
@@ -11919,9 +12403,9 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                 <th className="w-40 border border-surface-200 py-1.5">数量</th>
               </>
             )}
-            <th className={`${isOtherFees ? "w-32" : "w-28 border border-surface-200"} py-1.5`}>小计</th>
+            <th className={`${isOtherFees ? "h-11 w-32 border border-surface-200 py-0 text-center" : "w-28 border border-surface-200 py-1.5"}`}>小计</th>
             {!isOtherFees && <th className="w-52 border border-surface-200 py-1.5">备注</th>}
-            {isOtherFees && <th className="w-72 py-1.5">规则/说明</th>}
+            {isOtherFees && <th className="h-11 w-72 border border-surface-200 py-0">规则/说明</th>}
           </tr>
         </thead>
         <tbody className="divide-y divide-surface-100">
@@ -11947,7 +12431,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                 onContextMenu={readOnly ? undefined : (event) => onOpenRowMenu(event, index)}
                 className={`quote-item-row align-middle transition ${isDragging ? "opacity-45" : ""} ${recentlyMoved ? "quote-item-row-moved" : ""} ${dropBefore ? "quote-item-row-drop-before border-t-2 border-t-primary-500" : ""} ${dropAfter ? "quote-item-row-drop-after border-b-2 border-b-primary-500" : ""}`}
               >
-                <td className={`${isOtherFees ? "" : "border border-surface-200 text-surface-500"} px-1 py-1 text-center`} style={cellStyle}>
+                <td className={`${isOtherFees ? "h-14 py-0" : "py-1"} border border-surface-200 px-1 text-center text-surface-500`} style={cellStyle}>
                   <QuoteRowIndexCell
                     itemKey={itemKey}
                     label={isOtherFees ? feeMeta?.sequence || formatAlphaSequence(rowIndex) : rowIndex + 1}
@@ -11958,7 +12442,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                   />
                 </td>
                 {showSpace && (
-                  <td className={`${isOtherFees ? "" : "border border-surface-200"} ${editableSpace ? "p-0" : "px-4 py-1"} text-center text-sm font-medium text-surface-600`} style={cellStyle}>
+                  <td className={`border border-surface-200 ${editableSpace ? "p-0" : "px-4 py-1"} text-center text-sm font-medium text-surface-600`} style={cellStyle}>
                     {editableSpace ? (
                       <SpaceSelectCell value={inferItemSpace(item)} options={spaceOptions} onChange={(space) => onChange(index, { space })} readOnly={readOnly} />
                     ) : (
@@ -11966,7 +12450,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                     )}
                   </td>
                 )}
-                <td className={`${isOtherFees ? "w-36" : "border border-surface-200"} px-0 py-0 align-middle`} style={cellStyle}>
+                <td className={`${isOtherFees ? "h-14 w-36 border border-surface-200" : "border border-surface-200"} px-0 py-0 align-middle`} style={cellStyle}>
                   <QuoteNameTextarea value={item.name} onChange={(value) => onChange(index, { name: value })} className="px-4 text-center font-medium" readOnly={readOnly} special={isSpecialQuoteItem(item)} highlight={findReplaceHighlight?.field === "name" ? findReplaceHighlight : null} />
                 </td>
                 {!isOtherFees && (
@@ -11984,20 +12468,20 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                 )}
                 {isOtherFees ? (
                   <>
-	                    <td className="py-0" style={cellStyle}>
+	                    <td className="border border-surface-200 py-0" style={cellStyle}>
 	                      <SystemSelect
 	                        value={feeMethod}
                           disabled={readOnly}
 	                        onChange={(event) => onChange(index, getFeeCalcMethodPatch(event.target.value as FeeCalcMethod, item))}
 	                        onKeyDown={handleQuoteCellKeyDown}
-	                        className="quote-cell-editable quote-cell-input quote-cell-select quote-fee-method-select w-28"
+	                        className="quote-cell-editable quote-cell-input quote-cell-select quote-fee-method-select"
                           menuClassName="quote-system-select-menu"
                           optionClassName="quote-system-select-option"
 	                      >
                         {Object.entries(feeCalcMethodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                       </SystemSelect>
                     </td>
-	                    <td className="py-0" style={cellStyle}>
+	                    <td className="border border-surface-200 py-0" style={cellStyle}>
 	                      <div className="flex min-h-[34px] items-center">
 	                        <input
 	                          value={feeMethod === "fixed" ? "" : String(item.fee_calc_base ?? "")}
@@ -12005,14 +12489,14 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
 	                          disabled={readOnly || feeMethod === "fixed"}
 	                          onKeyDown={handleQuoteCellKeyDown}
 	                          aria-invalid={!!feeBaseError}
-	                          className={`quote-cell-editable quote-cell-input min-w-0 flex-1 disabled:text-surface-300 ${feeBaseError ? "bg-red-50 text-red-700 ring-1 ring-inset ring-red-400" : ""}`}
+	                          className={`quote-cell-editable quote-cell-input min-w-0 flex-1 text-center disabled:text-surface-300 ${feeBaseError ? "bg-red-50 text-red-700 ring-1 ring-inset ring-red-400" : ""}`}
 	                          placeholder={feeMethod === "fixed" ? "" : "如 直接费 或 A+B"}
 	                          title={feeBaseError || (feeMethod === "fixed" ? "" : "可输入 直接费、基装、产品、A+B、(直接费+A) 等")}
 	                        />
 	                      </div>
                         {feeBaseError && <div className="px-3 pb-1 text-xs font-medium text-red-600">{feeBaseError}</div>}
 	                    </td>
-                    <td className="py-0" style={cellStyle}>
+                    <td className="border border-surface-200 py-0" style={cellStyle}>
                       <QuoteNumberInput
                         value={feeMethod === "percent" ? item.fee_rate || 0 : item.unit_price}
                         onChange={(value) => {
@@ -12020,10 +12504,23 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                         }}
 	                        disabled={readOnly || feeMethod === "reference"}
 	                        emptyWhenDisabled={feeMethod === "reference"}
-	                        className="w-24 font-semibold text-red-600"
+	                        className="w-24 text-center font-semibold text-red-600"
 	                      />
                     </td>
-                    <td className={`py-1 text-xs font-medium ${feeBaseError ? "text-red-600" : "text-surface-500"}`} style={cellStyle}>{feeBaseError ? "无法计算" : getFeeFormulaText(item)}</td>
+	                    <td className="border border-surface-200 px-2 py-1" style={cellStyle}>
+	                      <FeeScopeSelector
+	                        mode={normalizeFeeScopeMode(item.fee_scope_mode)}
+	                        selectedNames={parseFeeScopeValues(item.fee_scope_space_names)}
+	                        options={feeScopeOptions}
+	                        readOnly={readOnly}
+	                        onModeChange={(mode) => onChange(index, {
+	                          fee_scope_mode: mode,
+	                          fee_scope_space_names: parseFeeScopeValues(item.fee_scope_space_names),
+	                        })}
+	                        onToggleName={(name) => toggleFeeScopeName(index, item, name)}
+	                      />
+	                    </td>
+                    <td className={`border border-surface-200 py-1 text-center text-xs font-medium ${feeBaseError ? "text-red-600" : "text-surface-500"}`} style={cellStyle}>{feeBaseError ? "无法计算" : getFeeFormulaText(item)}</td>
                   </>
                 ) : (
                   <>
@@ -12032,7 +12529,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                     <td className="border border-surface-200 py-0" style={cellStyle}><QuoteNumberInput value={item.quantity} onChange={(value) => onChange(index, { quantity: value })} className="w-40 text-center font-semibold text-red-600" disabled={readOnly} allowFormula /></td>
                   </>
                 )}
-                <td className={`${isOtherFees ? "" : "border border-surface-200 text-center"} py-1 font-semibold text-red-600`} style={cellStyle}>{feeBaseError ? "-" : formatQuoteAmount(feeTotal)}</td>
+                <td className="border border-surface-200 py-1 text-center font-semibold text-red-600" style={cellStyle}>{feeBaseError ? "-" : formatQuoteAmount(feeTotal)}</td>
                 {!isOtherFees && (
                   <td className="border border-surface-200 p-0 align-middle" style={cellStyle}>
                     <QuoteDescriptionCell
@@ -12047,8 +12544,8 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                   </td>
                 )}
                 {isOtherFees && (
-                  <td className="py-1 pr-3 text-xs font-medium leading-5 text-surface-500" style={cellStyle}>
-                    {feeBaseError || item.remark || getFeeRuleText(item, feeTotal, { currencySymbol: false, useGrouping: false }, feeFormulaContext)}
+                  <td className="border border-surface-200 px-3 py-1 text-xs font-medium leading-5 text-surface-500" style={cellStyle}>
+                    {feeBaseError || getOtherFeeRuleDisplay(item, feeTotal, feeFormulaContext)}
                   </td>
                 )}
               </tr>
@@ -12056,7 +12553,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
           })}
           {items.length === 0 && (
             <tr className="quote-empty-row">
-              <td colSpan={isOtherFees ? 8 : showSpace ? 10 : 9} className={`quote-empty-cell ${isOtherFees ? "" : "border border-surface-200"} px-4 py-0 text-center`}>
+              <td colSpan={isOtherFees ? 9 : showSpace ? 10 : 9} className="quote-empty-cell border border-surface-200 px-4 py-0 text-center">
                 <div className="quote-empty-state">
                   <p className="text-sm font-semibold text-[#34445a]">{emptyText}</p>
                   <p className="mt-1 text-xs leading-5 text-[#7c8aa0]">添加项目后，将在这里显示单价、数量、小计和备注。</p>

@@ -247,6 +247,7 @@ export interface TeamData {
   role: string;
   org_unit_id: string | null;
   org_unit_name: string | null;
+  quotation_access_org_unit_ids?: string | null | string[];
   employee_no: string | null;
   hire_date: string | null;
   notes: string | null;
@@ -338,6 +339,7 @@ export interface QuotationData {
   project_address?: string | null;
   project_area?: number | string | null;
   title?: string;
+  quotation_type?: string | null;
   customer_id?: string;
   is_unbound?: number | boolean;
   temp_customer_name?: string | null;
@@ -346,6 +348,7 @@ export interface QuotationData {
   temp_customer_address?: string | null;
   temp_customer_area?: number | string | null;
   temp_customer_decoration_type?: string | null;
+  quotation_decoration_type?: string | null;
   customer_name: string;
   customer_phone?: string | null;
   customer_weixin?: string | null;
@@ -377,16 +380,24 @@ export interface QuotationData {
   latest_change_count?: number;
 }
 
-export function useQuotations() {
+function buildQuotationListPath(deleted: boolean, orgUnitId?: string) {
+  const params = new URLSearchParams();
+  if (deleted) params.set("deleted", "1");
+  if (orgUnitId) params.set("org_unit_id", orgUnitId);
+  const query = params.toString();
+  return query ? `/api/quotations?${query}` : "/api/quotations";
+}
+
+export function useQuotations(orgUnitId = "") {
   return useQuery({
-    queryKey: ["quotations"],
-    queryFn: () => api.get<QuotationData[]>("/api/quotations"),
+    queryKey: ["quotations", orgUnitId || "all"],
+    queryFn: () => api.get<QuotationData[]>(buildQuotationListPath(false, orgUnitId)),
   });
 }
 
-export function useDeletedQuotations() {
+export function useDeletedQuotations(orgUnitId = "") {
   return useQuery({
-    queryKey: ["quotations", "deleted"],
-    queryFn: () => api.get<QuotationData[]>("/api/quotations?deleted=1"),
+    queryKey: ["quotations", "deleted", orgUnitId || "all"],
+    queryFn: () => api.get<QuotationData[]>(buildQuotationListPath(true, orgUnitId)),
   });
 }

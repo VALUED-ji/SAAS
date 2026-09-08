@@ -224,6 +224,7 @@ model Quotation {
   project     Project         @relation(fields: [projectId], references: [id])
   companyId   String
   company     Company         @relation(fields: [companyId], references: [id])
+  quotationType String?       @map("quotation_type")
   version     Int             @default(1)
   totalAmount Float
   discount    Float           @default(0)

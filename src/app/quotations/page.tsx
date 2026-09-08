@@ -34,6 +34,7 @@ import { useRouter } from "next/navigation";
 import { Plus, Search, Eye, Loader2, X, History, Copy, Send, Trash2, CheckCircle2, Link as LinkIcon, Pencil, RotateCcw, Printer, ReceiptText, Users, Phone, Home, Ruler, FileText, MapPin, UserPlus, Check, GitCompareArrows, ArrowUpRight, Minus, ListFilter } from "lucide-react";
 import { useDeletedQuotations, useQuotations } from "@/lib/queries";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { customerStatusLabels, normalizeCustomerStatus } from "@/lib/customerStatus";
 import { formatDateTime, parseAppDate } from "@/lib/utils";
 import { calculatePackageQuotePrice, formatPricingAmount, toPricingAmount } from "@/lib/quotaTemplatePricing";
@@ -46,8 +47,6 @@ import { createQuotationPrintPreviewUrl, createQuotationShareUrl } from "@/lib/q
 import {
   QuotationDialogState,
   QuotationSystemDialogModal,
-  QuotationTextDialogModal,
-  QuotationTextDialogState,
 } from "./quotation-list-dialogs";
 
 type CreateCustomerSnapshot = {
@@ -68,6 +67,15 @@ type CreateCustomerSnapshot = {
 type CreateQuotationMode = "customer" | "new_customer" | "temporary";
 type CopyQuotationTargetMode = "current" | "other";
 type CopyQuotationContentMode = "full" | "items_only";
+
+type QuotationOrgOption = {
+  id: string;
+  parent_id?: string | null;
+  name: string;
+  type?: string | null;
+  path?: string | null;
+  is_active?: number | string | boolean | null;
+};
 
 type QuotationChangeItem = {
   id: string;
@@ -131,8 +139,6 @@ type RecordProjectInfoForm = {
   noRoomNumber: boolean;
   areaSize: string;
   decorationType: string;
-  notes: string;
-  customerVisibleNote: string;
 };
 
 const emptyCreateCustomerSnapshot: CreateCustomerSnapshot = {
@@ -185,8 +191,6 @@ const emptyRecordProjectInfoForm: RecordProjectInfoForm = {
   noRoomNumber: false,
   areaSize: "",
   decorationType: "",
-  notes: "",
-  customerVisibleNote: "",
 };
 
 function buildEditableCustomerFromQuotationRecord(record: any) {
@@ -225,8 +229,6 @@ function buildRecordProjectInfoForm(record: any): RecordProjectInfoForm {
     noRoomNumber: record?.customer_no_room_number === true || record?.customer_no_room_number === 1,
     areaSize: formatCreateAreaInput(record?.customer_area_size ?? record?.project_area),
     decorationType: String(record?.customer_decoration_type || "").trim(),
-    notes: String(record?.notes || "").trim(),
-    customerVisibleNote: String(record?.customer_visible_note || "").trim(),
   };
 }
 
@@ -312,6 +314,11 @@ function getRecordSettings(record: any) {
     }
   }
   return rawSettings && typeof rawSettings === "object" ? rawSettings : {};
+}
+
+function getRecordQuotationType(record: any) {
+  const settings = getRecordSettings(record);
+  return String(record?.quotation_type || settings?.quotationType || "").trim();
 }
 
 function getRecordQuotaTemplateName(record: any) {
@@ -450,11 +457,36 @@ function clearQuotationReturnParams(params: URLSearchParams) {
   window.history.replaceState(null, "", nextQuery ? `/quotations?${nextQuery}` : "/quotations");
 }
 
+function hasBranchQuotaTemplateScope(template: QuotaTemplateOption) {
+  return template.autoScope?.scopeType === "branch" && Boolean(template.autoScope.orgUnitId || template.autoScope.branchOrgUnitId);
+}
+
+function isActiveQuotationOrg(option: QuotationOrgOption) {
+  return option.is_active === undefined || option.is_active === null || Number(option.is_active) !== 0;
+}
+
+function buildQuotationOrgPath(option: QuotationOrgOption, optionMap: Map<string, QuotationOrgOption>) {
+  if (option.path) return option.path;
+  const names: string[] = [];
+  const visited = new Set<string>();
+  let current: QuotationOrgOption | undefined = option;
+  while (current?.id && !visited.has(current.id)) {
+    visited.add(current.id);
+    if (current.name) names.unshift(current.name);
+    current = current.parent_id ? optionMap.get(current.parent_id) : undefined;
+  }
+  return names.join(" / ") || option.name;
+}
+
 export default function QuotationsPage() {
   const [search, setSearch] = useState("");
+  const [selectedOrgUnitId, setSelectedOrgUnitId] = useState("");
+  const [selectedQuotationStoreId, setSelectedQuotationStoreId] = useState("");
+  const [quotationOrgOptions, setQuotationOrgOptions] = useState<QuotationOrgOption[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [recordCustomerKey, setRecordCustomerKey] = useState("");
   const [customerId, setCustomerId] = useState("");
+  const [createLockedCustomerId, setCreateLockedCustomerId] = useState("");
   const [createMode, setCreateMode] = useState<CreateQuotationMode>("new_customer");
   const [createCustomerSearch, setCreateCustomerSearch] = useState("");
   const [createCustomerOptions, setCreateCustomerOptions] = useState<any[]>([]);
@@ -467,6 +499,7 @@ export default function QuotationsPage() {
   const [temporaryCustomer, setTemporaryCustomer] = useState({ name: "", phone: "", weixin: "", address: "", area: "", decoration_type: "" });
   const [createMapPickerOpen, setCreateMapPickerOpen] = useState(false);
   const [title, setTitle] = useState("装修报价单");
+  const [quotationType, setQuotationType] = useState("");
   const [createNotes, setCreateNotes] = useState("");
   const [createCustomerVisibleNote, setCreateCustomerVisibleNote] = useState("");
   const [quotaTemplates, setQuotaTemplates] = useState<QuotaTemplateOption[]>([]);
@@ -493,12 +526,13 @@ export default function QuotationsPage() {
   const [showRecycleBin, setShowRecycleBin] = useState(false);
   const [lockTooltip, setLockTooltip] = useState<{ top: number; left: number; text: string } | null>(null);
   const [systemDialog, setSystemDialog] = useState<QuotationDialogState | null>(null);
-  const [textDialog, setTextDialog] = useState<QuotationTextDialogState | null>(null);
   const [editingRecordCustomer, setEditingRecordCustomer] = useState<any | null>(null);
   const [editingRecordProjectInfo, setEditingRecordProjectInfo] = useState<any | null>(null);
   const [recordProjectInfoForm, setRecordProjectInfoForm] = useState<RecordProjectInfoForm>(emptyRecordProjectInfoForm);
   const [recordProjectInfoSaving, setRecordProjectInfoSaving] = useState(false);
   const [recordProjectInfoMapPickerOpen, setRecordProjectInfoMapPickerOpen] = useState(false);
+  const [editingQuotationType, setEditingQuotationType] = useState<{ id: string; value: string } | null>(null);
+  const [editingQuotationNotes, setEditingQuotationNotes] = useState<{ record: any; notes: string; customerVisibleNote: string } | null>(null);
   const [bindQuotation, setBindQuotation] = useState<any | null>(null);
   const [bindCustomerSearch, setBindCustomerSearch] = useState("");
   const [bindCustomerOptions, setBindCustomerOptions] = useState<any[]>([]);
@@ -519,12 +553,82 @@ export default function QuotationsPage() {
   const [changeLogs, setChangeLogs] = useState<QuotationChangeLog[]>([]);
   const [changeLogsLoading, setChangeLogsLoading] = useState(false);
   const [changeLogsError, setChangeLogsError] = useState("");
+  const recordListBodyRef = useRef<HTMLDivElement | null>(null);
   const openRecordsRequestRef = useRef("");
+  const createReturnRecordCustomerKeyRef = useRef("");
   const router = useRouter();
-  const { data: quotations, isLoading, refetch } = useQuotations();
-  const { data: deletedQuotations, refetch: refetchDeletedQuotations } = useDeletedQuotations();
+  const { user } = useAuth();
+  const { data: quotations, isLoading, refetch } = useQuotations(selectedOrgUnitId);
+  const { data: deletedQuotations, refetch: refetchDeletedQuotations } = useDeletedQuotations(selectedOrgUnitId);
   const isTemporaryQuotationMode = ENABLE_TEMPORARY_QUOTATION && createMode === "temporary";
   const isNewCustomerMode = createMode === "new_customer";
+  const visibleQuotationOrgOptions = useMemo(() => {
+    const rootOrgUnitIds = Array.from(new Set([
+      String(user?.org_unit_id || "").trim(),
+      ...((Array.isArray(user?.quotation_access_org_unit_ids) ? user.quotation_access_org_unit_ids : []) as string[]).map((id) => String(id || "").trim()),
+    ].filter(Boolean)));
+    if (rootOrgUnitIds.length === 0) return [];
+    const activeOptions = quotationOrgOptions.filter(isActiveQuotationOrg);
+    const childrenByParent = new Map<string, QuotationOrgOption[]>();
+    activeOptions.forEach((option) => {
+      const parentId = String(option.parent_id || "");
+      childrenByParent.set(parentId, [...(childrenByParent.get(parentId) || []), option]);
+    });
+    const visibleIds = new Set<string>();
+    const collect = (orgUnitId: string) => {
+      if (!orgUnitId || visibleIds.has(orgUnitId)) return;
+      const current = activeOptions.find((option) => option.id === orgUnitId);
+      if (!current) return;
+      visibleIds.add(orgUnitId);
+      (childrenByParent.get(orgUnitId) || []).forEach((child) => collect(child.id));
+    };
+    rootOrgUnitIds.forEach(collect);
+    const optionMap = new Map(activeOptions.map((option) => [option.id, option]));
+    return activeOptions
+      .filter((option) => visibleIds.has(option.id) && option.type === "store")
+      .map((option) => ({
+        id: option.id,
+        name: option.name,
+        label: buildQuotationOrgPath(option, optionMap),
+      }));
+  }, [quotationOrgOptions, user?.org_unit_id, user?.quotation_access_org_unit_ids]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.get<QuotationOrgOption[]>("/api/org")
+      .then((options) => {
+        if (!cancelled) setQuotationOrgOptions(Array.isArray(options) ? options : []);
+      })
+      .catch(() => {
+        if (!cancelled) setQuotationOrgOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedOrgUnitId) return;
+    if (!visibleQuotationOrgOptions.some((option) => option.id === selectedOrgUnitId)) {
+      setSelectedOrgUnitId("");
+    }
+  }, [selectedOrgUnitId, visibleQuotationOrgOptions]);
+
+  useEffect(() => {
+    if (!showCreate) return;
+    if (!visibleQuotationOrgOptions.length) {
+      if (selectedQuotationStoreId) setSelectedQuotationStoreId("");
+      return;
+    }
+    if (selectedQuotationStoreId && visibleQuotationOrgOptions.some((option) => option.id === selectedQuotationStoreId)) return;
+    if (selectedOrgUnitId && visibleQuotationOrgOptions.some((option) => option.id === selectedOrgUnitId)) {
+      setSelectedQuotationStoreId(selectedOrgUnitId);
+      return;
+    }
+    if (visibleQuotationOrgOptions.length === 1) {
+      setSelectedQuotationStoreId(visibleQuotationOrgOptions[0].id);
+    }
+  }, [selectedOrgUnitId, selectedQuotationStoreId, showCreate, visibleQuotationOrgOptions]);
 
   const confirmCreatedQuotationPersisted = async (quotationId: string) => {
     const id = String(quotationId || "").trim();
@@ -534,9 +638,10 @@ export default function QuotationsPage() {
       try {
         await api.get<any>(`/api/quotations/${id}`);
         const listResult = await refetch();
+        const listPath = selectedOrgUnitId ? `/api/quotations?org_unit_id=${encodeURIComponent(selectedOrgUnitId)}` : "/api/quotations";
         const nextRecords = Array.isArray(listResult.data)
           ? listResult.data
-          : await api.get<any[]>("/api/quotations");
+          : await api.get<any[]>(listPath);
         if (Array.isArray(nextRecords) && nextRecords.some((record: any) => String(record?.id || "") === id)) return;
       } catch (error) {
         if (attempt === 4) {
@@ -551,7 +656,7 @@ export default function QuotationsPage() {
   };
 
   useEffect(() => {
-    setQuotaTemplates(loadQuotaTemplatesFromStorage());
+    setQuotaTemplates(loadQuotaTemplatesFromStorage().filter(hasBranchQuotaTemplateScope));
   }, []);
 
   useEffect(() => {
@@ -561,7 +666,7 @@ export default function QuotationsPage() {
   useEffect(() => {
     if (!showCreate) return;
     let cancelled = false;
-    const localTemplates = loadQuotaTemplatesFromStorage();
+    const localTemplates = loadQuotaTemplatesFromStorage().filter(hasBranchQuotaTemplateScope);
     setQuotaTemplates([]);
     const loadTemplates = async () => {
       try {
@@ -569,7 +674,7 @@ export default function QuotationsPage() {
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data?.message || "读取预算模板失败");
         const serverTemplates = Array.isArray(data?.templates)
-          ? data.templates.map(normalizeQuotaTemplate).filter((template: QuotaTemplateOption | null): template is QuotaTemplateOption => Boolean(template && template.status !== "disabled"))
+          ? data.templates.map(normalizeQuotaTemplate).filter((template: QuotaTemplateOption | null): template is QuotaTemplateOption => Boolean(template && template.status !== "disabled" && hasBranchQuotaTemplateScope(template)))
           : [];
 	        if (!cancelled) setQuotaTemplates(serverTemplates);
       } catch {
@@ -944,10 +1049,10 @@ export default function QuotationsPage() {
     setChangeLogsLoading(false);
   };
   const filtered = (quotations ?? []).filter(
-    (q: any) => [q.project_name, getHouseText(q), q.customer_name, q.customer_phone, q.customer_weixin, q.designer_name, q.customer_decoration_type].some((value) => String(value || "").includes(search))
+    (q: any) => [q.project_name, getHouseText(q), q.customer_name, q.customer_phone, q.customer_weixin, q.designer_name, getRecordQuotationType(q), q.customer_decoration_type].some((value) => String(value || "").includes(search))
   );
   const deletedFiltered = (deletedQuotations ?? []).filter(
-    (q: any) => [q.project_name, getHouseText(q), q.customer_name, q.customer_phone, q.customer_weixin, q.designer_name, q.customer_decoration_type].some((value) => String(value || "").includes(search))
+    (q: any) => [q.project_name, getHouseText(q), q.customer_name, q.customer_phone, q.customer_weixin, q.designer_name, getRecordQuotationType(q), q.customer_decoration_type].some((value) => String(value || "").includes(search))
   );
   const getCustomerKey = (q: any) => q.is_unbound ? `unbound:${q.id}` : q.customer_id || q.customer_name || q.customer_phone || q.project_id || "";
   const quotationRecordsByCustomer = (quotations ?? []).reduce((groups: Record<string, any[]>, q: any) => {
@@ -978,7 +1083,7 @@ export default function QuotationsPage() {
     ...Object.values(activeCustomerGroups),
     ...Object.values(deletedOnlyCustomerGroups),
   ].map((records) => [...records].sort(sortActiveRecordRows)[0]);
-  const quotationPagination = useDataPagination(customerRows, search);
+  const quotationPagination = useDataPagination(customerRows, [search, selectedOrgUnitId].join("|"));
   const activeRecordRows = recordCustomerKey
     ? [...(quotationRecordsByCustomer[recordCustomerKey] || [])].sort(sortActiveRecordRows)
     : [];
@@ -1007,11 +1112,14 @@ export default function QuotationsPage() {
       fromQuotationId,
       params.get("t") || "",
     ].join(":");
-    clearQuotationReturnParams(params);
     if (!fromQuotationId) {
+      clearQuotationReturnParams(params);
       return;
     }
-    if (shouldOpenRecords && !targetCustomerId) return;
+    if (shouldOpenRecords && !targetCustomerId) {
+      clearQuotationReturnParams(params);
+      return;
+    }
     if (openRecordsRequestRef.current === requestKey) return;
     openRecordsRequestRef.current = requestKey;
 
@@ -1037,14 +1145,14 @@ export default function QuotationsPage() {
         const rows = [...activeRows, ...deletedRows];
         const returnedRecord = rows.find((record: any) => String(record?.id || "").trim() === fromQuotationId);
         const matchedCustomerId = String(returnedRecord?.customer_id || "").trim();
-        if (!returnedRecord || matchedCustomerId !== targetCustomerId) return;
         const targetRecord = rows.find((record: any) => String(record?.customer_id || "").trim() === targetCustomerId);
         const targetKey = targetRecord ? getCustomerKey(targetRecord) : "";
-        if (targetKey) {
+        if (targetKey && (!returnedRecord || matchedCustomerId === targetCustomerId)) {
           setRecordCustomerKey(targetKey);
           setShowRecycleBin(false);
         }
       }
+      clearQuotationReturnParams(params);
     };
 
     void handleReturnRefresh();
@@ -1066,28 +1174,14 @@ export default function QuotationsPage() {
     area_size: quickCustomer.area_size,
     decoration_type: quickCustomer.decoration_type,
   }), [quickCustomer]);
-  const quickCustomerPreview = useMemo(() => ({
-    id: "",
-    name: quickCustomer.name || "未命名客户",
-    designer_name: quickCustomer.designer_name,
-    phone: quickCustomer.phone,
-    weixin: quickCustomer.weixin,
-    address: quickCustomer.address,
-    address_location_name: quickCustomer.address_location_name,
-    address_location_address: quickCustomer.address_location_address,
-    address_latitude: quickCustomer.address_latitude,
-    address_longitude: quickCustomer.address_longitude,
-    building_no: quickCustomer.no_room_number ? "" : quickCustomer.building_no,
-    unit_no: quickCustomer.no_room_number ? "" : quickCustomer.unit_no,
-    room_no: quickCustomer.no_room_number ? "" : quickCustomer.room_no,
-    no_room_number: quickCustomer.no_room_number ? 1 : 0,
-    area_size: toPricingAmount(quickCustomer.area_size),
-    decoration_type: quickCustomer.decoration_type,
-  }), [quickCustomer]);
   const selectedCustomerPreview = useMemo(
     () => mergeCustomerSnapshot(selectedCustomer, createCustomerSnapshot),
     [createCustomerSnapshot, selectedCustomer],
   );
+  const selectedQuotationStore = visibleQuotationOrgOptions.find((option) => option.id === selectedQuotationStoreId) || null;
+  const selectedCustomerServiceStore = String(selectedCustomer?.service_store || selectedCustomer?.customer_service_store || "").trim();
+  const needsQuotationStoreSelection = isTemporaryQuotationMode || isNewCustomerMode || !selectedCustomerServiceStore;
+  const isCreateCustomerLocked = Boolean(createLockedCustomerId && selectedCustomer && customerId === createLockedCustomerId);
   const quotaTemplateMatches = useMemo(() => {
     return quotaTemplates.map((template) => ({
       template,
@@ -1115,12 +1209,79 @@ export default function QuotationsPage() {
   };
   const selectCreateCustomer = (customer: any) => {
     const snapshot = makeCreateCustomerSnapshot(customer);
+    setCreateLockedCustomerId("");
     setCustomerId(customer.id);
     setSelectedCustomer(customer);
     setCreateCustomerSnapshot(snapshot);
     setCreateMode("customer");
     setTitle(buildDefaultQuotationTitle(customer));
     setPackageQuoteAreaText(formatCreateAreaInput(snapshot.area_size));
+  };
+  const buildCreateCustomerFromRecord = (record: any) => {
+    const id = String(record?.customer_id || "").trim();
+    if (!id) return null;
+    return {
+      id,
+      name: String(record?.customer_name || "").trim(),
+      designer_name: String(record?.designer_name || "").trim(),
+      phone: String(record?.customer_phone || "").trim(),
+      weixin: String(record?.customer_weixin || "").trim(),
+      address: String(record?.customer_address || record?.project_address || "").trim(),
+      house_address: String(record?.customer_house_address || record?.project_address || "").trim(),
+      address_location_name: String(record?.customer_address_location_name || "").trim(),
+      address_location_address: String(record?.customer_address_location_address || "").trim(),
+      address_latitude: record?.customer_address_latitude ?? "",
+      address_longitude: record?.customer_address_longitude ?? "",
+      building_no: String(record?.customer_building_no || "").trim(),
+      unit_no: String(record?.customer_unit_no || "").trim(),
+      room_no: String(record?.customer_room_no || "").trim(),
+      no_room_number: record?.customer_no_room_number === true || record?.customer_no_room_number === 1,
+      area_size: record?.customer_area_size ?? record?.project_area ?? "",
+	      decoration_type: String(record?.customer_decoration_type || "").trim(),
+      service_store: String(record?.customer_service_store || record?.quotation_org_unit_name || "").trim(),
+      customer_service_store: String(record?.customer_service_store || record?.quotation_org_unit_name || "").trim(),
+      customer_service_store_org_unit_name: String(record?.customer_service_store_org_unit_name || record?.quotation_org_unit_name || "").trim(),
+    };
+  };
+  const openCreateQuotationForRecordCustomer = (record: any) => {
+    const customer = buildCreateCustomerFromRecord(record);
+    if (!customer) {
+      setMessage("当前预算记录没有绑定客户，无法直接新建报价");
+      return;
+    }
+    createReturnRecordCustomerKeyRef.current = recordCustomerKey || getCustomerKey(record);
+    const snapshot = makeCreateCustomerSnapshot(customer);
+    setCustomerId(customer.id);
+    setSelectedCustomer(customer);
+    setCreateCustomerSnapshot(snapshot);
+    setCreateMode("customer");
+    setQuickCustomer(emptyQuickCustomerDraft);
+    setTemporaryCustomer({ name: "", phone: "", weixin: "", address: "", area: "", decoration_type: "" });
+    setCreateCustomerSearch("");
+    setCreateCustomerOptions([]);
+    setCreateCustomerTotal(0);
+    setCreateCustomerMore(false);
+    setCreateLockedCustomerId(customer.id);
+    setSelectedQuotationStoreId(String(record?.quotation_org_unit_id || record?.customer_service_store_org_unit_id || record?.store_id || "").trim());
+	    setTitle(buildDefaultQuotationTitle(customer));
+	    setQuotationType("");
+	    setCreateNotes("");
+    setCreateCustomerVisibleNote("");
+    setSelectedTemplateId("");
+    setPackageQuoteAreaText(formatCreateAreaInput(snapshot.area_size));
+    setShowRecycleBin(false);
+    setRecordCustomerKey("");
+    setShowCreate(true);
+  };
+  const closeCreateQuotation = () => {
+    const returnRecordCustomerKey = createReturnRecordCustomerKeyRef.current;
+    createReturnRecordCustomerKeyRef.current = "";
+    setShowCreate(false);
+    setCreateLockedCustomerId("");
+    if (returnRecordCustomerKey) {
+      setRecordCustomerKey(returnRecordCustomerKey);
+      setShowRecycleBin(false);
+    }
   };
   const updateQuickCustomer = (patch: Partial<QuickCustomerDraft>) => {
     setQuickCustomer((prev) => {
@@ -1269,8 +1430,6 @@ export default function QuotationsPage() {
         no_room_number: recordProjectInfoForm.noRoomNumber,
         area_size: toPricingAmount(recordProjectInfoForm.areaSize),
         decoration_type: recordProjectInfoForm.decorationType.trim(),
-        quote_notes: recordProjectInfoForm.notes.trim(),
-        customer_visible_note: recordProjectInfoForm.customerVisibleNote.trim(),
       });
       setEditingRecordProjectInfo(null);
       setRecordProjectInfoForm(emptyRecordProjectInfoForm);
@@ -1480,19 +1639,65 @@ export default function QuotationsPage() {
   });
 
   const updateQuotationNotes = (record: any) => {
-    setTextDialog({
-      title: "编辑报价备注",
-      description: "备注会保存到当前报价记录，便于后续查找和交接。",
-      label: "报价备注",
-      defaultValue: record.notes || "",
-      placeholder: "请输入报价备注",
-      confirmText: "保存",
-      onConfirm: (notes) => {
-        runRecordAction(record.id, async () => {
-          await api.post(`/api/quotations/${record.id}`, { action: "updateNotes", notes });
-        });
-      },
+    setEditingQuotationNotes({
+      record,
+      notes: String(record?.notes || "").trim(),
+      customerVisibleNote: String(record?.customer_visible_note || "").trim(),
     });
+  };
+
+  const closeQuotationNotesEditor = () => {
+    if (editingQuotationNotes?.record && recordActionId === editingQuotationNotes.record.id) return;
+    setEditingQuotationNotes(null);
+  };
+
+  const submitQuotationNotes = () => {
+    if (!editingQuotationNotes?.record) return;
+    const record = editingQuotationNotes.record;
+    const notes = editingQuotationNotes.notes.trim();
+    const customerVisibleNote = editingQuotationNotes.customerVisibleNote.trim();
+    setEditingQuotationNotes(null);
+    runRecordAction(record.id, async () => {
+      await api.post(`/api/quotations/${record.id}`, { action: "updateNotes", notes, customer_visible_note: customerVisibleNote });
+    });
+  };
+
+  const startEditQuotationType = (record: any) => {
+    if (showRecycleBin || recordActionId) return;
+    setEditingQuotationType({ id: String(record.id), value: getRecordQuotationType(record) });
+  };
+
+  const cancelEditQuotationType = () => {
+    setEditingQuotationType(null);
+  };
+
+  const saveQuotationType = async (record: any) => {
+    const recordId = String(record?.id || "");
+    if (!recordId || editingQuotationType?.id !== recordId || recordActionId) return;
+    const nextQuotationType = editingQuotationType.value.trim().slice(0, 20);
+    if (nextQuotationType === getRecordQuotationType(record)) {
+      setEditingQuotationType(null);
+      return;
+    }
+    const previousScrollTop = recordListBodyRef.current?.scrollTop ?? null;
+    setRecordActionId(recordId);
+    setMessage("");
+    try {
+      await api.post(`/api/quotations/${recordId}`, { action: "updateQuotationType", quotation_type: nextQuotationType });
+      await refetch();
+      await refetchDeletedQuotations();
+      if (previousScrollTop !== null) {
+        requestAnimationFrame(() => {
+          if (recordListBodyRef.current) recordListBodyRef.current.scrollTop = previousScrollTop;
+        });
+      }
+      setEditingQuotationType(null);
+      setMessage("已保存报价类型");
+    } catch (err: any) {
+      setMessage(err.message || "保存报价类型失败");
+    } finally {
+      setRecordActionId("");
+    }
   };
 
   const deleteQuotation = (record: any) => {
@@ -1711,11 +1916,27 @@ export default function QuotationsPage() {
                 className="quotation-index-input w-full border bg-white pl-9 pr-3 outline-none transition placeholder:text-[#9CA3AF] focus:border-[#407AFF] focus:ring-[3px] focus:ring-[#407AFF]/20"
               />
             </div>
+            <SystemSelect
+              value={selectedOrgUnitId}
+              onChange={(event) => setSelectedOrgUnitId(event.target.value)}
+              className="quotation-index-org-filter quotation-index-input border bg-white px-3 outline-none transition"
+              menuClassName="quotation-index-org-filter-menu"
+              searchable={visibleQuotationOrgOptions.length > 8}
+              searchPlaceholder="搜索组织"
+              menuMinWidth={360}
+            >
+              <option value="">全部组织</option>
+              {visibleQuotationOrgOptions.map((option) => (
+                <option key={option.id} value={option.id} data-selected-label={option.name}>{option.label}</option>
+              ))}
+            </SystemSelect>
             <button
-              onClick={() => {
-                setCustomerId("");
-                setCreateMode("new_customer");
-                setSelectedCustomer(null);
+	              onClick={() => {
+	                createReturnRecordCustomerKeyRef.current = "";
+	                setCustomerId("");
+	                setCreateLockedCustomerId("");
+	                setCreateMode("new_customer");
+	                setSelectedCustomer(null);
                 setCreateCustomerSnapshot(emptyCreateCustomerSnapshot);
                 setQuickCustomer(emptyQuickCustomerDraft);
                 setTemporaryCustomer({ name: "", phone: "", weixin: "", address: "", area: "", decoration_type: "" });
@@ -1723,8 +1944,10 @@ export default function QuotationsPage() {
                 setCreateCustomerOptions([]);
                 setCreateCustomerTotal(0);
                 setCreateCustomerMore(false);
-                setTitle("装修报价单");
-                setCreateNotes("");
+	                setSelectedQuotationStoreId(selectedOrgUnitId || (visibleQuotationOrgOptions.length === 1 ? visibleQuotationOrgOptions[0].id : ""));
+	                setTitle("装修报价单");
+	                setQuotationType("");
+	                setCreateNotes("");
                 setCreateCustomerVisibleNote("");
                 setSelectedTemplateId("");
                 setPackageQuoteAreaText("");
@@ -1741,7 +1964,7 @@ export default function QuotationsPage() {
 
       <section className="quotation-index-table-panel flex min-h-0 flex-1 flex-col overflow-hidden">
         <ThinScrollArea className="min-h-0 flex-1" scrollClassName="h-full">
-          <table className="quotation-list-table w-full min-w-[1420px] table-fixed border-separate border-spacing-0 text-sm">
+          <table className="quotation-list-table w-full min-w-[1424px] table-fixed border-separate border-spacing-0 text-sm">
             <colgroup>
               <col className="w-[68px]" />
               <col className="w-[260px]" />
@@ -1750,10 +1973,10 @@ export default function QuotationsPage() {
               <col className="w-[146px]" />
               <col className="w-[96px]" />
               <col className="w-[130px]" />
-              <col className="w-[116px]" />
               <col className="w-[124px]" />
               <col className="w-[104px]" />
               <col className="w-[150px]" />
+              <col className="w-[130px]" />
               <col className="w-[134px]" />
             </colgroup>
             <thead className="sticky top-0 z-10 bg-[#EEF3F8]">
@@ -1765,10 +1988,10 @@ export default function QuotationsPage() {
                 <th className="quotation-index-th quotation-index-center">手机号</th>
                 <th className="quotation-index-th quotation-index-center">面积</th>
                 <th className="quotation-index-th quotation-index-number">合同金额</th>
-                <th className="quotation-index-th quotation-index-center">报价类型</th>
                 <th className="quotation-index-th quotation-index-center">合同状态</th>
                 <th className="quotation-index-th quotation-index-center">报价份数</th>
                 <th className="quotation-index-th quotation-index-center">最新报价日期</th>
+                <th className="quotation-index-th quotation-index-center">门店</th>
                 <th className="quotation-index-th quotation-sticky-action sticky right-0 z-20 whitespace-nowrap">报价记录</th>
               </tr>
             </thead>
@@ -1797,13 +2020,6 @@ export default function QuotationsPage() {
 	                    <td className="quotation-index-td quotation-index-center">{getAreaText(q)}</td>
 	                    <td className="quotation-index-td quotation-index-amount quotation-index-number tabular-nums">{formatRecordAmount(getSignedContractAmount(q))}</td>
 	                    <td className="quotation-index-td quotation-index-center">
-	                      {q.customer_decoration_type ? (
-	                        <span className="quotation-index-tag quotation-index-tag-neutral">
-	                          {q.customer_decoration_type}
-	                        </span>
-	                      ) : "-"}
-	                    </td>
-	                    <td className="quotation-index-td quotation-index-center">
 	                      <span className={`quotation-index-tag ${getContractStatusClass(q)}`}>
 	                        {formatContractStatus(q)}
 	                      </span>
@@ -1813,6 +2029,11 @@ export default function QuotationsPage() {
 	                    </td>
 	                    <td className="quotation-index-td quotation-index-center tabular-nums">
 	                      {formatQuoteDateTime(getLatestQuoteDate(q))}
+	                    </td>
+	                    <td className="quotation-index-td quotation-index-center">
+	                      <span className="block truncate" title={q.customer_service_store_org_unit_name || q.customer_service_store || ""}>
+	                        {q.customer_service_store_org_unit_name || q.customer_service_store || "-"}
+	                      </span>
 	                    </td>
 	                    <td className="quotation-index-td quotation-sticky-action sticky right-0 bg-white text-center">
 	                      <button
@@ -1831,7 +2052,7 @@ export default function QuotationsPage() {
                 );
               }) : (
 	                <tr className="quotation-index-empty-row">
-	                  <td colSpan={12} className="quotation-index-empty-cell h-[360px] py-14 text-center">
+	                  <td colSpan={13} className="quotation-index-empty-cell h-[360px] py-14 text-center">
 	                    <div className="mx-auto max-w-sm px-6 py-8">
 	                      <span className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-[8px] border border-[#D6E2F1] bg-[#F8FBFF] text-[#407AFF]">
 	                        <ReceiptText className="h-7 w-7" />
@@ -1860,8 +2081,8 @@ export default function QuotationsPage() {
       {recordCustomerKey && (
         <div className="fixed bottom-0 right-0 top-0 z-50 flex items-center justify-center bg-[#111827]/28 p-4 md:left-[var(--active-sidebar-width)] md:p-6 max-md:left-0">
           <div className="quotation-record-modal-v2 flex min-h-[520px] max-h-[min(760px,calc(100dvh-72px))] w-full max-w-[1440px] flex-col overflow-hidden border border-[#d9e2ef] bg-white shadow-none">
-            <div className="quotation-record-unified-header shrink-0 px-5 py-4">
-            <div className="flex items-start justify-between gap-4">
+            <div className="quotation-record-unified-header relative shrink-0 px-5 py-4">
+            <div className="flex items-center justify-between gap-4">
               <div className="flex min-w-0 items-center gap-3">
                 <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[8px] bg-[#edf4ff] text-[#407aff]">
                   <ReceiptText className="h-4 w-4" />
@@ -1875,7 +2096,22 @@ export default function QuotationsPage() {
                   </p>
                 </div>
               </div>
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="absolute right-5 top-1/2 flex shrink-0 -translate-y-1/2 items-center gap-2">
+                {!showRecycleBin && activeRecordCustomer?.customer_id ? (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openCreateQuotationForRecordCustomer(activeRecordCustomer);
+                    }}
+                    className="group inline-flex h-10 items-center gap-2.5 rounded-[10px] border border-[#cfe0ff] bg-[#edf4ff] px-4 text-sm font-semibold text-[#245ee8] shadow-none transition hover:border-[#b8ceff] hover:bg-white hover:text-[#174ed9]"
+                  >
+                    <span className="inline-flex h-6 w-6 items-center justify-center rounded-[7px] border border-[#cfe0ff] bg-white text-[#407aff] shadow-none transition group-hover:bg-[#f3f7ff]">
+                      <Plus className="h-4 w-4" />
+                    </span>
+                    新建报价
+                  </button>
+                ) : null}
                 {!showRecycleBin && activeRecordCustomer?.id ? (
                   <button
                     type="button"
@@ -1884,31 +2120,31 @@ export default function QuotationsPage() {
                       openRecordCustomerEditor(activeRecordCustomer);
                     }}
                     disabled={!activeRecordCustomer?.customer_id}
-                    className="group inline-flex min-h-9 items-center gap-2 rounded-[9px] border border-[#bfe8d3] bg-[#f1fbf6] px-3 text-xs font-semibold text-[#167457] shadow-none transition hover:border-[#8fd8b0] hover:bg-white hover:text-[#0f5f47]"
+                    className="group inline-flex h-10 items-center gap-2.5 rounded-[10px] border border-[#bfe8d3] bg-[#f1fbf6] px-4 text-sm font-semibold text-[#167457] shadow-none transition hover:border-[#8fd8b0] hover:bg-white hover:text-[#0f5f47]"
                   >
-                    <span className="inline-flex h-5 w-5 items-center justify-center rounded-[6px] border border-[#bfe8d3] bg-white text-[#159863] shadow-none transition group-hover:bg-[#e8f8ef]">
-                      <Pencil className="h-3.5 w-3.5" />
+                    <span className="inline-flex h-6 w-6 items-center justify-center rounded-[7px] border border-[#bfe8d3] bg-white text-[#159863] shadow-none transition group-hover:bg-[#e8f8ef]">
+                      <Pencil className="h-4 w-4" />
                     </span>
-                    编辑资料
+                    编辑客户资料
                   </button>
                 ) : null}
                 <button
                   type="button"
                   onClick={() => setShowRecycleBin((value) => !value)}
-                  className={`group inline-flex min-h-9 items-center gap-2 rounded-[9px] border px-3 text-xs font-semibold shadow-none transition ${
+                  className={`group inline-flex h-10 items-center gap-2.5 rounded-[10px] border px-4 text-sm font-semibold shadow-none transition ${
                     showRecycleBin
                       ? "border-[#cfe0ff] bg-[#edf4ff] text-[#407aff] hover:bg-white"
                       : "border-[#d9e2ef] bg-white text-[#52647b] hover:border-[#b8c2d0] hover:bg-[#fbfcfe] hover:text-[#182230]"
                   }`}
                 >
-                  <span className={`inline-flex h-5 w-5 items-center justify-center rounded-[6px] border shadow-none transition ${
+                  <span className={`inline-flex h-6 w-6 items-center justify-center rounded-[7px] border shadow-none transition ${
                     showRecycleBin ? "border-[#cfe0ff] bg-white text-[#407aff]" : "border-[#d9e2ef] bg-[#f2f5f9] text-[#667085] group-hover:bg-white"
                   }`}>
-                    {showRecycleBin ? <History className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
+                    {showRecycleBin ? <History className="h-4 w-4" /> : <Trash2 className="h-4 w-4" />}
                   </span>
                   {showRecycleBin ? "返回记录" : `回收站 ${activeDeletedRecordRows.length}`}
                 </button>
-                <button type="button" onClick={() => setRecordCustomerKey("")} className="inline-flex h-9 w-9 items-center justify-center rounded-[8px] text-[#667085] transition hover:bg-[#f2f4f7] hover:text-[#182230]" aria-label="关闭报价记录">
+                <button type="button" onClick={() => setRecordCustomerKey("")} className="inline-flex h-10 w-10 items-center justify-center rounded-[10px] text-[#667085] transition hover:bg-[#f2f4f7] hover:text-[#182230]" aria-label="关闭报价记录">
                   <X className="h-4 w-4" />
                 </button>
               </div>
@@ -1934,7 +2170,7 @@ export default function QuotationsPage() {
                 </span>
               </div>
             ) : null}
-            <div className="quotation-record-list-body min-h-0 flex-1 overflow-y-auto bg-[#f8fafc] p-3 md:p-4">
+            <div ref={recordListBodyRef} className="quotation-record-list-body min-h-0 flex-1 overflow-y-auto bg-[#f8fafc] p-3 md:p-4">
               {visibleRecordRows.length > 0 ? (
                 <div className="space-y-3">
                   {visibleRecordRows.map((record: any) => {
@@ -1965,33 +2201,83 @@ export default function QuotationsPage() {
 	                      { label: "产品", amount: Number(record?.main_material_amount || 0) + Number(record?.custom_direct_amount || 0) },
 	                      { label: "综合费用", amount: Number(record?.other_amount || 0), alwaysShow: true },
 	                    ].filter((item) => Number.isFinite(item.amount) && (item.alwaysShow || Math.abs(item.amount) >= 0.01));
+	                    const quotationType = getRecordQuotationType(record);
 	                    const quotaTemplateName = getRecordQuotaTemplateName(record);
 	                    const actionBaseClass = "inline-flex h-8 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-[9px] border px-2.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50";
                     const secondaryActionClass = `${actionBaseClass} border-[#d7dfeb] bg-white text-[#475467] hover:border-[#b8c2d0] hover:bg-[#f8fafc] hover:text-[#182230] focus-visible:ring-[#407aff]/15`;
                     const softActionClass = `${actionBaseClass} border-[#dce4ef] bg-white text-[#52647b] hover:border-[#cfe0ff] hover:bg-[#f3f7ff] hover:text-[#245ee8] focus-visible:ring-[#407aff]/15`;
                     const dangerActionClass = `${actionBaseClass} border-[#f3c5c0] bg-white text-[#d92d20] hover:border-[#fda29b] hover:bg-[#fff6f5] focus-visible:ring-[#d92d20]/15`;
                     return (
-                      <article key={record.id} className={`quotation-record-card grid gap-4 border bg-white p-4 xl:grid-cols-[minmax(0,1fr)_minmax(520px,42%)] xl:items-center ${isJustPromotedFormal ? "quotation-record-card-promoted border-[#75d99a]" : "border-[#e2e7ee]"}`}>
-                        <div className="min-w-0">
-                          <div className="flex items-start justify-between gap-3 xl:block">
-	                            <div className="min-w-0">
-	                              {showRecycleBin ? (
-	                                <span className="block truncate text-sm font-semibold text-[#182230]" title={getBudgetRecordTitle(record)}>{getBudgetRecordTitle(record)}</span>
+                      <article key={record.id} className={`quotation-record-card grid min-h-[178px] gap-4 border bg-white p-5 pb-6 xl:grid-cols-[minmax(0,1fr)_minmax(520px,42%)] xl:items-center ${isJustPromotedFormal ? "quotation-record-card-promoted border-[#75d99a]" : "border-[#e2e7ee]"}`}>
+                        <div className="quotation-record-main min-w-0">
+	                          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+	                            <div className="min-w-0 max-w-full">
+	                              {editingQuotationType?.id === String(record.id) ? (
+	                                <input
+	                                  autoFocus
+	                                  maxLength={20}
+	                                  value={editingQuotationType.value}
+	                                  onChange={(event) => setEditingQuotationType((current) => current?.id === String(record.id) ? { ...current, value: event.target.value } : current)}
+	                                  onBlur={(event) => {
+	                                    if (event.currentTarget.dataset.skipSave === "true") return;
+	                                    void saveQuotationType(record);
+	                                  }}
+	                                  onKeyDown={(event) => {
+	                                    if (event.key === "Enter") {
+	                                      event.preventDefault();
+	                                      event.currentTarget.blur();
+	                                    }
+	                                    if (event.key === "Escape") {
+	                                      event.preventDefault();
+	                                      event.currentTarget.dataset.skipSave = "true";
+	                                      cancelEditQuotationType();
+	                                    }
+	                                  }}
+	                                  className="quotation-record-type-line h-8 w-full max-w-[240px] rounded-[8px] border border-[#9bbcff] bg-white px-2.5 text-base font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
+	                                  placeholder="输入报价名称"
+	                                />
+	                              ) : showRecycleBin ? (
+	                                <span className={`quotation-record-type-line block truncate text-base font-semibold ${quotationType ? "text-[#182230]" : "text-[#98a2b3]"}`} title={quotationType ? `报价名称：${quotationType}` : "未填写报价名称"}>{quotationType || "未填写报价名称"}</span>
 	                              ) : (
-	                                <Link href={`/quotations/${record.id}`} className="block truncate text-sm font-semibold text-[#182230] transition hover:text-[#407aff]" title={getBudgetRecordTitle(record)}>{getBudgetRecordTitle(record)}</Link>
+	                                <button
+	                                  type="button"
+	                                  onClick={() => startEditQuotationType(record)}
+	                                  className={`quotation-record-type-line block max-w-full truncate rounded-[7px] px-1 py-0.5 text-left text-base font-semibold transition hover:bg-[#f3f7ff] hover:text-[#407aff] ${quotationType ? "text-[#182230]" : "text-[#98a2b3]"}`}
+	                                  title={quotationType ? `点击编辑报价名称：${quotationType}` : "点击填写报价名称"}
+	                                >
+	                                  {quotationType || "未填写报价名称"}
+	                                </button>
 	                              )}
-	                              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[#667085]">
-	                                <span className="tabular-nums">{formatQuoteDateTime(getLatestQuoteDate(record))}</span>
-	                                <span className={`inline-flex max-w-full items-center gap-1.5 rounded-full border px-2 py-0.5 ${
-	                                  quotaTemplateName
-	                                    ? "border-[#cfe0ff] bg-[#f3f7ff] text-[#2f66e8]"
-	                                    : "border-[#e3e9f2] bg-[#f8fafc] text-[#98a2b3]"
-	                                }`} title={quotaTemplateName ? `定额模板：${quotaTemplateName}` : "未记录定额模板"}>
-	                                  <FileText className="h-3 w-3 shrink-0" />
-	                                  <span className="max-w-[220px] truncate">{quotaTemplateName || "未记录定额模板"}</span>
-	                                </span>
-	                              </div>
 	                            </div>
+	                            <span className={`quotation-record-template-tag inline-flex max-w-full -translate-y-1 items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs ${
+	                              quotaTemplateName
+	                                ? "border-[#cfe0ff] bg-[#f3f7ff] text-[#2f66e8]"
+	                                : "border-[#e3e9f2] bg-[#f8fafc] text-[#98a2b3]"
+	                            }`} title={quotaTemplateName ? `定额模板：${quotaTemplateName}` : "未记录定额模板"}>
+	                              <FileText className="h-3 w-3 shrink-0" />
+	                              <span className="max-w-[220px] truncate">{quotaTemplateName || "未记录定额模板"}</span>
+	                            </span>
+	                          </div>
+	                          <div className="mt-1 flex max-w-full flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-5 text-[#667085]">
+	                            <span className="shrink-0 tabular-nums">{formatQuoteDateTime(getLatestQuoteDate(record))}</span>
+	                            {record.latest_change_at ? (
+	                              <>
+	                                <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-[7px] bg-[#f4f7fb] px-2 py-1 text-[#52647b]">
+	                                  <History className="h-3.5 w-3.5 shrink-0 text-[#407aff]" />
+	                                  <span className="truncate">
+	                                    最近修改：{record.latest_change_user_name || "未知用户"} · {formatChangeLogDateTime(record.latest_change_at)} · {record.latest_change_summary || `修改 ${record.latest_change_count || 0} 项内容`}
+	                                  </span>
+	                                </span>
+	                                <button
+	                                  type="button"
+	                                  onClick={() => openQuotationChangeLogs(record)}
+	                                  className="inline-flex shrink-0 items-center gap-1 rounded-[7px] px-1.5 py-1 font-medium text-[#407aff] transition hover:bg-[#edf4ff]"
+	                                >
+	                                  查看变更
+	                                  <ArrowUpRight className="h-3.5 w-3.5" />
+	                                </button>
+	                              </>
+	                            ) : null}
 	                          </div>
                           {isJustPromotedFormal ? (
                             <span className="quotation-record-promoted-badge mt-3 inline-flex items-center gap-1.5 rounded-full border border-[#a6e7c0] bg-[#ecfdf3] px-2.5 py-1 text-xs font-semibold text-[#027a48]">
@@ -2014,28 +2300,25 @@ export default function QuotationsPage() {
                               </div>
                             ) : costSummary ? <span className="text-xs font-medium tabular-nums text-[#667085]">{costSummary}</span> : null}
                           </div>
-                          <button type="button" onClick={() => updateQuotationNotes(record)} className={`quotation-record-note mt-2 inline-flex max-w-full items-start gap-1.5 rounded-[7px] px-1.5 py-1 text-left text-xs leading-5 transition hover:bg-[#edf4ff] hover:text-[#407aff] ${record.notes ? "text-[#667085]" : "text-[#98a2b3]"}`} title={record.notes || "添加备注"}>
+                          <button
+                            type="button"
+                            onClick={() => updateQuotationNotes(record)}
+                            className={`quotation-record-note mt-2 inline-flex max-w-full items-start gap-1.5 rounded-[7px] px-1.5 py-1 text-left text-xs leading-5 transition hover:bg-[#edf4ff] hover:text-[#407aff] ${record.notes || record.customer_visible_note ? "text-[#667085]" : "text-[#98a2b3]"}`}
+                            title={[
+                              record.notes ? `内部备注：${record.notes}` : "内部备注：未填写",
+                              record.customer_visible_note ? `客户附注：${record.customer_visible_note}` : "客户附注：未填写",
+                            ].join("\n")}
+                          >
                             <Pencil className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                            <span className="truncate">{record.notes || "添加备注"}</span>
+                            <span className="truncate">
+                              {record.notes || record.customer_visible_note
+                                ? [
+                                    record.notes ? `备注：${record.notes}` : "",
+                                    record.customer_visible_note ? `附注：${record.customer_visible_note}` : "",
+                                  ].filter(Boolean).join(" / ")
+                                : "编辑报价备注"}
+                            </span>
                           </button>
-                          {record.latest_change_at ? (
-                            <div className="mt-2 flex max-w-full flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-5 text-[#667085]">
-                              <span className="inline-flex items-center gap-1.5 rounded-[7px] bg-[#f4f7fb] px-2 py-1 text-[#52647b]">
-                                <History className="h-3.5 w-3.5 text-[#407aff]" />
-                                <span className="truncate">
-                                  最近修改：{record.latest_change_user_name || "未知用户"} · {formatChangeLogDateTime(record.latest_change_at)} · {record.latest_change_summary || `修改 ${record.latest_change_count || 0} 项内容`}
-                                </span>
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => openQuotationChangeLogs(record)}
-                                className="inline-flex items-center gap-1 rounded-[7px] px-1.5 py-1 font-medium text-[#407aff] transition hover:bg-[#edf4ff]"
-                              >
-                                查看变更
-                                <ArrowUpRight className="h-3.5 w-3.5" />
-                              </button>
-                            </div>
-                          ) : null}
                         </div>
 
                         <div className="quotation-record-action-panel xl:justify-self-end xl:w-full">
@@ -2517,9 +2800,9 @@ export default function QuotationsPage() {
       )}
 
       {showCreate && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0f172a]/24 p-3 sm:p-5">
-          <div className="flex h-[min(860px,92vh)] w-full max-w-[1180px] flex-col overflow-hidden rounded-[16px] border border-[#d9e1ec] bg-[#f6f8fb] text-[12px] shadow-[0_24px_72px_rgba(15,23,42,0.22)] [&_button]:!text-[12px] [&_input]:!text-[12px] [&_label]:!text-[12px] [&_p]:!text-[12px] [&_select]:!text-[12px] [&_span]:!text-[12px] [&_strong]:!text-[12px] [&_textarea]:!text-[12px]">
-            <div className="flex shrink-0 items-center justify-between border-b border-[#d9e1ec] bg-white px-5 py-4">
+        <div className="quotation-create-overlay fixed inset-0 z-50 flex items-center justify-center bg-[#0f172a]/24 p-3 sm:p-5">
+          <div className="quotation-create-modal flex h-[min(920px,96vh)] w-full max-w-[1180px] flex-col overflow-hidden rounded-[16px] bg-white text-[12px] [&_button]:!text-[12px] [&_input]:!text-[12px] [&_label]:!text-[12px] [&_p]:!text-[12px] [&_select]:!text-[12px] [&_span]:!text-[12px] [&_strong]:!text-[12px] [&_textarea]:!text-[12px]">
+            <div className="quotation-create-header flex shrink-0 items-center justify-between border-b border-[#e5eaf2] !bg-white px-6 py-4">
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="flex h-8 w-8 items-center justify-center rounded-[10px] bg-[#edf4ff] text-[#407aff]">
@@ -2529,24 +2812,24 @@ export default function QuotationsPage() {
                 </div>
                 <p className="mt-1 text-xs font-semibold text-[#667085]">先精准定位客户，再配置标题、模板和备注。</p>
               </div>
-              <button onClick={() => setShowCreate(false)} className="rounded-[10px] p-2 text-[#667085] transition hover:bg-[#f2f4f7] hover:text-[#182230]" aria-label="关闭新建报价弹窗"><X className="h-4 w-4" /></button>
+              <button onClick={closeCreateQuotation} className="rounded-[10px] p-2 text-[#667085] transition hover:bg-[#f2f4f7] hover:text-[#182230]" aria-label="关闭新建报价弹窗"><X className="h-4 w-4" /></button>
             </div>
 
-            <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden lg:grid-cols-[460px_minmax(0,1fr)]">
-              <section className="flex min-h-0 flex-col border-b border-[#d9e1ec] bg-white lg:border-b-0 lg:border-r">
-                <div className="shrink-0 border-b border-[#e4e9f0] bg-white px-4 py-3">
+            <div className={`quotation-create-body grid min-h-0 flex-1 grid-cols-1 overflow-hidden bg-white ${isCreateCustomerLocked ? "lg:grid-cols-1" : "lg:grid-cols-[460px_minmax(0,1fr)]"}`}>
+              <section className={`quotation-create-left min-h-0 flex-col border-b border-[#e7e9ee] bg-white lg:border-b-0 lg:border-r ${isCreateCustomerLocked ? "hidden" : "flex"}`}>
+                <div className="quotation-create-left-head shrink-0 border-b border-[#e7e9ee] bg-white px-4 py-3">
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <div className="flex min-w-0 items-center gap-2">
-                      {isNewCustomerMode ? <UserPlus className="h-4 w-4 shrink-0 text-[#407aff]" /> : <Users className="h-4 w-4 shrink-0 text-[#407aff]" />}
-                      <p className="text-sm font-extrabold text-[#162033]">{isTemporaryQuotationMode ? "临时客户" : isNewCustomerMode ? "新建客户" : "选择客户"}</p>
-                    </div>
-                    {!isTemporaryQuotationMode && !isNewCustomerMode ? <span className="rounded-full bg-[#f2f4f7] px-2.5 py-1 text-xs font-bold tabular-nums text-[#475467]">
-                      {createCustomerCountLabel}
-                    </span> : isNewCustomerMode ? <span className="rounded-full bg-[#edf4ff] px-2.5 py-1 text-xs font-bold text-[#407aff]">同步建档</span> : <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-bold text-amber-700">未绑定</span>}
-                  </div>
-                  <div className="mb-3 grid grid-cols-2 rounded-[10px] bg-[#f2f4f7] p-1 text-xs font-bold">
-                    <button
-                      type="button"
+	                      {isNewCustomerMode ? <UserPlus className="h-4 w-4 shrink-0 text-[#407aff]" /> : <Users className="h-4 w-4 shrink-0 text-[#407aff]" />}
+	                      <p className="text-sm font-extrabold text-[#162033]">{isCreateCustomerLocked ? "当前客户" : isTemporaryQuotationMode ? "临时客户" : isNewCustomerMode ? "新建客户" : "选择客户"}</p>
+	                    </div>
+	                    {isCreateCustomerLocked ? <span className="rounded-full bg-[#edf4ff] px-2.5 py-1 text-xs font-bold text-[#407aff]">本客户新建</span> : !isTemporaryQuotationMode && !isNewCustomerMode ? <span className="rounded-full bg-[#f2f4f7] px-2.5 py-1 text-xs font-bold tabular-nums text-[#475467]">
+	                      {createCustomerCountLabel}
+	                    </span> : isNewCustomerMode ? <span className="rounded-full bg-[#edf4ff] px-2.5 py-1 text-xs font-bold text-[#407aff]">同步建档</span> : <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-bold text-amber-700">未绑定</span>}
+	                  </div>
+	                  {!isCreateCustomerLocked ? <div className="mb-3 grid grid-cols-2 rounded-[10px] bg-[#f2f4f7] p-1 text-xs font-bold">
+	                    <button
+	                      type="button"
                       onClick={() => {
                         setCreateMode("customer");
                         setTitle(selectedCustomer ? buildDefaultQuotationTitle(selectedCustomer) : "装修报价单");
@@ -2571,11 +2854,11 @@ export default function QuotationsPage() {
                         setPackageQuoteAreaText(formatCreateAreaInput(quickCustomer.area_size));
                       }}
                       className={`rounded-[8px] px-3 py-2 transition ${isNewCustomerMode ? "bg-white text-[#182230] shadow-sm" : "text-[#667085] hover:text-[#182230]"}`}
-                    >
-                      新建客户
-                    </button>
-                  </div>
-                  {ENABLE_TEMPORARY_QUOTATION && (
+	                    >
+	                      新建客户
+	                    </button>
+	                  </div> : null}
+	                  {!isCreateCustomerLocked && ENABLE_TEMPORARY_QUOTATION && (
                     <div className="mb-3 grid grid-cols-2 rounded-[10px] bg-[#f2f4f7] p-1 text-xs font-bold">
                       <button
                         type="button"
@@ -2604,7 +2887,11 @@ export default function QuotationsPage() {
                       </button>
                     </div>
                   )}
-                  {!isTemporaryQuotationMode && !isNewCustomerMode ? (
+	                  {isCreateCustomerLocked ? (
+	                    <p className="rounded-[10px] border border-[#cfe0ff] bg-[#f7faff] px-3 py-2 text-xs font-semibold leading-5 text-[#407aff]">
+	                      本次只为当前客户新增一份报价，不能切换或新建其他客户。
+	                    </p>
+	                  ) : !isTemporaryQuotationMode && !isNewCustomerMode ? (
                     <>
                       <div className="relative">
                         <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#98a2b3]" />
@@ -2630,8 +2917,35 @@ export default function QuotationsPage() {
                     </p>
                   )}
                 </div>
-                <div className="min-h-0 flex-1 overflow-y-auto bg-[#fbfcfe]">
-                  {isTemporaryQuotationMode ? (
+	                <div className="quotation-create-customer-list min-h-0 flex-1 overflow-y-auto bg-white">
+	                  {isCreateCustomerLocked && selectedCustomer && selectedCustomerPreview ? (
+	                    <div className="space-y-3 p-4">
+	                      <div className="rounded-[16px] border border-[#d9e1ec] bg-white p-4">
+	                        <p className="text-xs font-bold text-[#667085]">本次报价客户</p>
+	                        <p className="mt-1 truncate text-base font-extrabold text-[#162033]" title={selectedCustomer.name || "未命名客户"}>{selectedCustomer.name || "未命名客户"}</p>
+	                        <div className="mt-3 grid gap-2 text-xs font-semibold text-[#475467]">
+	                          <div className="rounded-[10px] bg-[#f8fafc] px-3 py-2">
+	                            <span className="mb-1 flex items-center gap-1.5 text-[#667085]"><Phone className="h-3.5 w-3.5" />联系方式</span>
+	                            <strong className="block truncate text-[#182230]">{createCustomerSnapshot.phone || selectedCustomer.weixin || "-"}</strong>
+	                          </div>
+	                          <div className="rounded-[10px] bg-[#f8fafc] px-3 py-2">
+	                            <span className="mb-1 flex items-center gap-1.5 text-[#667085]"><Home className="h-3.5 w-3.5" />地址房号</span>
+	                            <strong className="block truncate text-[#182230]" title={getCustomerHouseText(selectedCustomerPreview)}>{getCustomerHouseText(selectedCustomerPreview) || "-"}</strong>
+	                          </div>
+	                          <div className="grid grid-cols-2 gap-2">
+	                            <div className="rounded-[10px] bg-[#f8fafc] px-3 py-2">
+	                              <span className="mb-1 flex items-center gap-1.5 text-[#667085]"><Ruler className="h-3.5 w-3.5" />面积</span>
+	                              <strong className="block text-[#182230]">{getCustomerAreaValue(selectedCustomerPreview) ? `${formatPricingAmount(getCustomerAreaValue(selectedCustomerPreview), 0)}㎡` : "-"}</strong>
+	                            </div>
+	                            <div className="rounded-[10px] bg-[#f8fafc] px-3 py-2">
+	                              <span className="mb-1 flex items-center gap-1.5 text-[#667085]"><FileText className="h-3.5 w-3.5" />装修类型</span>
+	                              <strong className="block truncate text-[#182230]">{createCustomerSnapshot.decoration_type || "未填"}</strong>
+	                            </div>
+	                          </div>
+	                        </div>
+	                      </div>
+	                    </div>
+	                  ) : isTemporaryQuotationMode ? (
                     <div className="space-y-3 p-4">
                       <label className="block text-sm">
                         <span className="mb-1.5 block text-xs font-bold text-[#475467]">临时客户名称</span>
@@ -2646,7 +2960,7 @@ export default function QuotationsPage() {
                           placeholder="如：张先生、李女士"
                         />
                       </label>
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-3">
                         <label className="block text-sm">
                           <span className="mb-1.5 block text-xs font-bold text-[#475467]">手机号</span>
                           <input value={temporaryCustomer.phone} inputMode="numeric" maxLength={11} onChange={(event) => setTemporaryCustomer((prev) => ({ ...prev, phone: sanitizeCreatePhoneInput(event.target.value) }))} className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12" placeholder="手机号" />
@@ -2679,7 +2993,7 @@ export default function QuotationsPage() {
                           </button>
                         </div>
                       </label>
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-3">
                         <label className="block text-sm">
                           <span className="mb-1.5 block text-xs font-bold text-[#475467]">面积(㎡)</span>
                           <input
@@ -2692,10 +3006,6 @@ export default function QuotationsPage() {
                             className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
                             placeholder="面积"
                           />
-                        </label>
-                        <label className="block text-sm">
-                          <span className="mb-1.5 block text-xs font-bold text-[#475467]">装修类型</span>
-                          <input value={temporaryCustomer.decoration_type} onChange={(event) => setTemporaryCustomer((prev) => ({ ...prev, decoration_type: event.target.value }))} className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12" placeholder="如：全包/半包" />
                         </label>
                       </div>
                     </div>
@@ -2719,7 +3029,7 @@ export default function QuotationsPage() {
                           placeholder="手动填写设计师姓名"
                         />
                       </label>
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-3">
                         <label className="block text-sm">
                           <span className="mb-1.5 block text-xs font-bold text-[#475467]">手机号</span>
                           <input value={quickCustomer.phone} inputMode="numeric" maxLength={11} onChange={(event) => updateQuickCustomer({ phone: sanitizeCreatePhoneInput(event.target.value) })} className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12" placeholder="手机号" />
@@ -2729,7 +3039,7 @@ export default function QuotationsPage() {
                           <input value={quickCustomer.weixin} onChange={(event) => updateQuickCustomer({ weixin: event.target.value })} className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12" placeholder="微信号" />
                         </label>
                       </div>
-                      <label className="block text-sm">
+                      <div className="block text-sm">
                         <span className="mb-1.5 block text-xs font-bold text-[#475467]">小区/地址 <span className="text-red-500">*</span></span>
                         <div className="flex overflow-hidden rounded-[10px] border border-[#cfd7e3] bg-white transition focus-within:border-[#407aff] focus-within:ring-[3px] focus-within:ring-[#407aff]/12">
                           <input
@@ -2759,31 +3069,31 @@ export default function QuotationsPage() {
                             已保存实际地址定位
                           </p>
                         ) : null}
-                      </label>
-                      <div className="grid grid-cols-3 gap-3">
-                        <label className="block text-sm">
-                          <span className="mb-1.5 block text-xs font-bold text-[#475467]">楼栋</span>
-                          <input value={quickCustomer.building_no} disabled={quickCustomer.no_room_number} onChange={(event) => updateQuickCustomer({ building_no: event.target.value })} className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12 disabled:bg-[#f2f4f7] disabled:text-[#98a2b3]" placeholder="H7" />
-                        </label>
-                        <label className="block text-sm">
-                          <span className="mb-1.5 block text-xs font-bold text-[#475467]">单元</span>
-                          <input value={quickCustomer.unit_no} disabled={quickCustomer.no_room_number} onChange={(event) => updateQuickCustomer({ unit_no: event.target.value })} className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12 disabled:bg-[#f2f4f7] disabled:text-[#98a2b3]" placeholder="4" />
-                        </label>
-                        <label className="block text-sm">
-                          <span className="mb-1.5 block text-xs font-bold text-[#475467]">房室</span>
-                          <input value={quickCustomer.room_no} disabled={quickCustomer.no_room_number} onChange={(event) => updateQuickCustomer({ room_no: event.target.value })} className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12 disabled:bg-[#f2f4f7] disabled:text-[#98a2b3]" placeholder="1023" />
-                        </label>
                       </div>
-                      <label className="inline-flex items-center gap-2 text-xs font-bold text-[#667085]">
-                        <input
-                          type="checkbox"
-                          checked={quickCustomer.no_room_number}
-                          onChange={(event) => updateQuickCustomer({ no_room_number: event.target.checked })}
-                          className="material-checkbox"
-                        />
-                        暂无房号
-                      </label>
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <div className="grid grid-cols-3 gap-3">
+                          <span className="flex h-4 items-center text-xs font-bold leading-4 text-[#475467]">楼栋</span>
+                          <span className="flex h-4 items-center text-xs font-bold leading-4 text-[#475467]">单元</span>
+                          <span className="flex h-4 items-center justify-between gap-2 text-xs font-bold leading-4 text-[#475467]">
+                            <span className="leading-4">房室</span>
+                            <label className="inline-flex h-4 shrink-0 items-center gap-1.5 text-xs font-bold leading-4 text-[#667085]">
+                              <input
+                                type="checkbox"
+                                checked={quickCustomer.no_room_number}
+                                onChange={(event) => updateQuickCustomer({ no_room_number: event.target.checked })}
+                                className="m-0 h-3.5 w-3.5 shrink-0 rounded border border-[#98a2b3] accent-[#407aff]"
+                              />
+                              <span className="leading-4">暂无房号</span>
+                            </label>
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-3">
+                          <input value={quickCustomer.building_no} disabled={quickCustomer.no_room_number} onChange={(event) => updateQuickCustomer({ building_no: event.target.value })} className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12 disabled:bg-[#f2f4f7] disabled:text-[#98a2b3]" placeholder="H7" />
+                          <input value={quickCustomer.unit_no} disabled={quickCustomer.no_room_number} onChange={(event) => updateQuickCustomer({ unit_no: event.target.value })} className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12 disabled:bg-[#f2f4f7] disabled:text-[#98a2b3]" placeholder="4" />
+                          <input value={quickCustomer.room_no} disabled={quickCustomer.no_room_number} onChange={(event) => updateQuickCustomer({ room_no: event.target.value })} className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12 disabled:bg-[#f2f4f7] disabled:text-[#98a2b3]" placeholder="1023" />
+                        </div>
+                      </div>
+                      <div className="space-y-3">
                         <label className="block text-sm">
                           <span className="mb-1.5 block text-xs font-bold text-[#475467]">面积(㎡)</span>
                           <input
@@ -2796,10 +3106,6 @@ export default function QuotationsPage() {
                             className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
                             placeholder="面积"
                           />
-                        </label>
-                        <label className="block text-sm">
-                          <span className="mb-1.5 block text-xs font-bold text-[#475467]">装修类型</span>
-                          <input value={quickCustomer.decoration_type} onChange={(event) => updateQuickCustomer({ decoration_type: event.target.value })} className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12" placeholder="如：全包/半包" />
                         </label>
                       </div>
                     </div>
@@ -2864,9 +3170,9 @@ export default function QuotationsPage() {
                 </div>
               </section>
 
-              <section className="flex min-h-0 flex-col bg-[#f6f8fb]">
-                <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-5">
-                  <div className="flex min-h-full w-full flex-1 flex-col gap-4">
+              <section className="quotation-create-right flex min-h-0 flex-col bg-white">
+                <div className="quotation-create-right-scroll flex min-h-0 flex-1 flex-col overflow-y-auto p-5">
+                  <div className="quotation-create-right-stack flex min-h-full w-full flex-1 flex-col gap-4">
                     {isTemporaryQuotationMode ? (
                       <div className="rounded-[16px] border border-amber-200 bg-white p-4">
                         <div className="mb-3 flex items-center justify-between gap-3">
@@ -2892,73 +3198,11 @@ export default function QuotationsPage() {
                         </div>
                         <p className="mt-3 truncate rounded-[10px] bg-[#f8fafc] px-3 py-2 text-xs font-semibold text-[#667085]" title={temporaryCustomer.address}>{temporaryCustomer.address || "未填写小区/地址"}</p>
                       </div>
-                    ) : isNewCustomerMode ? (
-                      <div className="rounded-[16px] border border-[#d9e1ec] bg-white p-4">
-                        <div className="mb-3 flex items-center justify-between gap-3">
-                          <div>
-                            <p className="text-xs font-bold text-[#667085]">待建档客户</p>
-                            <p className="mt-1 text-base font-extrabold text-[#162033]">{quickCustomer.name || "未命名客户"}</p>
-                          </div>
-                          <span className="rounded-full bg-[#edf4ff] px-2.5 py-1 text-xs font-bold text-[#407aff]">创建后同步客户管理</span>
-                        </div>
-                        <div className="grid gap-2 text-xs font-semibold text-[#475467] sm:grid-cols-3">
-                          <div className="rounded-[10px] bg-[#f8fafc] px-3 py-2">
-                            <span className="mb-1 flex items-center gap-1.5 text-[#667085]"><Phone className="h-3.5 w-3.5" />联系方式</span>
-                            <strong className="block truncate text-[#182230]">{quickCustomer.phone || quickCustomer.weixin || "-"}</strong>
-                          </div>
-                          <div className="rounded-[10px] bg-[#f8fafc] px-3 py-2">
-                            <span className="mb-1 flex items-center gap-1.5 text-[#667085]"><Ruler className="h-3.5 w-3.5" />面积</span>
-                            <strong className="block text-[#182230]">{quickCustomer.area_size ? `${quickCustomer.area_size}㎡` : "-"}</strong>
-                          </div>
-                          <div className="rounded-[10px] bg-[#f8fafc] px-3 py-2">
-                            <span className="mb-1 flex items-center gap-1.5 text-[#667085]"><FileText className="h-3.5 w-3.5" />装修类型</span>
-                            <strong className="block truncate text-[#182230]">{quickCustomer.decoration_type || "未填"}</strong>
-                          </div>
-                        </div>
-                        <p className="mt-3 truncate rounded-[10px] bg-[#f8fafc] px-3 py-2 text-xs font-semibold text-[#475467]">
-                          设计师：<span className="text-[#182230]">{quickCustomer.designer_name || "-"}</span>
-                        </p>
-                        <p className="mt-3 truncate rounded-[10px] bg-[#f8fafc] px-3 py-2 text-xs font-semibold text-[#166534]" title={getCustomerHouseText(quickCustomerPreview)}>{getCustomerHouseText(quickCustomerPreview) || "未填写小区/地址"}</p>
-                      </div>
-                    ) : selectedCustomer && selectedCustomerPreview ? (
-                      <div className="rounded-[16px] border border-[#d9e1ec] bg-white p-4">
-                        <div className="mb-3 flex items-center justify-between gap-3">
-                          <div>
-                            <p className="text-xs font-bold text-[#667085]">已选客户</p>
-                            <p className="mt-1 text-base font-extrabold text-[#162033]">{selectedCustomer.name || "未命名客户"}</p>
-                          </div>
-                          <button type="button" onClick={() => { setCustomerId(""); setSelectedCustomer(null); setCreateCustomerSnapshot(emptyCreateCustomerSnapshot); }} className="rounded-[8px] border border-[#d5dae1] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#475467] transition hover:bg-[#f8fafc]">
-                            重新选择
-                          </button>
-                        </div>
-                        <div className="grid gap-2 text-xs font-semibold text-[#475467] sm:grid-cols-3">
-                          <div className="rounded-[10px] bg-[#f8fafc] px-3 py-2">
-                            <span className="mb-1 flex items-center gap-1.5 text-[#667085]"><Phone className="h-3.5 w-3.5" />联系方式</span>
-                            <strong className="block truncate text-[#182230]">{createCustomerSnapshot.phone || selectedCustomer.weixin || "-"}</strong>
-                          </div>
-                          <div className="rounded-[10px] bg-[#f8fafc] px-3 py-2">
-                            <span className="mb-1 flex items-center gap-1.5 text-[#667085]"><Ruler className="h-3.5 w-3.5" />面积</span>
-                            <strong className="block text-[#182230]">{getCustomerAreaValue(selectedCustomerPreview) ? `${formatPricingAmount(getCustomerAreaValue(selectedCustomerPreview), 0)}㎡` : "-"}</strong>
-                          </div>
-                          <div className="rounded-[10px] bg-[#f8fafc] px-3 py-2">
-                            <span className="mb-1 flex items-center gap-1.5 text-[#667085]"><FileText className="h-3.5 w-3.5" />装修类型</span>
-                            <strong className="block truncate text-[#182230]">{createCustomerSnapshot.decoration_type || "未填"}</strong>
-                          </div>
-                        </div>
-                        <p className="mt-3 truncate rounded-[10px] bg-[#f8fafc] px-3 py-2 text-xs font-semibold text-[#166534]" title={getCustomerHouseText(selectedCustomerPreview)}>{getCustomerHouseText(selectedCustomerPreview)}</p>
-                        <div className="mt-4 rounded-[14px] border border-[#e4e9f0] bg-[#fbfcfe] p-3">
-                          <div className="mb-3 flex items-center justify-between gap-3">
-                            <p className="text-xs font-extrabold text-[#475467]">本次报价客户信息</p>
-                            <label className="inline-flex items-center gap-1.5 text-xs font-bold text-[#667085]">
-                              <input
-                                type="checkbox"
-                                checked={createCustomerSnapshot.no_room_number}
-                                onChange={(event) => setCreateCustomerSnapshot((prev) => ({ ...prev, no_room_number: event.target.checked }))}
-                                className="material-checkbox"
-                              />
-                              暂无房号
-                            </label>
-                          </div>
+	                    ) : isNewCustomerMode ? null : selectedCustomer && selectedCustomerPreview && !isCreateCustomerLocked ? (
+	                      <div className="rounded-[16px] border border-[#d9e1ec] bg-white p-4">
+		                          <div className="mb-3">
+		                            <p className="text-xs font-extrabold text-[#475467]">本次报价客户信息</p>
+	                          </div>
                           <label className="mb-3 block text-sm">
                             <span className="mb-1.5 block text-xs font-bold text-[#667085]">小区/地址</span>
                             <div className="flex overflow-hidden rounded-[10px] border border-[#cfd7e3] bg-white transition focus-within:border-[#407aff] focus-within:ring-[3px] focus-within:ring-[#407aff]/12">
@@ -2984,32 +3228,43 @@ export default function QuotationsPage() {
                               </p>
                             ) : null}
                           </label>
-                          <div className="grid gap-3 sm:grid-cols-3">
-                            <label className="block text-sm">
-                              <span className="mb-1.5 block text-xs font-bold text-[#667085]">楼栋</span>
-                              <input
-                                value={createCustomerSnapshot.building_no}
-                                disabled={createCustomerSnapshot.no_room_number}
+	                          <div className="grid gap-3 sm:grid-cols-3">
+	                            <label className="block text-sm">
+	                              <span className="mb-1.5 flex h-5 items-center text-xs font-bold text-[#667085]">楼栋</span>
+	                              <input
+	                                value={createCustomerSnapshot.building_no}
+	                                disabled={createCustomerSnapshot.no_room_number}
                                 onChange={(event) => setCreateCustomerSnapshot((prev) => ({ ...prev, building_no: event.target.value }))}
                                 className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12 disabled:bg-[#f2f4f7] disabled:text-[#98a2b3]"
                                 placeholder="如：H7"
-                              />
-                            </label>
-                            <label className="block text-sm">
-                              <span className="mb-1.5 block text-xs font-bold text-[#667085]">单元</span>
-                              <input
-                                value={createCustomerSnapshot.unit_no}
-                                disabled={createCustomerSnapshot.no_room_number}
+	                              />
+	                            </label>
+	                            <label className="block text-sm">
+	                              <span className="mb-1.5 flex h-5 items-center text-xs font-bold text-[#667085]">单元</span>
+	                              <input
+	                                value={createCustomerSnapshot.unit_no}
+	                                disabled={createCustomerSnapshot.no_room_number}
                                 onChange={(event) => setCreateCustomerSnapshot((prev) => ({ ...prev, unit_no: event.target.value }))}
                                 className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12 disabled:bg-[#f2f4f7] disabled:text-[#98a2b3]"
                                 placeholder="如：4"
-                              />
-                            </label>
-                            <label className="block text-sm">
-                              <span className="mb-1.5 block text-xs font-bold text-[#667085]">房室</span>
-                              <input
-                                value={createCustomerSnapshot.room_no}
-                                disabled={createCustomerSnapshot.no_room_number}
+	                              />
+		                            </label>
+		                            <label className="block text-sm">
+		                              <span className="mb-1.5 flex h-5 items-center justify-between gap-3 text-xs font-bold text-[#667085]">
+		                                <span>房室</span>
+		                                <span className="inline-flex h-5 items-center gap-1.5 leading-none">
+		                                  <input
+		                                    type="checkbox"
+		                                    checked={createCustomerSnapshot.no_room_number}
+		                                    onChange={(event) => setCreateCustomerSnapshot((prev) => ({ ...prev, no_room_number: event.target.checked }))}
+		                                    className="material-checkbox"
+		                                  />
+		                                  暂无房号
+		                                </span>
+		                              </span>
+			                              <input
+	                                value={createCustomerSnapshot.room_no}
+	                                disabled={createCustomerSnapshot.no_room_number}
                                 onChange={(event) => setCreateCustomerSnapshot((prev) => ({ ...prev, room_no: event.target.value }))}
                                 className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12 disabled:bg-[#f2f4f7] disabled:text-[#98a2b3]"
                                 placeholder="如：1023"
@@ -3041,19 +3296,9 @@ export default function QuotationsPage() {
                                 placeholder="面积"
                               />
                             </label>
-                            <label className="block text-sm">
-                              <span className="mb-1.5 block text-xs font-bold text-[#667085]">装修类型</span>
-                              <input
-                                value={createCustomerSnapshot.decoration_type}
-                                onChange={(event) => setCreateCustomerSnapshot((prev) => ({ ...prev, decoration_type: event.target.value }))}
-                                className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
-                                placeholder="如：全包/半包"
-                              />
-                            </label>
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
+	                          </div>
+	                      </div>
+                    ) : isCreateCustomerLocked ? null : (
                       <div className="rounded-[16px] border border-[#d9e1ec] bg-white p-5">
                         <p className="text-sm font-extrabold text-[#162033]">请先选择客户</p>
                         <p className="mt-2 text-sm font-semibold leading-6 text-[#667085]">左侧支持姓名、手机号、小区和房号搜索。客户较多时，输入更完整的关键词可以快速定位。</p>
@@ -3064,13 +3309,45 @@ export default function QuotationsPage() {
                       <div className="mb-4 flex items-center justify-between gap-3">
                         <div>
                           <p className="text-sm font-extrabold text-[#162033]">报价设置</p>
-                          <p className="mt-1 text-xs font-semibold text-[#667085]">设置标题、定额模板、内部备注和客户附注。</p>
+                          <p className="mt-1 text-xs font-semibold text-[#667085]">设置报价名称、定额模板、内部备注和客户附注。</p>
                         </div>
                       </div>
                       <div className="grid gap-4 md:grid-cols-2">
-                        <label className="block text-sm md:col-span-2">
-                          <span className="mb-1.5 block text-xs font-bold text-[#475467]">报价标题</span>
-                          <input value={title} onChange={(event) => setTitle(event.target.value)} className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12" placeholder="例如：全案装修报价单" />
+	                        <label className="block text-sm md:col-span-2">
+	                          <span className="mb-1.5 block text-xs font-bold text-[#475467]">报价名称</span>
+	                          <input
+	                            value={quotationType}
+	                            maxLength={20}
+	                            onChange={(event) => setQuotationType(event.target.value)}
+	                            className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
+	                            placeholder="选填：报价类型或自定义标题"
+	                          />
+	                        </label>
+	                        <label className="block text-sm md:col-span-2">
+                          <span className="mb-1.5 flex items-center justify-between gap-3 text-xs font-bold text-[#475467]">
+                            <span>报价归属门店</span>
+                            {!needsQuotationStoreSelection && <span className="font-semibold text-[#98a2b3]">继承客户服务门店</span>}
+                          </span>
+                          {needsQuotationStoreSelection ? (
+                            <SystemSelect
+                              value={selectedQuotationStoreId}
+                              onChange={(event) => setSelectedQuotationStoreId(event.target.value)}
+	                              className="!h-[42px] !min-h-[42px] w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 py-0 text-sm font-semibold text-[#182230] outline-none transition focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
+                              menuClassName="quotation-index-org-filter-menu"
+                              searchable={visibleQuotationOrgOptions.length > 8}
+                              searchPlaceholder="搜索门店"
+                              menuMinWidth={360}
+                            >
+                              <option value="">请选择门店</option>
+                              {visibleQuotationOrgOptions.map((option) => (
+                                <option key={option.id} value={option.id} data-selected-label={option.name}>{option.label}</option>
+                              ))}
+                            </SystemSelect>
+                          ) : (
+	                            <div className="flex h-[42px] min-h-[42px] items-center rounded-[10px] border border-[#cfd7e3] bg-[#f8fafc] px-3 py-0 text-sm font-semibold text-[#182230]">
+                              {selectedCustomerServiceStore}
+                            </div>
+                          )}
                         </label>
                         <label className="block text-sm md:col-span-2">
                           <span className="mb-1.5 flex items-center justify-between gap-3 text-xs font-bold text-[#475467]">
@@ -3086,7 +3363,7 @@ export default function QuotationsPage() {
                               setPackageQuoteAreaText(formatCreateAreaInput(isTemporaryQuotationMode ? temporaryCustomer.area : isNewCustomerMode ? quickCustomer.area_size : getCustomerAreaValue(selectedCustomer)));
                             }
                           }}
-                            className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
+	                            className="!h-[42px] !min-h-[42px] w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 py-0 text-sm font-semibold text-[#182230] outline-none transition focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
                           >
                             <option value="">不使用模板</option>
                             {templateSelectMatches.map(({ template }) => (
@@ -3192,105 +3469,107 @@ export default function QuotationsPage() {
                   </div>
                 </div>
 
-                <div className="flex shrink-0 items-center justify-between gap-3 border-t border-[#d9e1ec] bg-white px-5 py-4">
-                  <p className="hidden text-xs font-semibold text-[#667085] sm:block">
-                    {isTemporaryQuotationMode
-                      ? temporaryCustomer.address ? `将创建「${temporaryCustomer.address}」的临时报价` : "请填写小区/地址"
-                      : isNewCustomerMode
-                        ? quickCustomer.address ? `将新建客户并创建「${quickCustomer.address}」的报价` : "请填写小区/地址"
-                      : selectedCustomer ? `将为 ${selectedCustomer.name || "该客户"} 创建报价` : "请选择客户后再创建报价"}
-                  </p>
-                  <div className="flex justify-end gap-2">
-                    <button onClick={() => setShowCreate(false)} className="btn-secondary">取消</button>
-                    <button
-                      disabled={(isTemporaryQuotationMode ? !temporaryCustomer.address.trim() : isNewCustomerMode ? !quickCustomer.address.trim() : !customerId) || creating || (isPackageTemplate && packageQuoteArea <= 0)}
-                      onClick={async () => {
-                        setCreating(true);
-                        setMessage("");
-                        try {
-                          if (isPackageTemplate && packageQuoteArea <= 0) {
-                            setMessage("请先确认一口价计价面积");
-                            return;
-                          }
-                          let quotationCustomerId = customerId;
-                          let quotationCustomerSnapshot = createCustomerSnapshot;
-                          if (isNewCustomerMode) {
-                            if (!quickCustomer.address.trim()) {
-                              setMessage("请填写小区/地址");
-                              return;
-                            }
-                            const createdCustomer = await api.post<any>("/api/customers", {
-                              create_from_quotation: true,
-                              name: quickCustomer.name,
-                              designer_name: quickCustomer.designer_name,
-                              phone: quickCustomer.phone,
-                              weixin: quickCustomer.weixin,
-                              address: quickCustomer.address,
-                              house_address: quickCustomer.address,
-                              address_location_name: quickCustomer.address_location_name,
-                              address_location_address: quickCustomer.address_location_address,
-                              address_latitude: quickCustomer.address_latitude,
-                              address_longitude: quickCustomer.address_longitude,
-                              building_no: quickCustomer.no_room_number ? "" : quickCustomer.building_no,
-                              unit_no: quickCustomer.no_room_number ? "" : quickCustomer.unit_no,
-                              room_no: quickCustomer.no_room_number ? "" : quickCustomer.room_no,
-                              no_room_number: quickCustomer.no_room_number,
-                              area_size: quickCustomer.area_size,
-                              decoration_type: quickCustomer.decoration_type,
-                              requirements: createNotes,
-                            });
-                            quotationCustomerId = String(createdCustomer?.id || "").trim();
-                            if (!quotationCustomerId) {
-                              setMessage("客户创建成功但未返回客户ID，请刷新后重试");
-                              return;
-                            }
-                            quotationCustomerSnapshot = quickCustomerSnapshot;
-                          }
-                          const res = await api.post<{ id: string; persisted?: boolean }>("/api/quotations", {
-                            create_mode: isTemporaryQuotationMode ? "temporary" : "customer",
-                            customer_id: isTemporaryQuotationMode ? undefined : quotationCustomerId,
-                            customer_snapshot: isTemporaryQuotationMode ? undefined : quotationCustomerSnapshot,
-                            temp_customer: isTemporaryQuotationMode ? {
-                              name: temporaryCustomer.name,
-                              phone: temporaryCustomer.phone,
-                              weixin: temporaryCustomer.weixin,
-                              address: temporaryCustomer.address,
-                              area: temporaryCustomer.area,
-                              decoration_type: temporaryCustomer.decoration_type,
-                            } : undefined,
-                            title,
-                            notes: createNotes,
-                            customer_visible_note: createCustomerVisibleNote,
-                            template: selectedTemplate || undefined,
-                            templatePricing: isPackageTemplate ? { area: packageQuoteArea } : undefined,
-                          });
-                          if (!res?.persisted) {
-                            throw new Error("报价保存状态未确认，请刷新预算记录后核对");
-                          }
-                          setMessage("报价已写入数据库，正在确认列表同步...");
-                          await confirmCreatedQuotationPersisted(res.id);
-                          await refetchDeletedQuotations();
-                          setShowCreate(false);
-                          setMessage("报价已保存");
-                          if (isNewCustomerMode) {
-                            setQuickCustomer(emptyQuickCustomerDraft);
-                            setCreateMode("customer");
-                          }
-                          router.push(`/quotations/${res.id}`);
-                        } catch (err: any) {
-                          setMessage(err.message || "创建失败");
-                        } finally {
-                          setCreating(false);
-                        }
-                      }}
-                      className="btn-primary disabled:opacity-50"
-                    >
-                      {creating && <Loader2 className="h-4 w-4 animate-spin" />}
-                      创建并编辑
-                    </button>
-                  </div>
-                </div>
               </section>
+            </div>
+
+            <div className="quotation-create-footer flex shrink-0 items-center justify-end gap-3 border-t border-[#e5eaf2] !bg-white px-6 py-4">
+              <div className="flex justify-end gap-2">
+	                <button onClick={closeCreateQuotation} className="btn-secondary">取消</button>
+                <button
+                  disabled={(isTemporaryQuotationMode ? !temporaryCustomer.address.trim() : isNewCustomerMode ? !quickCustomer.address.trim() : !customerId) || (needsQuotationStoreSelection && !selectedQuotationStoreId) || creating || (isPackageTemplate && packageQuoteArea <= 0)}
+                  onClick={async () => {
+                    setCreating(true);
+                    setMessage("");
+                    try {
+                      if (isPackageTemplate && packageQuoteArea <= 0) {
+                        setMessage("请先确认一口价计价面积");
+                        return;
+                      }
+                      if (needsQuotationStoreSelection && !selectedQuotationStoreId) {
+                        setMessage("请选择报价归属门店");
+                        return;
+                      }
+                      let quotationCustomerId = customerId;
+                      let quotationCustomerSnapshot = createCustomerSnapshot;
+                      if (isNewCustomerMode) {
+                        if (!quickCustomer.address.trim()) {
+                          setMessage("请填写小区/地址");
+                          return;
+                        }
+                        const createdCustomer = await api.post<any>("/api/customers", {
+                          create_from_quotation: true,
+                          name: quickCustomer.name,
+                          designer_name: quickCustomer.designer_name,
+                          phone: quickCustomer.phone,
+                          weixin: quickCustomer.weixin,
+                          address: quickCustomer.address,
+                          house_address: quickCustomer.address,
+                          address_location_name: quickCustomer.address_location_name,
+                          address_location_address: quickCustomer.address_location_address,
+                          address_latitude: quickCustomer.address_latitude,
+                          address_longitude: quickCustomer.address_longitude,
+                          building_no: quickCustomer.no_room_number ? "" : quickCustomer.building_no,
+                          unit_no: quickCustomer.no_room_number ? "" : quickCustomer.unit_no,
+                          room_no: quickCustomer.no_room_number ? "" : quickCustomer.room_no,
+                          no_room_number: quickCustomer.no_room_number,
+                          area_size: quickCustomer.area_size,
+                          decoration_type: quickCustomer.decoration_type,
+                          service_store: selectedQuotationStore?.name || "",
+                          requirements: createNotes,
+                        });
+                        quotationCustomerId = String(createdCustomer?.id || "").trim();
+                        if (!quotationCustomerId) {
+                          setMessage("客户创建成功但未返回客户ID，请刷新后重试");
+                          return;
+                        }
+                        quotationCustomerSnapshot = quickCustomerSnapshot;
+                      }
+                      const res = await api.post<{ id: string; persisted?: boolean }>("/api/quotations", {
+                        create_mode: isTemporaryQuotationMode ? "temporary" : "customer",
+                        customer_id: isTemporaryQuotationMode ? undefined : quotationCustomerId,
+                        customer_snapshot: isTemporaryQuotationMode ? undefined : quotationCustomerSnapshot,
+                        temp_customer: isTemporaryQuotationMode ? {
+                          name: temporaryCustomer.name,
+                          phone: temporaryCustomer.phone,
+                          weixin: temporaryCustomer.weixin,
+                          address: temporaryCustomer.address,
+                          area: temporaryCustomer.area,
+                          decoration_type: temporaryCustomer.decoration_type,
+                        } : undefined,
+	                        quotation_org_unit_id: selectedQuotationStoreId || undefined,
+	                        quotation_type: quotationType.trim(),
+	                        notes: createNotes,
+                        customer_visible_note: createCustomerVisibleNote,
+                        template: selectedTemplate || undefined,
+                        templatePricing: isPackageTemplate ? { area: packageQuoteArea } : undefined,
+                      });
+                      if (!res?.persisted) {
+                        throw new Error("报价保存状态未确认，请刷新预算记录后核对");
+                      }
+                      setMessage("报价已写入数据库，正在确认列表同步...");
+                      await confirmCreatedQuotationPersisted(res.id);
+                      await refetchDeletedQuotations();
+	                      setShowCreate(false);
+	                      setCreateLockedCustomerId("");
+                      createReturnRecordCustomerKeyRef.current = "";
+                      setMessage("报价已保存");
+                      if (isNewCustomerMode) {
+                        setQuickCustomer(emptyQuickCustomerDraft);
+                        setCreateMode("customer");
+                      }
+                      router.push(`/quotations/${res.id}`);
+                    } catch (err: any) {
+                      setMessage(err.message || "创建失败");
+                    } finally {
+                      setCreating(false);
+                    }
+                  }}
+                  className="btn-primary disabled:opacity-50"
+                >
+                  {creating && <Loader2 className="h-4 w-4 animate-spin" />}
+                  创建并编辑
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -3596,11 +3875,58 @@ export default function QuotationsPage() {
         />
       )}
 
-      {textDialog && (
-        <QuotationTextDialogModal
-          dialog={textDialog}
-          onClose={() => setTextDialog(null)}
-        />
+      {editingQuotationNotes && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/35 px-4 py-6 backdrop-blur-sm"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeQuotationNotesEditor();
+          }}
+        >
+          <div className="w-full max-w-[620px] overflow-hidden rounded-xl border border-[#d9e2ef] bg-white shadow-none">
+            <div className="flex items-start justify-between gap-4 border-b border-[#e7edf5] px-5 py-4">
+              <div className="min-w-0">
+                <h3 className="text-base font-semibold text-[#182230]">编辑报价备注</h3>
+                <p className="mt-1 text-xs font-medium leading-5 text-[#667085]">这两项只保存到当前报价，不会修改客户资料。</p>
+              </div>
+              <button
+                type="button"
+                onClick={closeQuotationNotesEditor}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[#667085] transition hover:bg-[#f2f4f7] hover:text-[#182230]"
+                aria-label="关闭报价备注"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="grid gap-4 bg-white px-5 py-4">
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-bold text-[#475467]">内部备注</span>
+                <textarea
+                  value={editingQuotationNotes.notes}
+                  onChange={(event) => setEditingQuotationNotes((current) => current ? { ...current, notes: event.target.value } : current)}
+                  className="min-h-[112px] w-full resize-none rounded-[10px] border border-[#d9e2ef] bg-white px-3 py-2.5 text-sm font-medium leading-6 text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
+                  placeholder="仅内部查看，如客户关注点、沟通记录、报价口径等"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-bold text-[#475467]">客户附注</span>
+                <textarea
+                  value={editingQuotationNotes.customerVisibleNote}
+                  onChange={(event) => setEditingQuotationNotes((current) => current ? { ...current, customerVisibleNote: event.target.value } : current)}
+                  className="min-h-[112px] w-full resize-none rounded-[10px] border border-[#d9e2ef] bg-white px-3 py-2.5 text-sm font-medium leading-6 text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
+                  placeholder="会显示在报价单底部，如优惠说明、施工范围补充、特殊约定等"
+                />
+              </label>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-[#e7edf5] bg-white px-5 py-4">
+              <button type="button" onClick={closeQuotationNotesEditor} className="inline-flex h-9 items-center justify-center rounded-lg border border-[#d9e2ef] bg-white px-4 text-xs font-semibold text-[#52647b] transition hover:bg-[#f4f7fb]">
+                取消
+              </button>
+              <button type="button" onClick={submitQuotationNotes} className="inline-flex h-9 min-w-[96px] items-center justify-center rounded-lg bg-[#407aff] px-4 text-xs font-semibold text-white transition hover:bg-[#2f66e8]">
+                保存备注
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {editingRecordProjectInfo && (
@@ -3698,20 +4024,12 @@ export default function QuotationsPage() {
                   <span>装修类型</span>
                   <input list="record-project-decoration-types" value={recordProjectInfoForm.decorationType} onChange={(event) => setRecordProjectInfoForm((current) => ({ ...current, decorationType: event.target.value }))} placeholder="如：全包/半包" />
                 </label>
-                <label className="quote-project-info-field quote-project-info-span-2">
-                  <span>内部备注</span>
-                  <textarea value={recordProjectInfoForm.notes} onChange={(event) => setRecordProjectInfoForm((current) => ({ ...current, notes: event.target.value }))} placeholder="仅内部查看，如客户关注点、沟通记录、报价口径等" rows={3} />
-                </label>
-                <label className="quote-project-info-field quote-project-info-span-2">
-                  <span>客户附注</span>
-                  <textarea value={recordProjectInfoForm.customerVisibleNote} onChange={(event) => setRecordProjectInfoForm((current) => ({ ...current, customerVisibleNote: event.target.value }))} placeholder="会显示在报价单底部，如优惠说明、施工范围补充、特殊约定等" rows={3} />
-                </label>
                 <datalist id="record-project-decoration-types">
                   {recordDecorationTypeOptions.map((option) => <option key={option} value={option} />)}
                 </datalist>
               </div>
             </div>
-            <div className="flex items-center justify-end gap-2 border-t border-surface-100 bg-surface-50 px-5 py-4">
+            <div className="quote-project-info-footer flex items-center justify-end gap-2 border-t border-[#e5eaf2] bg-white px-5 py-4">
               <button type="button" onClick={closeRecordProjectInfoEditor} disabled={recordProjectInfoSaving} className="inline-flex h-9 items-center justify-center rounded-lg border border-surface-200 bg-white px-4 text-xs font-semibold text-surface-600 transition hover:bg-surface-100 disabled:opacity-50">
                 取消
               </button>
@@ -3727,8 +4045,8 @@ export default function QuotationsPage() {
       {changeLogRecord && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[#0f172a]/10 p-4 md:p-6">
           <div className="quotation-change-log-modal flex h-[min(820px,calc(100dvh-56px))] w-full max-w-[980px] flex-col overflow-hidden rounded-[16px] border border-[#d7e0eb] bg-white shadow-none [&_*]:!shadow-none" style={{ boxShadow: "none", backgroundImage: "none" }}>
-            <div className="min-h-0 flex-1 overflow-y-auto bg-white px-5 pb-4 pt-4">
-              <div className="mb-3 flex items-start justify-between gap-4 bg-white shadow-none" style={{ boxShadow: "none", backgroundImage: "none" }}>
+            <div className="quotation-change-log-header shrink-0 bg-white px-5 pb-3 pt-4">
+              <div className="flex items-start justify-between gap-4 bg-white shadow-none" style={{ boxShadow: "none", backgroundImage: "none" }}>
                 <div className="flex min-w-0 items-start gap-3">
                   <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[10px] border border-[#d8e6ff] bg-[#f3f7ff] text-[#407aff] shadow-none" style={{ boxShadow: "none", backgroundImage: "none" }}>
                       <History className="h-4 w-4" />
@@ -3742,6 +4060,8 @@ export default function QuotationsPage() {
                   <X className="h-4 w-4" />
                 </button>
               </div>
+            </div>
+            <div className="quotation-change-log-scroll min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain bg-white px-5 pb-4">
               {changeLogsLoading ? (
                 <div className="flex min-h-[280px] items-center justify-center rounded-[12px] border border-[#e2e8f0] bg-white text-sm font-medium text-[#52647b] shadow-none">
                   <Loader2 className="mr-2 h-4 w-4 animate-spin text-[#407aff]" />

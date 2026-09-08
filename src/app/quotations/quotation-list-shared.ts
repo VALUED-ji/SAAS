@@ -5,6 +5,7 @@ export const QUOTA_TEMPLATE_STORAGE_KEY = "zxgj_quota_templates";
 
 import { toPricingAmount, type PackageQuoteConfigInput } from "@/lib/quotaTemplatePricing";
 import { normalizeQuotaTemplateAutoScope, type QuotaTemplateAutoScope } from "@/lib/quotaTemplateScope";
+import { normalizeFeeScopeMode, parseFeeScopeValues, type FeeScopeMode } from "@/lib/quotationFeeFormulas";
 
 export type QuotaTemplateSpaceQuota = {
   id: string;
@@ -31,6 +32,9 @@ export type QuotaTemplateComprehensiveFee = {
   fee_rate: number;
   unit_price: number;
   remark: string;
+  fee_scope_mode: FeeScopeMode;
+  fee_scope_space_ids: string[];
+  fee_scope_space_names: string[];
 };
 
 export type QuotaTemplateQuoteConfig = PackageQuoteConfigInput & {
@@ -199,6 +203,9 @@ export function normalizeQuotaTemplate(value: any): QuotaTemplateOption | null {
       fee_rate: toTemplateAmount(fee?.fee_rate),
       unit_price: toTemplateAmount(fee?.unit_price),
       remark: String(fee?.remark || "").trim(),
+      fee_scope_mode: normalizeFeeScopeMode(fee?.fee_scope_mode),
+      fee_scope_space_ids: parseFeeScopeValues(fee?.fee_scope_space_ids),
+      fee_scope_space_names: parseFeeScopeValues(fee?.fee_scope_space_names),
     })).filter((fee: QuotaTemplateComprehensiveFee) => fee.name)
     : [];
   const projectGroups = Array.isArray(value.projectGroups)

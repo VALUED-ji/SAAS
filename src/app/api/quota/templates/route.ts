@@ -97,38 +97,22 @@ function getManageableBranchOptions(db: Db, auth: NonNullable<ReturnType<typeof 
 function normalizeTemplateScope(
   value: any,
   orgOptions: ReturnType<typeof getManageableBranchOptions>["orgOptions"],
-  branchOptions: ReturnType<typeof getManageableBranchOptions>["branchOptions"],
-) {
-  const scope = normalizeQuotaTemplateAutoScope(value?.autoScope || value?.scope || value?.accessScope);
-  const scopeType = scope?.scopeType === "branch" && scope.orgUnitId ? "branch" : "global";
-  if (scopeType !== "branch") {
-    return {
-      scopeType: "global",
-      scopeOrgUnitId: "",
-      autoScope: {
-        scopeType: "global" as const,
-        branchOrgUnitId: "",
-        branchOrgUnitName: "",
-        branchOrgUnitPath: "",
-        orgUnitId: "",
-        orgUnitName: "",
-        orgUnitPath: "",
-        orgUnitType: "",
-        companyName: scope?.companyName || "",
-        createdByUserId: scope?.createdByUserId || "",
-        createdByName: scope?.createdByName || "",
-      },
-    };
-  }
-  const rawOrg = orgOptions.find((option) => option.id === scope.orgUnitId);
-  const branch = branchOptions.find((option) => option.id === scope.orgUnitId)
-    || branchOptions.find((option) => rawOrg?.ancestorIds.includes(option.id));
-  if (!branch) return null;
-  return {
-    scopeType: "branch",
-    scopeOrgUnitId: branch.id,
-    autoScope: {
-      ...scope,
+	  branchOptions: ReturnType<typeof getManageableBranchOptions>["branchOptions"],
+	) {
+	  const scope = normalizeQuotaTemplateAutoScope(value?.autoScope || value?.scope || value?.accessScope);
+	  if (scope?.scopeType !== "branch" || !scope.orgUnitId) {
+	    return null;
+	  }
+	  const branchScope = scope;
+	  const rawOrg = orgOptions.find((option) => option.id === branchScope.orgUnitId);
+	  const branch = branchOptions.find((option) => option.id === branchScope.orgUnitId)
+	    || branchOptions.find((option) => rawOrg?.ancestorIds.includes(option.id));
+	  if (!branch) return null;
+	  return {
+	    scopeType: "branch",
+	    scopeOrgUnitId: branch.id,
+	    autoScope: {
+	      ...branchScope,
       scopeType: "branch" as const,
       branchOrgUnitId: branch.id,
       branchOrgUnitName: branch.name,
@@ -160,9 +144,39 @@ function normalizeTemplatePayload(
       name,
       status,
       autoScope: scope.autoScope,
+      createdAt: String(value?.createdAt || value?.created_at || value?.updatedAt || "").trim() || new Date().toISOString().slice(0, 10),
       updatedAt: String(value?.updatedAt || "").trim() || new Date().toISOString().slice(0, 10),
     },
   };
+}
+
+function backfillBranchTemplateScopes(
+  db: Db,
+  companyId: string,
+  orgOptions: ReturnType<typeof getManageableBranchOptions>["orgOptions"],
+  branchOptions: ReturnType<typeof getManageableBranchOptions>["branchOptions"],
+) {
+  const rows = db.prepare(`
+    SELECT id, payload
+    FROM quota_templates
+    WHERE company_id = ?
+      AND deleted_at IS NULL
+      AND (scope_type IS NULL OR scope_type <> 'branch' OR scope_org_unit_id IS NULL OR scope_org_unit_id = '')
+  `).all(companyId) as Array<{ id: string; payload?: string | null }>;
+  if (rows.length === 0) return;
+
+  const updateScope = db.prepare(`
+    UPDATE quota_templates
+    SET scope_type = 'branch', scope_org_unit_id = ?, updated_at = datetime('now')
+    WHERE id = ?
+  `);
+  rows.forEach((row) => {
+    const payload = safeJsonParse(row.payload, null);
+    if (!payload) return;
+    const scope = normalizeTemplateScope(payload, orgOptions, branchOptions);
+    if (!scope?.scopeOrgUnitId) return;
+    updateScope.run(scope.scopeOrgUnitId, row.id);
+  });
 }
 
 export async function GET(req: NextRequest) {
@@ -173,6 +187,7 @@ export async function GET(req: NextRequest) {
   const db = getDb();
   ensureQuotaTemplatesTable(db);
   const { orgOptions, branchOptions } = getManageableBranchOptions(db, auth);
+  backfillBranchTemplateScopes(db, auth.companyId, orgOptions, branchOptions);
   const branchIds = branchOptions.map((option) => option.id);
   const branchPlaceholders = branchIds.map(() => "?").join(",");
   const rows = db.prepare(`
@@ -180,10 +195,8 @@ export async function GET(req: NextRequest) {
     FROM quota_templates
     WHERE company_id = ?
       AND deleted_at IS NULL
-      AND (
-        COALESCE(scope_type, 'global') = 'global'
-        ${branchIds.length > 0 ? `OR (scope_type = 'branch' AND scope_org_unit_id IN (${branchPlaceholders}))` : ""}
-      )
+      AND scope_type = 'branch'
+      ${branchIds.length > 0 ? `AND scope_org_unit_id IN (${branchPlaceholders})` : "AND 1 = 0"}
     ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC, template_id DESC
   `).all(auth.companyId, ...branchIds) as Array<{ payload?: string | null }>;
   const templates = rows
@@ -211,6 +224,7 @@ export async function POST(req: NextRequest) {
   const db = getDb();
   ensureQuotaTemplatesTable(db);
   const { orgOptions, branchOptions } = getManageableBranchOptions(db, auth);
+  backfillBranchTemplateScopes(db, auth.companyId, orgOptions, branchOptions);
   const templates = (Array.isArray(body?.templates) ? body.templates : [])
     .map((template: any) => normalizeTemplatePayload(template, orgOptions, branchOptions))
     .filter(Boolean) as Array<NonNullable<ReturnType<typeof normalizeTemplatePayload>>>;
@@ -220,13 +234,12 @@ export async function POST(req: NextRequest) {
 
   const tx = (db as any).transaction(() => {
     const activeIds = templates.map((template) => String(template.payload.id));
-    const branchIds = branchOptions.map((option) => option.id);
-    const branchPlaceholders = branchIds.map(() => "?").join(",");
-    const managedScopeSql = `(
-      COALESCE(scope_type, 'global') = 'global'
-      ${branchIds.length > 0 ? `OR (scope_type = 'branch' AND scope_org_unit_id IN (${branchPlaceholders}))` : ""}
-    )`;
-    const managedScopeParams = branchIds;
+	    const branchIds = branchOptions.map((option) => option.id);
+	    const branchPlaceholders = branchIds.map(() => "?").join(",");
+	    const managedScopeSql = branchIds.length > 0
+	      ? `scope_type = 'branch' AND scope_org_unit_id IN (${branchPlaceholders})`
+	      : "1 = 0";
+	    const managedScopeParams = branchIds;
     if (activeIds.length > 0) {
       const placeholders = activeIds.map(() => "?").join(",");
       db.prepare(`

@@ -9,6 +9,8 @@ import {
   calculateOtherFeeTotals,
   normalizeFeeCalcBase,
   normalizeFeeCalcMethod,
+  normalizeFeeScopeMode,
+  parseFeeScopeValues,
   toMoney,
   type FeeFormulaContext,
 } from "@/lib/quotationFeeFormulas";
@@ -17,9 +19,19 @@ import { getAuthContext, hasPermission } from "@/lib/security/authorization";
 import { ensureQuotationSchema } from "@/lib/quotationSchema";
 import { ensureProjectCostControlSchema } from "@/lib/projectCostControl";
 import { ensureQuotationChangeLogSchema, getLatestQuotationChangeSummary } from "@/lib/quotationChangeLogs";
+import {
+  canAccessQuotationOrg,
+  ensureQuotationAccessColumns,
+  getOrgById,
+  getOrgNamesForIds,
+  getOrgTreeIds,
+  getStoreOrgByName,
+  getUserQuotationAccessibleOrgIds,
+} from "@/lib/quotationOrgAccess";
 
 function ensureQuotationColumns(db: any) {
   ensureQuotationSchema(db);
+  ensureQuotationAccessColumns(db);
 }
 
 function ensureCustomerManualDesignerColumn(db: any) {
@@ -43,6 +55,9 @@ function ensureQuotationItemColumns(db: any) {
   if (!names.has("fee_calc_method")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_calc_method TEXT").run();
   if (!names.has("fee_calc_base")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_calc_base TEXT").run();
   if (!names.has("fee_rate")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_rate REAL").run();
+  if (!names.has("fee_scope_mode")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_scope_mode TEXT").run();
+  if (!names.has("fee_scope_space_ids")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_scope_space_ids TEXT").run();
+  if (!names.has("fee_scope_space_names")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_scope_space_names TEXT").run();
   if (!names.has("cost_material_unit")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_material_unit REAL").run();
   if (!names.has("cost_labor_unit")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_labor_unit REAL").run();
   if (!names.has("cost_loss_rate")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_loss_rate REAL").run();
@@ -76,9 +91,32 @@ function makeId(prefix: string) {
   return `${prefix}_${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 }
 
+function getAuthorizedQuotationOrgFilter(db: ReturnType<typeof getDb>, requestedOrgUnitId: string, auth: NonNullable<ReturnType<typeof getAuthContext>>) {
+  const selectedOrgUnitId = String(requestedOrgUnitId || "").trim();
+  const visibleOrgIds = getUserQuotationAccessibleOrgIds(db, auth.userId, auth.companyId);
+  if (!selectedOrgUnitId) {
+    return {
+      orgIds: visibleOrgIds,
+      orgNames: getOrgNamesForIds(db, visibleOrgIds, auth.companyId),
+      includeUnassignedLegacy: true,
+    };
+  }
+  if (!visibleOrgIds.includes(selectedOrgUnitId)) return [];
+  const orgIds = getOrgTreeIds(db, selectedOrgUnitId, auth.companyId);
+  return {
+    orgIds,
+    orgNames: getOrgNamesForIds(db, orgIds, auth.companyId),
+    includeUnassignedLegacy: false,
+  };
+}
+
 function formatAmount(value: number) {
   const amount = Number(value || 0);
   return Number.isFinite(amount) ? amount.toFixed(2) : "0.00";
+}
+
+function getQuotationType(quotation: any, settings: Record<string, any>) {
+  return String(quotation?.quotation_type || settings?.quotationType || "").trim();
 }
 
 function buildDefaultQuotationTitle(customer: any) {
@@ -240,6 +278,41 @@ function getBaseMaterialSubtotal(item: any) {
   return toMoney(safeNonNegativeNumber(item.quantity) * safeNonNegativeNumber(item.material_cost));
 }
 
+function getCategoryKey(category: unknown) {
+  if (isBaseCategory(category)) return "base";
+  if (isOtherCategory(category)) return "other";
+  if (isCustomCabinetCategory(category)) return "custom_cabinet";
+  if (isMainMaterialCategory(category)) return "main_material";
+  return String(category || "").trim();
+}
+
+function getCategoryLabel(category: unknown) {
+  const key = getCategoryKey(category);
+  if (key === "base") return "基装";
+  if (key === "main_material") return "产品";
+  if (key === "custom_cabinet") return "定制柜";
+  if (key === "other") return "综合费用";
+  return String(category || "").trim();
+}
+
+function getFeeScopeCategoryKey(category: unknown) {
+  const name = String(category || "").trim();
+  if (isBaseCategory(name)) return "base";
+  if (isOtherCategory(name)) return "other";
+  if (isCustomCabinetCategory(name)) return "custom_cabinet";
+  if (name === "main_material" || name === "主材" || name === "产品" || name === "产品项目") return "main_material";
+  return name;
+}
+
+function getFeeScopeCategoryLabel(category: unknown) {
+  const key = getFeeScopeCategoryKey(category);
+  if (key === "base") return "基装";
+  if (key === "main_material") return "产品";
+  if (key === "custom_cabinet") return "定制柜";
+  if (key === "other") return "综合费用";
+  return key;
+}
+
 function buildFeeFormulaContext(items: any[], categories: string[] = []): FeeFormulaContext {
   const orderedCategories = orderQuoteCategories([...categories, ...items.map((item) => String(item.category || "").trim())]);
   const mainMaterialAmount = items
@@ -268,6 +341,16 @@ function buildFeeFormulaContext(items: any[], categories: string[] = []): FeeFor
     laborAmount,
     materialCostAmount,
     categoryAmounts,
+    directItems: items
+      .filter((item) => isDirectItemCategory(item.category))
+      .map((item) => ({
+        category: getFeeScopeCategoryKey(item.category),
+        categoryLabel: getFeeScopeCategoryLabel(item.category),
+        space: String(item.space || "").trim(),
+        total: getBaseOrMaterialItemTotal(item),
+        laborAmount: getBaseLaborSubtotal(item),
+        materialCostAmount: getBaseMaterialSubtotal(item),
+      })),
   };
 }
 
@@ -364,6 +447,9 @@ function buildTemplateQuotationItems(template: any) {
           fee_calc_method: null,
           fee_calc_base: null,
           fee_rate: null,
+          fee_scope_mode: "all",
+          fee_scope_space_ids: [],
+          fee_scope_space_names: [],
           sort_order: sortOrder++,
         });
       });
@@ -394,6 +480,9 @@ function buildTemplateQuotationItems(template: any) {
         fee_calc_method: method,
         fee_calc_base: method === "fixed" ? null : normalizeFeeCalcBase(fee?.fee_calc_base) || "直接费",
         fee_rate: method === "percent" ? safeNonNegativeNumber(fee?.fee_rate) : null,
+        fee_scope_mode: normalizeFeeScopeMode(fee?.fee_scope_mode),
+        fee_scope_space_ids: parseFeeScopeValues(fee?.fee_scope_space_ids),
+        fee_scope_space_names: parseFeeScopeValues(fee?.fee_scope_space_names),
         sort_order: sortOrder++,
       });
     });
@@ -486,10 +575,49 @@ export async function GET(req: NextRequest) {
   const deletedOnly = url.searchParams.get("deleted") === "1";
   const customerId = String(url.searchParams.get("customer_id") || url.searchParams.get("customerId") || "").trim();
   const summaryOnly = url.searchParams.get("summary") === "1";
+  const orgUnitId = String(url.searchParams.get("org_unit_id") || url.searchParams.get("orgUnitId") || "").trim();
+  const orgFilter = getAuthorizedQuotationOrgFilter(db, orgUnitId, auth);
+  const where: string[] = [
+    "q.company_id = ?",
+    deletedOnly ? "q.deleted_at IS NOT NULL" : "q.deleted_at IS NULL",
+  ];
+  const params: unknown[] = [auth.companyId];
+  if (customerId) {
+    where.push("p.customer_id = ?");
+    params.push(customerId);
+  }
+  if (orgFilter) {
+    if (Array.isArray(orgFilter)) {
+      where.push("1 = 0");
+    } else {
+      const orgClauses: string[] = [];
+      const orgPlaceholders = orgFilter.orgIds.map(() => "?").join(",");
+      const namePlaceholders = orgFilter.orgNames.map(() => "?").join(",");
+      if (orgFilter.orgIds.length > 0) {
+        orgClauses.push(`q.quotation_org_unit_id IN (${orgPlaceholders})`);
+      }
+      if (orgFilter.orgNames.length > 0) {
+        orgClauses.push(`(TRIM(COALESCE(q.quotation_org_unit_id, '')) = '' AND TRIM(COALESCE(c.service_store, '')) IN (${namePlaceholders}))`);
+      }
+      if (orgFilter.includeUnassignedLegacy) {
+        orgClauses.push(`(
+          TRIM(COALESCE(q.quotation_org_unit_id, '')) = ''
+          AND TRIM(COALESCE(c.service_store, '')) = ''
+          AND ${auth.isAdmin ? "1 = 1" : "q.created_by_id = ?"}
+        )`);
+      }
+      where.push(orgClauses.length > 0 ? `(${orgClauses.join(" OR ")})` : "1 = 0");
+      params.push(...orgFilter.orgIds, ...orgFilter.orgNames);
+      if (orgFilter.includeUnassignedLegacy && !auth.isAdmin) params.push(auth.userId);
+    }
+  }
   const list = db.prepare(`
     SELECT q.*, p.name as project_name, p.address as project_address, p.area as project_area, p.contract_amount,
       CASE WHEN q.project_id IS NULL THEN 1 ELSE 0 END as is_unbound,
       c.id as customer_id,
+      c.service_store as customer_service_store,
+      COALESCE(q.quotation_org_unit_id, store_org.id) as customer_service_store_org_unit_id,
+      COALESCE(q.quotation_org_unit_name, store_org.name) as customer_service_store_org_unit_name,
       COALESCE(c.name, q.temp_customer_name) as customer_name,
       COALESCE(c.phone, q.temp_customer_phone) as customer_phone,
       COALESCE(c.weixin, q.temp_customer_weixin) as customer_weixin,
@@ -501,21 +629,24 @@ export async function GET(req: NextRequest) {
       c.address_longitude as customer_address_longitude,
       c.building_no as customer_building_no, c.unit_no as customer_unit_no,
       c.room_no as customer_room_no, c.no_room_number as customer_no_room_number,
-      COALESCE(c.decoration_type, q.temp_customer_decoration_type) as customer_decoration_type,
+      c.decoration_type as customer_decoration_type,
       COALESCE(c.area_size, q.temp_customer_area) as customer_area_size
     FROM quotations q
     LEFT JOIN projects p ON q.project_id = p.id
     LEFT JOIN customers c ON p.customer_id = c.id
-    WHERE q.company_id = ? AND ${deletedOnly ? "q.deleted_at IS NOT NULL" : "q.deleted_at IS NULL"}
-      ${customerId ? "AND p.customer_id = ?" : ""}
+    LEFT JOIN org_units store_org
+      ON store_org.company_id = q.company_id
+      AND store_org.deleted_at IS NULL
+      AND TRIM(COALESCE(store_org.name, '')) = TRIM(COALESCE(c.service_store, ''))
+    WHERE ${where.join(" AND ")}
     ORDER BY ${deletedOnly ? "q.deleted_at DESC," : ""} q.updated_at DESC, q.created_at DESC
-  `).all(...(customerId ? [auth.companyId, customerId] : [auth.companyId])) as any[];
+  `).all(...params) as any[];
   const quotationIds = list.map((quotation) => String(quotation.id || "")).filter(Boolean);
   if (quotationIds.length === 0) return NextResponse.json(list);
 
   const placeholders = quotationIds.map(() => "?").join(",");
 	  const quotationItems = db.prepare(`
-    SELECT quotation_id, category, quantity, unit_price, total_price, material_cost, labor_cost, fee_calc_method, fee_calc_base, fee_rate
+    SELECT quotation_id, category, space, quantity, unit_price, total_price, material_cost, labor_cost, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names
     FROM quotation_items
     WHERE quotation_id IN (${placeholders})
     ORDER BY quotation_id, sort_order ASC, created_at ASC
@@ -646,10 +777,11 @@ export async function GET(req: NextRequest) {
     const quotaTemplateId = String(settings.quotaTemplateId || "").trim();
     const quotaTemplateName = String(settings.quotaTemplateName || templateNameById.get(quotaTemplateId) || "").trim();
     return {
-      ...quotation,
-      quota_template_id: quotaTemplateId,
-      quota_template_name: quotaTemplateName,
-      designer_name: designerByCustomer.get(String(quotation.customer_id || "")) || "",
+	      ...quotation,
+	      quota_template_id: quotaTemplateId,
+	      quota_template_name: quotaTemplateName,
+	      quotation_type: getQuotationType(quotation, settings),
+	      designer_name: designerByCustomer.get(String(quotation.customer_id || "")) || "",
       customer_created_from_quotation: quotationCreatedCustomerIds.has(String(quotation.customer_id || "")) ? 1 : 0,
       signed_contract_count: signedByCustomer.get(String(quotation.customer_id || ""))?.count || 0,
       signed_contract_amount: signedByCustomer.get(String(quotation.customer_id || ""))?.amount || 0,
@@ -680,8 +812,8 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const customerId = String(body.customer_id || "").trim();
     const projectIdInput = String(body.project_id || "").trim();
-    const inputTitle = String(body.title || "").trim();
     const createMode = String(body.create_mode || body.mode || "").trim();
+    const requestedQuotationOrgUnitId = String(body.quotation_org_unit_id || body.quotationOrgUnitId || "").trim();
     const temporaryCustomer = normalizeTemporaryCustomer(body);
     const hasCustomerSnapshot = Boolean(customerId && body?.customer_snapshot && typeof body.customer_snapshot === "object");
     const customerSnapshot = normalizeCustomerSnapshot(body);
@@ -715,7 +847,16 @@ export async function POST(req: NextRequest) {
         decoration_type: customerSnapshot.decorationType || null,
       }
       : customer;
-    const title = inputTitle || (isTemporaryQuotation ? buildDefaultTemporaryQuotationTitle(temporaryCustomer) : buildDefaultQuotationTitle(effectiveCustomer));
+    const inheritedStoreName = String(effectiveCustomer?.service_store || "").trim();
+    const quotationOrg = inheritedStoreName
+      ? getStoreOrgByName(db, inheritedStoreName, companyId)
+      : getOrgById(db, requestedQuotationOrgUnitId, companyId);
+    if (!quotationOrg?.id) return NextResponse.json({ message: "请选择报价归属门店" }, { status: 400 });
+    if (quotationOrg.type !== "store") return NextResponse.json({ message: "报价归属只能选择门店" }, { status: 400 });
+    if (!canAccessQuotationOrg(db, userId, companyId, quotationOrg.id)) {
+      return NextResponse.json({ message: "没有该门店的报价权限" }, { status: 403 });
+    }
+    const title = isTemporaryQuotation ? buildDefaultTemporaryQuotationTitle(temporaryCustomer) : buildDefaultQuotationTitle(effectiveCustomer);
 
     if (customer && hasCustomerSnapshot) {
       db.prepare(`
@@ -739,6 +880,10 @@ export async function POST(req: NextRequest) {
         customer.id,
         companyId,
       );
+    }
+    if (customer && !inheritedStoreName) {
+      db.prepare("UPDATE customers SET service_store = ?, updated_at = datetime('now') WHERE id = ? AND company_id = ?")
+        .run(quotationOrg.name, customer.id, companyId);
     }
 
     if (!project && effectiveCustomer) {
@@ -775,9 +920,15 @@ export async function POST(req: NextRequest) {
       ]
       : templateItems;
     const templateSpaces = getTemplateSpaceNames(body.template);
-    const templateCategories = orderQuoteCategories(pricedTemplateItems.map((item) => String(item.category || "").trim()));
-    const templateAppendixNote = String(body.template?.appendixNote || body.template?.quotationNote || "").trim();
-    const templateBudgetCompilationHtml = String(body.template?.budgetCompilationHtml || body.template?.budgetCompilation || "").trim();
+	    const templateCategories = orderQuoteCategories(pricedTemplateItems.map((item) => String(item.category || "").trim()));
+	    const templateAppendixNote = String(body.template?.appendixNote || body.template?.quotationNote || "").trim();
+	    const templateBudgetCompilationHtml = String(body.template?.budgetCompilationHtml || body.template?.budgetCompilation || "").trim();
+	    const quotationType = String(body.quotation_type || "").trim().slice(0, 20);
+	    const quotationDecorationType = String(
+      body.template?.constructionTemplateConfig?.decorationType
+        || (isTemporaryQuotation ? temporaryCustomer.decorationType : effectiveCustomer?.decoration_type)
+        || "",
+    ).trim();
     const customerVisibleNote = String(body.customer_visible_note || "").trim();
     const settings = {
 	      managementFeeRate: 0,
@@ -792,9 +943,11 @@ export async function POST(req: NextRequest) {
 	      excludeSpecificDiscountAmount: 0,
 	      excludeSpecialDiscountItems: false,
 	      excludeLaborOnlyDiscountItems: false,
-      warrantyMonths: Number(body.warrantyMonths ?? 24),
-      quotaTemplateId: String(body.template?.id || "").trim(),
-      quotaTemplateName: String(body.template?.name || "").trim(),
+	      warrantyMonths: Number(body.warrantyMonths ?? 24),
+	      quotaTemplateId: String(body.template?.id || "").trim(),
+	      quotaTemplateName: String(body.template?.name || "").trim(),
+	      quotationType,
+	      quotationDecorationType,
       appendixNote: templateAppendixNote,
       budgetCompilationHtml: templateBudgetCompilationHtml,
       quoteSpaces: templateSpaces,
@@ -825,18 +978,20 @@ export async function POST(req: NextRequest) {
     const totals = calculate(normalizedTemplateItems, settings);
     const tx = (db as any).transaction(() => {
       db.prepare(`
-        INSERT INTO quotations (
-          id, project_id, company_id, title, version, total_amount, discount, final_amount, status, notes, customer_visible_note, terms, settings,
-          temp_customer_name, temp_customer_phone, temp_customer_weixin, temp_customer_address, temp_customer_area, temp_customer_decoration_type,
-          created_by_id, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-      `).run(
-        quotationId,
-        project?.id || null,
-        companyId,
-        title,
-        Number(latest?.version || 0) + 1,
+	        INSERT INTO quotations (
+	          id, project_id, company_id, title, quotation_type, version, total_amount, discount, final_amount, status, notes, customer_visible_note, terms, settings,
+	          quotation_org_unit_id, quotation_org_unit_name,
+	          temp_customer_name, temp_customer_phone, temp_customer_weixin, temp_customer_address, temp_customer_area, temp_customer_decoration_type,
+	          created_by_id, created_at, updated_at
+	        )
+	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+	      `).run(
+	        quotationId,
+	        project?.id || null,
+	        companyId,
+	        title,
+	        quotationType || null,
+	        Number(latest?.version || 0) + 1,
         totals.directAmount + totals.taxAmount,
         settings.discount,
         totals.finalAmount,
@@ -844,19 +999,21 @@ export async function POST(req: NextRequest) {
         customerVisibleNote || null,
         body.terms || "报价有效期 15 天；最终施工范围以双方确认图纸和合同为准；增减项需双方签字确认。",
         JSON.stringify(settings),
+        quotationOrg.id,
+        quotationOrg.name,
         isTemporaryQuotation ? temporaryCustomer.name : null,
         isTemporaryQuotation ? temporaryCustomer.phone || null : null,
         isTemporaryQuotation ? temporaryCustomer.weixin || null : null,
         isTemporaryQuotation ? temporaryCustomer.address || null : null,
         isTemporaryQuotation ? temporaryCustomer.area || null : null,
-        isTemporaryQuotation ? temporaryCustomer.decorationType || null : null,
+        quotationDecorationType || null,
         userId
       );
 
       if (normalizedTemplateItems.length > 0) {
         const insertItem = db.prepare(`
-          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         normalizedTemplateItems.forEach((item) => {
           insertItem.run(
@@ -883,6 +1040,9 @@ export async function POST(req: NextRequest) {
             item.fee_calc_method,
             item.fee_calc_base,
             item.fee_rate,
+            isOtherCategory(item.category) ? normalizeFeeScopeMode(item.fee_scope_mode) : null,
+            isOtherCategory(item.category) ? JSON.stringify(parseFeeScopeValues(item.fee_scope_space_ids)) : null,
+            isOtherCategory(item.category) ? JSON.stringify(parseFeeScopeValues(item.fee_scope_space_names)) : null,
             Number((item as any).cost_material_unit || 0),
             Number((item as any).cost_labor_unit || 0),
             Number((item as any).cost_loss_rate || 0),

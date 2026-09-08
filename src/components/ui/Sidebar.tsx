@@ -431,7 +431,7 @@ export default function Sidebar() {
             pendingHref.startsWith(activeHref + "/") ||
             Boolean(item.children?.some((child) => pendingHref === child.href || pendingHref.startsWith(child.href + "/")))
           );
-          const isActive = pendingHref ? isPendingActive : isRouteActive;
+          const isActive = isRouteActive;
           const itemPending = Boolean(pendingHref) && isPendingActive;
           const Icon = item.icon;
 	          const hasChildren = Boolean(item.children?.length);
@@ -555,8 +555,7 @@ export default function Sidebar() {
                   <div className="min-h-0 space-y-1 py-1 pl-10">
                     {item.children?.map((child) => {
                       const childActive = pathname === child.href || pathname.startsWith(child.href + "/");
-                      const childPending = pendingHref === child.href;
-                      const childCurrent = pendingHref ? childPending : childActive;
+                      const childCurrent = childActive;
                       return (
                         <Link
                           key={child.href}
@@ -611,8 +610,7 @@ export default function Sidebar() {
           <div className="space-y-1">
             {collapsedSubmenu.item.children.map((child) => {
               const childActive = pathname === child.href || pathname.startsWith(child.href + "/");
-              const childPending = pendingHref === child.href;
-              const childCurrent = pendingHref ? childPending : childActive;
+              const childCurrent = childActive;
               return (
                 <Link
                   key={child.href}

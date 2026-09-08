@@ -7,10 +7,12 @@ import {
 import {
   normalizeFeeCalcBase,
   normalizeFeeCalcMethod,
+  normalizeFeeScopeMode,
   toNumber,
   type FeeCalcBase,
   type FeeCalcMethod,
   type FeeFormulaContext,
+  type FeeScopeMode,
   type FormulaFeeItem,
 } from "@/lib/quotationFeeFormulas";
 import {
@@ -100,6 +102,8 @@ export type TemplateComprehensiveFee = {
   fee_rate: number;
   unit_price: number;
   remark: string;
+  fee_scope_mode: FeeScopeMode;
+  fee_scope_space_names: string[];
 };
 
 export type QuoteConfig = {
@@ -175,6 +179,7 @@ export type QuotaTemplate = {
   appendixNote: string;
   budgetCompilationHtml: string;
   spaces: TemplateSpace[];
+  createdAt: string;
   updatedAt: string;
 };
 
@@ -253,6 +258,8 @@ export function makeComprehensiveFeeItem(partial?: Partial<TemplateComprehensive
     fee_rate: 0,
     unit_price: 0,
     remark: "",
+    fee_scope_mode: "all",
+    fee_scope_space_names: [],
     ...(partial || {}),
   };
 }
@@ -277,7 +284,9 @@ export function isDefaultComprehensiveFeesOnly(value: TemplateComprehensiveFee[]
     && (normalizeFeeCalcBase(fee.fee_calc_base) || "直接费") === "直接费"
     && toAmount(fee.fee_rate) === 10
     && toAmount(fee.unit_price) === 0
-    && fee.remark.trim() === "按工程直接费比例计取";
+    && fee.remark.trim() === "按工程直接费比例计取"
+    && normalizeFeeScopeMode(fee.fee_scope_mode) === "all"
+    && fee.fee_scope_space_names.length === 0;
 }
 
 export function normalizeComprehensiveFees(value: any, useDefault = false): TemplateComprehensiveFee[] {
@@ -293,6 +302,13 @@ export function normalizeComprehensiveFees(value: any, useDefault = false): Temp
         fee_rate: method === "percent" ? toAmount(item?.fee_rate) : 0,
         unit_price: method === "fixed" ? toAmount(item?.unit_price) : 0,
         remark: String(item?.remark || ""),
+        fee_scope_mode: normalizeFeeScopeMode(item?.fee_scope_mode ?? item?.feeScopeMode),
+        fee_scope_space_names: Array.isArray(item?.fee_scope_space_names)
+          ? item.fee_scope_space_names.map((value: unknown) => String(value || "").trim()).filter(Boolean)
+          : String(item?.fee_scope_space_names || item?.feeScopeSpaceNames || "")
+            .split(/[,\n，、]/)
+            .map((value) => value.trim())
+            .filter(Boolean),
       });
     });
   }
@@ -623,6 +639,8 @@ export function buildTemplateFormulaFeeItems(fees: TemplateComprehensiveFee[]): 
     fee_calc_method: fee.fee_calc_method,
     fee_calc_base: fee.fee_calc_base,
     fee_rate: fee.fee_rate,
+    fee_scope_mode: fee.fee_scope_mode,
+    fee_scope_space_names: fee.fee_scope_space_names,
   }));
 }
 
@@ -938,6 +956,7 @@ export function makeEmptyTemplate(): QuotaTemplate {
     appendixNote: "",
     budgetCompilationHtml: "",
     spaces: [],
+    createdAt: todayText(),
     updatedAt: todayText(),
   };
 }
@@ -963,6 +982,7 @@ export function normalizeTemplate(value: any, index: number): QuotaTemplate | nu
     appendixNote: String(value.appendixNote || value.quotationNote || "").trim(),
     budgetCompilationHtml: String(value.budgetCompilationHtml || value.budgetCompilation || "").trim(),
     spaces,
+    createdAt: String(value.createdAt || value.created_at || value.updatedAt || todayText()),
     updatedAt: String(value.updatedAt || todayText()),
   };
 }

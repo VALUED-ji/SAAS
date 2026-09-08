@@ -1,8 +1,10 @@
 export type FeeCalcMethod = "fixed" | "reference" | "percent";
 export type FeeCalcBase = "base" | "main_material" | "base_material" | string;
+export type FeeScopeMode = "all" | "include" | "exclude";
 
 export type FormulaFeeItem = {
   category?: string;
+  space?: string | null;
   name?: string | null;
   quantity?: number | null;
   unit_price?: number | null;
@@ -10,6 +12,9 @@ export type FormulaFeeItem = {
   fee_calc_method?: string | null;
   fee_calc_base?: string | null;
   fee_rate?: number | null;
+  fee_scope_mode?: string | null;
+  fee_scope_space_ids?: string[] | string | null;
+  fee_scope_space_names?: string[] | string | null;
 };
 
 export type FeeFormulaContext = {
@@ -18,6 +23,14 @@ export type FeeFormulaContext = {
   laborAmount?: number;
   materialCostAmount?: number;
   categoryAmounts?: Record<string, number>;
+  directItems?: Array<{
+    category?: string | null;
+    categoryLabel?: string | null;
+    space?: string | null;
+    total: number;
+    laborAmount?: number;
+    materialCostAmount?: number;
+  }>;
 };
 
 export const feeCalcMethodLabels: Record<FeeCalcMethod, string> = {
@@ -65,6 +78,86 @@ export function normalizeFeeCalcMethod(value: unknown): FeeCalcMethod {
 export function normalizeFeeCalcBase(value: unknown): FeeCalcBase {
   const text = String(value || "").trim();
   return text;
+}
+
+export function normalizeFeeScopeMode(value: unknown): FeeScopeMode {
+  return value === "include" || value === "exclude" ? value : "all";
+}
+
+export function parseFeeScopeValues(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim()).filter(Boolean);
+  }
+  const text = String(value || "").trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parsed.map((item) => String(item || "").trim()).filter(Boolean);
+  } catch {}
+  return text.split(/[,\n，、]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function getFeeScopeSpaceNames(item?: FormulaFeeItem | null) {
+  return parseFeeScopeValues(item?.fee_scope_space_names);
+}
+
+function getScopedFormulaContext(item: FormulaFeeItem | null | undefined, context?: FeeFormulaContext) {
+  const mode = normalizeFeeScopeMode(item?.fee_scope_mode);
+  const names = getFeeScopeSpaceNames(item);
+  if (mode === "all" || names.length === 0 || !context?.directItems?.length) return context;
+
+  const nameSet = new Set(names);
+  const directItems = context.directItems.filter((directItem) => {
+    const space = String(directItem.space || "").trim();
+    const category = String(directItem.category || "").trim();
+    const categoryLabel = String(directItem.categoryLabel || "").trim();
+    const matched = nameSet.has(space) || nameSet.has(category) || nameSet.has(categoryLabel);
+    return mode === "include" ? matched : !matched;
+  });
+  const categoryAmounts: Record<string, number> = {};
+  directItems.forEach((directItem) => {
+    const category = String(directItem.category || "").trim();
+    const label = String(directItem.categoryLabel || category).trim();
+    if (!category || category === "base" || category === "main_material" || category === "other") return;
+    categoryAmounts[label] = toMoney(toNumber(categoryAmounts[label]) + toNumber(directItem.total));
+  });
+  const mainMaterialAmount = directItems
+    .filter((directItem) => String(directItem.category || "").trim() === "main_material")
+    .reduce((sum, directItem) => sum + toNumber(directItem.total), 0);
+  const laborAmount = directItems.reduce((sum, directItem) => sum + toNumber(directItem.laborAmount), 0);
+  const materialCostAmount = directItems.reduce((sum, directItem) => sum + toNumber(directItem.materialCostAmount), 0);
+  const customCategoryAmount = Object.values(categoryAmounts).reduce((sum, amount) => sum + toNumber(amount), 0);
+  return {
+    ...context,
+    mainMaterialAmount: toMoney(mainMaterialAmount),
+    directItemAmount: toMoney(mainMaterialAmount + customCategoryAmount),
+    laborAmount: toMoney(laborAmount),
+    materialCostAmount: toMoney(materialCostAmount),
+    categoryAmounts,
+    directItems,
+  };
+}
+
+function getScopedBaseAmounts(item: FormulaFeeItem | null | undefined, baseAmount: number, materialAmount: number, context?: FeeFormulaContext) {
+  const scopedContext = getScopedFormulaContext(item, context);
+  if (scopedContext === context) return { baseAmount, materialAmount, context };
+  const scopedBaseAmount = scopedContext?.directItems
+    ?.filter((directItem) => String(directItem.category || "").trim() === "base")
+    .reduce((sum, directItem) => sum + toNumber(directItem.total), 0) ?? baseAmount;
+  const scopedMaterialAmount = toNumber(scopedContext?.mainMaterialAmount) + Object.values(scopedContext?.categoryAmounts || {}).reduce((sum, amount) => sum + toNumber(amount), 0);
+  return {
+    baseAmount: toMoney(scopedBaseAmount),
+    materialAmount: toMoney(scopedMaterialAmount),
+    context: scopedContext,
+  };
+}
+
+export function getFeeScopeText(item: FormulaFeeItem) {
+  const mode = normalizeFeeScopeMode(item.fee_scope_mode);
+  const names = getFeeScopeSpaceNames(item);
+  if (mode === "all" || names.length === 0) return "";
+  const prefix = mode === "include" ? "仅含" : "不含";
+  return `${prefix}：${names.join("、")}`;
 }
 
 function escapeRegExp(value: string) {
@@ -352,9 +445,10 @@ function calculateOtherFeeDetailsInternal(
   const resolveBaseForItem = (item: FormulaFeeItem, index: number): { value: number | null; error: string } => {
     const normalizedBase = normalizeFeeCalcBase(item.fee_calc_base);
     if (!normalizedBase) return { value: null, error: "请填写基础公式" };
-    if (isLegacyFeeCalcBase(normalizedBase)) return { value: getFeeBaseAmount(baseAmount, materialAmount, normalizedBase, context), error: "" };
+    const scoped = getScopedBaseAmounts(item, baseAmount, materialAmount, context);
+    if (isLegacyFeeCalcBase(normalizedBase)) return { value: getFeeBaseAmount(scoped.baseAmount, scoped.materialAmount, normalizedBase, scoped.context), error: "" };
 
-    const { references, aliases } = getReferenceData(baseAmount, materialAmount, {}, context);
+    const { references, aliases } = getReferenceData(scoped.baseAmount, scoped.materialAmount, {}, scoped.context);
     const tokenKeys = getFormulaTokenKeys(normalizedBase, aliases);
     for (const key of tokenKeys) {
       if (Object.prototype.hasOwnProperty.call(references, key)) continue;
@@ -395,7 +489,8 @@ function calculateOtherFeeDetailsInternal(
         ? getLegacyManagementFeeRate(item)
         : 0;
       if (legacyManagementFeeRate > 0) {
-        total = toMoney(getFeeBaseAmount(baseAmount, materialAmount, "base_material", context) * legacyManagementFeeRate / 100);
+        const scoped = getScopedBaseAmounts(item, baseAmount, materialAmount, context);
+        total = toMoney(getFeeBaseAmount(scoped.baseAmount, scoped.materialAmount, "base_material", scoped.context) * legacyManagementFeeRate / 100);
       } else {
         const method = normalizeFeeCalcMethod(item.fee_calc_method);
         if (method === "reference" || method === "percent") {
@@ -450,11 +545,13 @@ function resolveFormulaBase(
   materialAmount: number,
   referenceAmounts: Record<string, number>,
   context?: FeeFormulaContext,
+  item?: FormulaFeeItem | null,
 ) {
   const normalizedBase = normalizeFeeCalcBase(calcBase);
   if (!normalizedBase) return null;
-  if (isLegacyFeeCalcBase(normalizedBase)) return getFeeBaseAmount(baseAmount, materialAmount, normalizedBase, context);
-  const { references, aliases } = getReferenceData(baseAmount, materialAmount, referenceAmounts, context);
+  const scoped = getScopedBaseAmounts(item, baseAmount, materialAmount, context);
+  if (isLegacyFeeCalcBase(normalizedBase)) return getFeeBaseAmount(scoped.baseAmount, scoped.materialAmount, normalizedBase, scoped.context);
+  const { references, aliases } = getReferenceData(scoped.baseAmount, scoped.materialAmount, referenceAmounts, scoped.context);
   const formulaValue = evaluateFeeFormula(normalizedBase, references, aliases);
   return formulaValue;
 }
@@ -471,15 +568,16 @@ export function calculateOtherFeeTotal(
     ? getLegacyManagementFeeRate(item)
     : 0;
   if (legacyManagementFeeRate > 0) {
-    return toMoney(getFeeBaseAmount(baseAmount, materialAmount, "base_material", context) * legacyManagementFeeRate / 100);
+    const scoped = getScopedBaseAmounts(item, baseAmount, materialAmount, context);
+    return toMoney(getFeeBaseAmount(scoped.baseAmount, scoped.materialAmount, "base_material", scoped.context) * legacyManagementFeeRate / 100);
   }
   const method = normalizeFeeCalcMethod(item.fee_calc_method);
   if (method === "reference") {
-    const baseValue = resolveFormulaBase(item.fee_calc_base, baseAmount, materialAmount, referenceAmounts, context);
+    const baseValue = resolveFormulaBase(item.fee_calc_base, baseAmount, materialAmount, referenceAmounts, context, item);
     return toMoney(baseValue ?? 0);
   }
   if (method === "percent") {
-    const baseValue = resolveFormulaBase(item.fee_calc_base, baseAmount, materialAmount, referenceAmounts, context);
+    const baseValue = resolveFormulaBase(item.fee_calc_base, baseAmount, materialAmount, referenceAmounts, context, item);
     if (baseValue === null) return 0;
     return toMoney(baseValue * toNumber(item.fee_rate) / 100);
   }
@@ -550,6 +648,7 @@ export function getFeeFormulaText(item: FormulaFeeItem) {
 type FeeRuleTextOptions = {
   currencySymbol?: boolean;
   useGrouping?: boolean;
+  includeMethodLabel?: boolean;
 };
 
 function formatCurrencyText(value: number, showCurrencySymbol = true, useGrouping = true) {
@@ -617,34 +716,38 @@ export function getFeeRuleText(item: FormulaFeeItem, total: number, options?: Fe
   const method = normalizeFeeCalcMethod(item.fee_calc_method);
   const calcBase = normalizeFeeCalcBase(item.fee_calc_base);
   const totalText = formatCurrencyText(total, options?.currencySymbol !== false, options?.useGrouping !== false);
+  const includeMethodLabel = options?.includeMethodLabel !== false;
+  const scopedContext = getScopedFormulaContext(item, context);
+  const scopeText = getFeeScopeText(item);
+  const appendScope = (text: string) => scopeText ? `${text}，${scopeText}` : text;
 
   if (method === "fixed") {
-    return `固定金额 = ${totalText}`;
+    return includeMethodLabel ? `固定金额 = ${totalText}` : `金额 = ${totalText}`;
   }
 
   if (method === "reference") {
-    if (!calcBase) return `引用金额 = ${totalText}`;
-    if (isDirectFeeBase(calcBase)) return `工程直接费 = ${getDirectFeeRuleDescription(context)} = ${totalText}`;
-    if (isBaseMaterialFeeBase(calcBase)) return `基装+产品 = 基装直接费 + 产品直接费 = ${totalText}`;
-    if (isBaseFeeBase(calcBase)) return `基装 = 基装直接费 = ${totalText}`;
-    if (isLaborFeeBase(calcBase)) return `人工费 = ${totalText}`;
-    if (isMaterialCostFeeBase(calcBase)) return `材料费 = ${totalText}`;
-    if (isMaterialFeeBase(calcBase)) return `产品 = 产品直接费 = ${totalText}`;
-    return `${formatFeeRuleExpression(calcBase)} = ${totalText}`;
+    if (!calcBase) return includeMethodLabel ? `引用金额 = ${totalText}` : `金额 = ${totalText}`;
+    if (isDirectFeeBase(calcBase)) return appendScope(includeMethodLabel ? `工程直接费 = ${getDirectFeeRuleDescription(scopedContext)} = ${totalText}` : `${getDirectFeeRuleDescription(scopedContext)} = ${totalText}`);
+    if (isBaseMaterialFeeBase(calcBase)) return appendScope(includeMethodLabel ? `基装+产品 = 基装直接费 + 产品直接费 = ${totalText}` : `基装直接费 + 产品直接费 = ${totalText}`);
+    if (isBaseFeeBase(calcBase)) return appendScope(includeMethodLabel ? `基装 = 基装直接费 = ${totalText}` : `基装直接费 = ${totalText}`);
+    if (isLaborFeeBase(calcBase)) return appendScope(`人工费 = ${totalText}`);
+    if (isMaterialCostFeeBase(calcBase)) return appendScope(`材料费 = ${totalText}`);
+    if (isMaterialFeeBase(calcBase)) return appendScope(includeMethodLabel ? `产品 = 产品直接费 = ${totalText}` : `产品直接费 = ${totalText}`);
+    return appendScope(`${formatFeeRuleExpression(calcBase)} = ${totalText}`);
   }
 
   const rate = toNumber(item.fee_rate);
-  if (isDirectFeeBase(calcBase)) return `工程直接费(${getDirectFeeRuleDescription(context)}) × ${rate}% = ${totalText}`;
-  if (isBaseMaterialFeeBase(calcBase)) return `基装+产品(基装直接费 + 产品直接费) × ${rate}% = ${totalText}`;
-  if (isBaseFeeBase(calcBase)) return `基装直接费 × ${rate}% = ${totalText}`;
-  if (isLaborFeeBase(calcBase)) return `人工费 × ${rate}% = ${totalText}`;
-  if (isMaterialCostFeeBase(calcBase)) return `材料费 × ${rate}% = ${totalText}`;
-  if (isMaterialFeeBase(calcBase)) return `产品直接费 × ${rate}% = ${totalText}`;
+  if (isDirectFeeBase(calcBase)) return appendScope(includeMethodLabel ? `工程直接费(${getDirectFeeRuleDescription(scopedContext)}) × ${rate}% = ${totalText}` : `(${getDirectFeeRuleDescription(scopedContext)}) × ${rate}% = ${totalText}`);
+  if (isBaseMaterialFeeBase(calcBase)) return appendScope(includeMethodLabel ? `基装+产品(基装直接费 + 产品直接费) × ${rate}% = ${totalText}` : `(基装直接费 + 产品直接费) × ${rate}% = ${totalText}`);
+  if (isBaseFeeBase(calcBase)) return appendScope(`基装直接费 × ${rate}% = ${totalText}`);
+  if (isLaborFeeBase(calcBase)) return appendScope(`人工费 × ${rate}% = ${totalText}`);
+  if (isMaterialCostFeeBase(calcBase)) return appendScope(`材料费 × ${rate}% = ${totalText}`);
+  if (isMaterialFeeBase(calcBase)) return appendScope(`产品直接费 × ${rate}% = ${totalText}`);
 
   const formulaText = getFeeFormulaText(item);
-  if (formulaText && formulaText !== "-") return `${formatFeeRuleExpression(formulaText)} = ${totalText}`;
+  if (formulaText && formulaText !== "-") return appendScope(`${formatFeeRuleExpression(formulaText)} = ${totalText}`);
   const baseLabel = getFeeBaseLabel(calcBase);
-  return baseLabel ? `${baseLabel} × ${rate}% = ${totalText}` : `按比例计算 = ${totalText}`;
+  return appendScope(baseLabel ? `${baseLabel} × ${rate}% = ${totalText}` : `按比例计算 = ${totalText}`);
 }
 
 export function getLegacyManagementFeeRate(item: FormulaFeeItem, fallbackRate?: unknown) {

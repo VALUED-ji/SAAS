@@ -7911,7 +7911,7 @@ html body .quotation-index-workbench .quotation-index-title {
 
 html body .quotation-index-workbench .quotation-index-toolbar-actions {
   display: flex;
-  width: min(100%, 560px);
+  width: min(100%, 760px);
   min-width: 0;
   align-items: center;
   justify-content: flex-end;
@@ -7922,6 +7922,21 @@ html body .quotation-index-workbench .quotation-index-search-wrap {
   position: relative;
   min-width: 240px;
   flex: 1 1 420px;
+}
+
+html body .quotation-index-workbench .quotation-index-org-filter {
+  width: 220px;
+  min-width: 200px;
+  flex: 0 0 220px;
+}
+
+html body .quotation-index-org-filter-menu {
+  max-width: min(520px, calc(100vw - 24px));
+}
+
+html body .quotation-index-org-filter-menu [role="option"] {
+  min-height: 36px;
+  font-size: 12px;
 }
 
 html body .dashboard-scale-root main > .quotation-index-workbench > .quotation-index-table-panel {
@@ -7974,9 +7989,17 @@ html body .quotation-index-workbench .quotation-index-primary-button {
 
   html body .quotation-index-workbench .quotation-index-toolbar-actions {
     width: 100%;
+    flex-wrap: wrap;
   }
 
   html body .quotation-index-workbench .quotation-index-search-wrap {
+    min-width: 0;
+    flex-basis: 100%;
+  }
+
+  html body .quotation-index-workbench .quotation-index-org-filter {
+    flex: 1 1 0;
+    width: auto;
     min-width: 0;
   }
 }
@@ -8170,6 +8193,160 @@ html body .quotation-index-workbench .thin-scroll-area + div div {
 
 html body .quotation-index-workbench .thin-scroll-area + div div div {
   background-color: #9aa8bb !important;
+}
+
+/* New quotation dialog aligns with the employee editor modal language while keeping its wide workflow layout. */
+html body .quotation-index-workbench .quotation-create-modal {
+  border-color: #d9e1ec !important;
+  border-radius: 14px !important;
+  background: #ffffff !important;
+  box-shadow: 0 12px 34px rgba(15, 23, 42, 0.12) !important;
+  letter-spacing: 0;
+}
+
+html body .quotation-index-workbench .quotation-create-header {
+  min-height: 60px;
+  border-color: #e7e9ee !important;
+  background: #ffffff !important;
+  padding: 10px 24px !important;
+}
+
+html body .quotation-index-workbench .quotation-create-header h2 {
+  color: #111827 !important;
+  font-size: 17px !important;
+  font-weight: 700 !important;
+  line-height: 24px;
+}
+
+html body .quotation-index-workbench .quotation-create-header p {
+  margin-top: 2px !important;
+  color: #667085 !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  line-height: 18px;
+}
+
+html body .quotation-index-workbench .quotation-create-header .h-8.w-8 {
+  width: 30px !important;
+  height: 30px !important;
+  border: 1px solid #cfe0ff;
+  border-radius: 9px !important;
+  background: #eef5ff !important;
+}
+
+html body .quotation-index-workbench .quotation-create-body,
+html body .quotation-index-workbench .quotation-create-left,
+html body .quotation-index-workbench .quotation-create-right,
+html body .quotation-index-workbench .quotation-create-customer-list,
+html body .quotation-index-workbench .quotation-create-right-scroll {
+  background: #ffffff !important;
+}
+
+html body .quotation-index-workbench .quotation-create-left,
+html body .quotation-index-workbench .quotation-create-left-head,
+html body .quotation-index-workbench .quotation-create-footer {
+  border-color: #e7e9ee !important;
+}
+
+html body .quotation-index-workbench .quotation-create-left-head {
+  padding: 12px 16px !important;
+}
+
+html body .quotation-index-workbench .quotation-create-right-scroll {
+  padding: 16px 20px !important;
+  scrollbar-width: none;
+}
+
+html body .quotation-index-workbench .quotation-create-customer-list {
+  scrollbar-width: none;
+}
+
+html body .quotation-index-workbench .quotation-create-customer-list::-webkit-scrollbar,
+html body .quotation-index-workbench .quotation-create-right-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+html body .quotation-index-workbench .quotation-create-right-stack {
+  gap: 12px !important;
+}
+
+html body .quotation-index-workbench .quotation-create-right-stack > div.rounded-\[16px\],
+html body .quotation-index-workbench .quotation-create-right-stack label.rounded-\[16px\] {
+  border-color: #e7e9ee !important;
+  border-radius: 10px !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+html body .quotation-index-workbench .quotation-create-right-stack > div.rounded-\[16px\] {
+  padding: 14px !important;
+}
+
+html body .quotation-index-workbench .quotation-create-right-stack label.rounded-\[16px\] {
+  padding: 12px !important;
+}
+
+html body .quotation-index-workbench .quotation-create-modal input,
+html body .quotation-index-workbench .quotation-create-modal select,
+html body .quotation-index-workbench .quotation-create-modal .system-select {
+  min-height: 42px !important;
+  height: 42px !important;
+  box-sizing: border-box !important;
+  border-color: #d9e1ec !important;
+  border-radius: 10px !important;
+  background-color: #ffffff !important;
+  color: #182230 !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  line-height: 20px !important;
+}
+
+html body .quotation-index-workbench .quotation-create-modal .system-select > div {
+  min-height: 0 !important;
+  height: 100% !important;
+  align-items: center !important;
+  line-height: 20px !important;
+}
+
+html body .quotation-index-workbench .quotation-create-modal .system-select > div > span {
+  line-height: 20px !important;
+}
+
+html body .quotation-index-workbench .quotation-create-modal textarea {
+  min-height: 92px !important;
+  border-color: #d9e1ec !important;
+  border-radius: 10px !important;
+  background: #ffffff !important;
+  color: #182230 !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  line-height: 20px !important;
+}
+
+html body .quotation-index-workbench .quotation-create-modal label > span:first-child {
+  color: #374151 !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  line-height: 18px;
+}
+
+html body .quotation-index-workbench .quotation-create-footer {
+  min-height: 58px;
+  border-color: #e7e9ee !important;
+  padding: 10px 24px !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+html body .quotation-index-workbench .quotation-create-footer .btn-secondary,
+html body .quotation-index-workbench .quotation-create-footer .btn-primary {
+  height: 38px !important;
+  min-height: 38px !important;
+  border-radius: 10px !important;
+  font-size: 13px !important;
+  font-weight: 650 !important;
 }
 
 /* Final override for quotation budget-record popup. Must stay after all modal guards. */
@@ -9193,6 +9370,98 @@ html body .dashboard-scale-root .quotation-contract-ui .quotation-record-table t
   border-radius: var(--app-surface-radius) !important;
 }
 
+/* New quotation modal: remove the extra outer hairline; shadow carries the shell edge. */
+html body .dashboard-scale-root .quotation-index-workbench .quotation-create-modal,
+html body .quotation-contract-ui.quotation-index-workbench .quotation-create-modal {
+  border: 0 !important;
+  border-right: 0 !important;
+  outline: 0 !important;
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+html body .dashboard-scale-root .quotation-index-workbench .quotation-create-modal::before,
+html body .dashboard-scale-root .quotation-index-workbench .quotation-create-modal::after,
+html body .quotation-contract-ui.quotation-index-workbench .quotation-create-modal::before,
+html body .quotation-contract-ui.quotation-index-workbench .quotation-create-modal::after {
+  display: none !important;
+  content: none !important;
+}
+
+html body .dashboard-scale-root .quotation-index-workbench .quotation-create-modal > *,
+html body .quotation-contract-ui.quotation-index-workbench .quotation-create-modal > * {
+  border-right-color: transparent !important;
+}
+
+/* New quotation modal: header/footer must match the white content surface, not the generic gray modal chrome. */
+html body .dashboard-scale-root .quotation-index-workbench .quotation-create-modal > .quotation-create-header,
+html body .quotation-contract-ui.quotation-index-workbench .quotation-create-modal > .quotation-create-header {
+  border-top: 0 !important;
+  border-right: 0 !important;
+  border-bottom: 1px solid #e5eaf2 !important;
+  border-left: 0 !important;
+  border-radius: 0 !important;
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quotation-index-workbench .quotation-create-modal > .quotation-create-footer,
+html body .quotation-contract-ui.quotation-index-workbench .quotation-create-modal > .quotation-create-footer {
+  border-top: 1px solid #e5eaf2 !important;
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quotation-index-workbench .quotation-create-modal > .quotation-create-body,
+html body .quotation-contract-ui.quotation-index-workbench .quotation-create-modal > .quotation-create-body {
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  border-top: 0 !important;
+  border-bottom: 0 !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quotation-index-workbench .quotation-create-modal > .quotation-create-header + .quotation-create-body,
+html body .quotation-contract-ui.quotation-index-workbench .quotation-create-modal > .quotation-create-header + .quotation-create-body {
+  margin-top: 0 !important;
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quotation-index-workbench .quotation-create-modal > .quotation-create-body + .quotation-create-footer,
+html body .quotation-contract-ui.quotation-index-workbench .quotation-create-modal > .quotation-create-body + .quotation-create-footer {
+  margin-top: 0 !important;
+  border-top: 1px solid #e5eaf2 !important;
+  border-right: 0 !important;
+  border-bottom: 0 !important;
+  border-left: 0 !important;
+  border-radius: 0 !important;
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+}
+
+/* Quotation project info editor: one white surface, no inner framed content block. */
+html body .dashboard-scale-root .quotation-contract-ui .quote-project-info-modal > .quote-project-info-body,
+html body .dashboard-scale-root .quotation-contract-ui .quote-project-info-modal > .quote-project-info-body .quote-project-info-form-grid,
+html body .dashboard-scale-root .quotation-contract-ui .quote-project-info-modal > .quote-project-info-footer {
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quotation-contract-ui .quote-project-info-modal > .quote-project-info-body .quote-project-info-form-grid {
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+}
+
+html body .dashboard-scale-root .quotation-contract-ui .quote-project-info-modal > .quote-project-info-footer {
+  border-top: 1px solid #e5eaf2 !important;
+}
+
 /* Real last rule: quotation budget-record popup stays square after global modal radius. */
 html body .dashboard-scale-root .fixed .quotation-record-modal-shell,
 html body .quotation-contract-ui .quotation-record-modal-shell {
@@ -10014,7 +10283,8 @@ html body .quotation-contract-ui .quotation-record-action-panel {
 html body .dashboard-scale-root .fixed .quotation-record-card,
 html body .quotation-contract-ui .quotation-record-card {
   position: relative;
-  height: 154px;
+  height: auto;
+  min-height: 178px;
   align-items: center;
   overflow: hidden;
   border-color: #d9e2ef !important;
@@ -10038,11 +10308,21 @@ html body .quotation-contract-ui .quotation-record-card:focus-within {
   background: #f5fbf8 !important;
 }
 
+html body .dashboard-scale-root .fixed .quotation-record-main,
+html body .quotation-contract-ui .quotation-record-main {
+  padding-top: 0;
+}
+
+html body .dashboard-scale-root .fixed .quotation-record-type-line,
+html body .quotation-contract-ui .quotation-record-type-line {
+  transform: translateY(-4px);
+}
+
 @media (max-width: 1279px) {
   html body .dashboard-scale-root .fixed .quotation-record-card,
   html body .quotation-contract-ui .quotation-record-card {
     height: auto;
-    min-height: 154px;
+    min-height: 178px;
   }
 }
 
@@ -10065,10 +10345,19 @@ html body .quotation-contract-ui .quotation-record-note span {
 
 html body .dashboard-scale-root .fixed .quotation-record-action-panel,
 html body .quotation-contract-ui .quotation-record-action-panel {
-  position: relative;
+  position: static;
   box-shadow: none !important;
-  padding-top: 24px;
+  padding-top: 0;
   transition: background-color 160ms ease;
+}
+
+@media (min-width: 1280px) {
+  html body .dashboard-scale-root .fixed .quotation-record-main,
+  html body .dashboard-scale-root .fixed .quotation-record-action-panel,
+  html body .quotation-contract-ui .quotation-record-main,
+  html body .quotation-contract-ui .quotation-record-action-panel {
+    align-self: center;
+  }
 }
 
 html body .dashboard-scale-root .fixed .quotation-record-card:hover .quotation-record-action-panel,
@@ -10118,8 +10407,8 @@ html body .quotation-contract-ui .quotation-status-stamp {
 html body .dashboard-scale-root .fixed .quotation-record-action-panel > .quotation-record-action-head .quotation-status-stamp,
 html body .quotation-contract-ui .quotation-record-action-panel > .quotation-record-action-head .quotation-status-stamp {
   position: absolute;
-  right: -2px;
-  top: -10px;
+  right: 20px;
+  top: 20px;
   z-index: 1;
 }
 
@@ -10233,18 +10522,18 @@ html body .dashboard-scale-root .quotation-contract-ui .quote-project-info-body 
   min-height: 0;
   overflow-y: auto;
   padding: 18px 20px 20px;
-  background: #f8fafc;
+  background: #ffffff;
 }
 
 html body .dashboard-scale-root .quotation-contract-ui .quote-project-info-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px 16px;
-  border: 1px solid #dde6f2;
-  border-radius: 12px;
+  border: 0;
+  border-radius: 0;
   background: #ffffff;
-  padding: 16px;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.035);
+  padding: 0;
+  box-shadow: none;
 }
 
 html body .dashboard-scale-root .quotation-contract-ui .quote-project-info-span-2 {
@@ -13505,7 +13794,12 @@ html body .dashboard-scale-root .admin-config-ui.org-permissions-ui.team-console
 }
 
 html body .dashboard-scale-root .admin-config-ui.org-permissions-ui.team-console-ui .team-list-table :is(th, td):nth-child(11) {
-  text-align: right;
+  text-align: center;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui.team-console-ui .team-list-table td:nth-child(11) {
+  padding-left: 12px !important;
+  padding-right: 12px !important;
 }
 
 html body .dashboard-scale-root .admin-config-ui.org-permissions-ui.team-console-ui .team-list-table tbody tr:hover td {
@@ -13544,9 +13838,9 @@ html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-import
 
 html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .org-access-modal-header,
 html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-import-modal .org-access-modal-header {
-  min-height: 72px;
-  padding-top: 14px !important;
-  padding-bottom: 14px !important;
+  min-height: 60px;
+  padding-top: 10px !important;
+  padding-bottom: 10px !important;
 }
 
 html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .org-access-modal-header h2,
@@ -13563,6 +13857,33 @@ html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-import
   background: #ffffff !important;
 }
 
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal {
+  height: auto !important;
+  max-width: 880px !important;
+  max-height: min(820px, calc(100dvh - 20px)) !important;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-form {
+  min-width: 0;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-editor-scroll {
+  overflow-x: hidden !important;
+  padding-top: 14px !important;
+  padding-bottom: 14px !important;
+  scrollbar-width: none;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-editor-body > :not([hidden]) ~ :not([hidden]) {
+  margin-top: 12px !important;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-editor-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
 html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .employee-avatar-panel,
 html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-import-modal .employee-import-requirements {
   border-color: #e7e9ee !important;
@@ -13571,7 +13892,61 @@ html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-import
 }
 
 html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .employee-avatar-panel {
-  padding: 14px 16px !important;
+  padding: 10px 12px !important;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .employee-avatar-panel .h-16.w-16 {
+  width: 52px !important;
+  height: 52px !important;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-form-grid {
+  gap: 11px 12px !important;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .org-access-field label,
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal label.mb-1,
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-editor-notes-field label {
+  margin-bottom: 4px !important;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .input-field,
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .org-unit-picker-trigger {
+  min-height: 42px !important;
+  height: 42px !important;
+  padding-top: 7px !important;
+  padding-bottom: 7px !important;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-form-grid [class*="dateInputButton"] {
+  min-height: 42px !important;
+  height: 42px !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal button.team-editor-date-input {
+  min-height: 42px !important;
+  height: 42px !important;
+  border-color: #d9e1ec !important;
+  border-radius: 10px !important;
+  padding: 0 12px !important;
+  color: #182230 !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  line-height: 20px !important;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal button.team-editor-date-input span {
+  color: inherit !important;
+  font-size: inherit !important;
+  font-weight: inherit !important;
+  line-height: inherit !important;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal button.team-editor-date-input span[class*="dateInputPlaceholder"] {
+  color: #98a2b3 !important;
+  font-weight: 500 !important;
 }
 
 html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .org-access-field label {
@@ -13586,8 +13961,8 @@ html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor
 }
 
 html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .org-unit-picker-trigger {
-  height: 40px !important;
-  min-height: 40px !important;
+  height: 42px !important;
+  min-height: 42px !important;
   border-radius: 10px !important;
   background: #ffffff !important;
 }
@@ -13595,6 +13970,202 @@ html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor
 html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .org-unit-picker-trigger[class*="ring-4"] {
   border-color: var(--org-primary) !important;
   box-shadow: 0 0 0 3px rgba(64, 122, 255, 0.1) !important;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-panel {
+  overflow: hidden;
+  border: 1px solid #d9e2ef;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fbff 0%, #f5f8fc 100%);
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #e3e9f2;
+  background: #f8fafc;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  place-items: center;
+  border: 1px solid #cfe0ff;
+  border-radius: 9px;
+  background: #eef5ff;
+  color: #407aff;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-title {
+  color: #182230;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 18px;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-subtitle {
+  margin-top: 2px;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-count {
+  display: inline-flex;
+  height: 24px;
+  min-width: 42px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #d4deec;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #52647b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 8px;
+  background: #ffffff;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-select {
+  min-width: 0;
+  border-color: #cfd8e6 !important;
+  background: #ffffff !important;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-add {
+  display: inline-flex;
+  height: 42px;
+  min-height: 42px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid #c8d7f0;
+  border-radius: 10px;
+  background: #f4f8ff;
+  padding: 0 14px;
+  color: #285ac7;
+  font-size: 13px;
+  font-weight: 800;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-add:hover:not(:disabled) {
+  border-color: #9db8ec;
+  background: #eaf2ff;
+  color: #1f4dae;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-add:disabled {
+  cursor: not-allowed;
+  border-color: #e3e9f2;
+  background: #f7f9fc;
+  color: #a4afbf;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-list {
+  display: grid;
+  gap: 6px;
+  padding: 0 12px 10px;
+  background: #ffffff;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 34px;
+  border: 1px solid #e1e8f2;
+  border-radius: 10px;
+  background: #fbfcfe;
+  padding: 6px 8px 6px 10px;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-path {
+  overflow: hidden;
+  color: #344054;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-remove {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 8px;
+  color: #8a96a8;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-remove:hover {
+  background: #eef2f7;
+  color: #344054;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-empty {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  border: 1px dashed #d4deec;
+  border-radius: 10px;
+  background: #fbfcfe;
+  padding: 0 12px;
+  color: #7c8aa0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-editor-notes.input-field {
+  height: 72px !important;
+  min-height: 72px !important;
+  max-height: 72px !important;
+  line-height: 20px !important;
+  overflow: hidden !important;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-editor-notes-field label {
+  color: #374151 !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0;
+}
+
+html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .org-access-form-actions {
+  position: static !important;
+  min-height: 58px;
+  margin: 0 !important;
+  padding-top: 10px !important;
+  padding-bottom: 10px !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+@media (max-width: 640px) {
+  html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-control {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  html body .dashboard-scale-root .admin-config-ui.org-permissions-ui .team-editor-modal .team-quote-scope-add {
+    width: 100%;
+  }
 }
 
 .team-org-picker-dialog-overlay {
@@ -14208,9 +14779,41 @@ html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-l
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-list-table .quota-total-price {
+  position: relative !important;
   color: #dc2626 !important;
   font-size: 12px !important;
   font-weight: 500 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-list-table .quota-total-price-inner {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 0 !important;
+  min-width: 0 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-list-table .quota-special-price-badge {
+  display: inline-flex !important;
+  position: absolute !important;
+  top: 6px !important;
+  right: 7px !important;
+  z-index: 2 !important;
+  height: 17px !important;
+  width: auto !important;
+  min-width: 17px !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border: 1px solid #fed7aa !important;
+  border-radius: 5px !important;
+  background: #fff7ed !important;
+  padding: 0 !important;
+  color: #c2410c !important;
+  font-size: 11px !important;
+  font-weight: 750 !important;
+  line-height: 1 !important;
+  letter-spacing: 0 !important;
+  box-shadow: none !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-list-table .quota-description-cell {
@@ -14791,10 +15394,6 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-list-table tbody tr:hover td {
   background: #f8fbff !important;
-}
-
-html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-list-table tbody tr[class*="bg-primary-50"] td {
-  background: #f3f7ff !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-name-cell > p:first-child,
@@ -16024,6 +16623,114 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-
   font-size: 13px !important;
 }
 
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-fee-table-shell :is(input, .system-select),
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-fee-table-shell .quota-template-fee-plain-field {
+  height: 32px !important;
+  min-height: 32px !important;
+  appearance: none !important;
+  border: 0 !important;
+  border-color: transparent !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  outline: 0 !important;
+  --tw-ring-color: transparent !important;
+  --tw-ring-offset-shadow: 0 0 #0000 !important;
+  --tw-ring-shadow: 0 0 #0000 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-fee-table-shell :is(input, .system-select):hover,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-fee-table-shell .quota-template-fee-plain-field:hover {
+  border: 0 !important;
+  border-color: transparent !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-fee-table-shell :is(input, .system-select):focus,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-fee-table-shell :is(input, .system-select):focus-visible,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-fee-table-shell .system-select[class*="ring"],
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-fee-table-shell .quota-template-fee-plain-field:focus,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-fee-table-shell .quota-template-fee-plain-field:focus-visible {
+  border: 0 !important;
+  border-color: transparent !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  box-shadow: none !important;
+  outline: none !important;
+  --tw-ring-color: transparent !important;
+  --tw-ring-offset-shadow: 0 0 #0000 !important;
+  --tw-ring-shadow: 0 0 #0000 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-fee-table-shell :is(input, .system-select):disabled,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-fee-table-shell .quota-template-fee-plain-field:disabled {
+  border: 0 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  opacity: 1 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-fee-table-shell input {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-fee-table-shell .system-select {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-editor .quota-template-fee-table-shell input.quota-template-fee-plain-field,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-editor .quota-template-fee-table-shell div.quota-template-fee-plain-field.system-select {
+  display: flex !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  align-items: center !important;
+  border-width: 0 !important;
+  border-style: none !important;
+  border-color: transparent !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  box-shadow: none !important;
+  color: #64748b !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  line-height: 20px !important;
+  outline: 0 !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  --tw-ring-color: transparent !important;
+  --tw-ring-offset-shadow: 0 0 #0000 !important;
+  --tw-ring-shadow: 0 0 #0000 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-editor .quota-template-fee-table-shell div.quota-template-fee-plain-field.system-select :is(div, span),
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-editor .quota-template-fee-table-shell .quota-template-fee-plain-field::placeholder {
+  color: #64748b !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  line-height: 20px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-editor .quota-template-fee-table-shell input.quota-template-fee-plain-field:hover,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-editor .quota-template-fee-table-shell input.quota-template-fee-plain-field:focus,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-editor .quota-template-fee-table-shell input.quota-template-fee-plain-field:focus-visible,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-editor .quota-template-fee-table-shell div.quota-template-fee-plain-field.system-select:hover,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-editor .quota-template-fee-table-shell div.quota-template-fee-plain-field.system-select:focus,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-editor .quota-template-fee-table-shell div.quota-template-fee-plain-field.system-select:focus-visible {
+  border-width: 0 !important;
+  border-style: none !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  box-shadow: none !important;
+  outline: 0 !important;
+}
+
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-editor .btn-primary,
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-editor .btn-secondary {
   height: 40px !important;
@@ -16040,6 +16747,51 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-
   border-top: 1px solid var(--quota-template-line) !important;
   background: #ffffff !important;
   box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-save-status {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 180ms ease, transform 180ms ease, color 180ms ease;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-save-status[data-state="saving"],
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-save-status[data-state="saved"] {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-save-status[data-state="saved"] {
+  color: #2563eb;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-save-status-icon {
+  display: inline-flex;
+  height: 22px;
+  width: 22px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #dbe4f0;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #407aff;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-save-button {
+  min-width: 84px !important;
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease, opacity 180ms ease;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-save-button[data-save-status="saving"],
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-save-button[data-save-status="saved"] {
+  opacity: 0.92;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .construction-template-picker {
@@ -17902,12 +18654,33 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-config-body {
   padding: 10px !important;
+  background: #ffffff !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-config-head {
+  min-height: 72px !important;
+  border-bottom: 1px solid #dbe4ee !important;
+  background: #f8fafc !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-config-head p:first-child {
+  color: #172033 !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  line-height: 18px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-config-head p:last-child {
+  color: #64748b !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  line-height: 20px !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-workbench {
   grid-template-columns: 210px minmax(0, 1fr) !important;
   gap: 10px !important;
-  min-height: 460px !important;
+  min-height: 0 !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar {
@@ -17976,7 +18749,7 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-main {
-  min-height: 460px !important;
+  min-height: 0 !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-main-head {
@@ -18045,7 +18818,7 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-
   grid-template-columns: none !important;
   grid-template-rows: none !important;
   flex-direction: column !important;
-  min-height: 414px !important;
+  min-height: 0 !important;
   width: 100% !important;
 }
 
@@ -18062,7 +18835,7 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board > .overflow-hidden {
-  flex: 1 1 auto !important;
+  flex: 0 0 auto !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board > .border-t {
@@ -18280,34 +19053,38 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table th {
-  height: 34px !important;
+  height: 40px !important;
   min-height: 0 !important;
   padding-top: 0 !important;
   padding-bottom: 0 !important;
-  border-bottom: 1px solid #e1e7f0 !important;
+  border-right-color: #edf1f5 !important;
+  border-bottom: 1px solid #edf1f5 !important;
   background: #f7f9fc !important;
   color: #475467 !important;
   font-size: 12px !important;
-  font-weight: 700 !important;
+  font-weight: 600 !important;
   line-height: 18px !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table td {
-  height: 38px !important;
+  height: 48px !important;
   min-height: 0 !important;
-  padding-top: 3px !important;
-  padding-bottom: 3px !important;
-  border-color: #edf2f7 !important;
-  color: #111827 !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  border-right-color: #edf1f5 !important;
+  border-bottom-color: #edf1f5 !important;
+  color: #64748b !important;
   font-size: 12px !important;
-  line-height: 18px !important;
+  font-weight: 500 !important;
+  line-height: 20px !important;
   vertical-align: middle !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table td :is(span, p) {
-  color: inherit !important;
+  color: #64748b !important;
   font-size: 12px !important;
-  line-height: 18px !important;
+  font-weight: 500 !important;
+  line-height: 20px !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table tbody tr:nth-child(even) td {
@@ -18326,27 +19103,31 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-
   border: 0 !important;
   border-radius: 0 !important;
   background: transparent !important;
-  color: #111827 !important;
+  color: #64748b !important;
   cursor: text;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  line-height: 20px !important;
   outline: none !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table .quota-template-project-alias:hover {
-  color: #0f172a !important;
+  color: #475569 !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table .quota-template-project-alias:focus {
   overflow: hidden !important;
   padding: 0 !important;
   background: transparent !important;
-  color: #0f172a !important;
+  color: #475569 !important;
   box-shadow: none !important;
   caret-color: #407aff;
   white-space: nowrap !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table .quota-template-project-price-cell {
-  padding-right: 8px !important;
+  position: relative !important;
+  padding-right: 24px !important;
   text-align: right !important;
   white-space: nowrap !important;
 }
@@ -18356,28 +19137,34 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-
   min-width: 34px;
   align-items: center;
   justify-content: flex-end;
-  color: inherit !important;
-  font-weight: 750 !important;
-  line-height: 18px !important;
+  color: #64748b !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  line-height: 20px !important;
   vertical-align: middle;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table .quota-template-project-special-mark {
   display: inline-flex !important;
-  width: 16px !important;
+  position: absolute !important;
+  top: 5px !important;
+  right: 5px !important;
+  z-index: 2 !important;
+  width: auto !important;
   height: 16px !important;
   min-width: 16px !important;
   align-items: center !important;
   justify-content: center !important;
-  margin-left: 3px !important;
-  border: 1px solid #fecaca !important;
-  border-radius: 999px !important;
-  background: #fff5f5 !important;
-  color: #ef4444 !important;
+  margin-left: 0 !important;
+  border: 1px solid #fed7aa !important;
+  border-radius: 5px !important;
+  background: #fff7ed !important;
+  color: #c2410c !important;
   font-size: 10px !important;
-  font-weight: 800 !important;
-  line-height: 14px !important;
+  font-weight: 750 !important;
+  line-height: 1 !important;
   vertical-align: middle !important;
+  box-shadow: none !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table p.line-clamp-3 {
@@ -18591,4 +19378,290 @@ html body .dashboard-scale-root .quotation-compare-table > div:not([class*="stic
 html body .quotation-compare-table > .grid.text-xs,
 html body .dashboard-scale-root .quotation-compare-table > .grid.text-xs {
   font-size: 12px !important;
+}
+
+/* Final polish for the quota template space/category sidebar. */
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar {
+  overflow: hidden !important;
+  border: 1px solid #dbe4ee !important;
+  border-radius: 10px !important;
+  background: #ffffff !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar-head {
+  display: flex !important;
+  min-height: 40px !important;
+  height: 40px !important;
+  align-items: center !important;
+  margin: 0 !important;
+  padding: 0 12px !important;
+  border-bottom: 1px solid #dbe4ee !important;
+  background: #f8fafc !important;
+  color: #475467 !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  line-height: 18px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar-head span {
+  color: inherit !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  line-height: 18px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar-head::after,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar-head em {
+  display: none !important;
+  content: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar .quota-template-space-toolbar {
+  padding: 8px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar .quota-template-space-toolbar-inner {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 4px !important;
+  align-items: stretch !important;
+  border-bottom: 0 !important;
+  padding-bottom: 0 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar [data-template-space-tab] {
+  position: relative !important;
+  width: 100% !important;
+  height: 34px !important;
+  min-height: 34px !important;
+  border: 1px solid transparent !important;
+  border-radius: 6px !important;
+  background: transparent !important;
+  padding: 0 8px !important;
+  color: #64748b !important;
+  box-shadow: none !important;
+  transform: none !important;
+  transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar [data-template-space-tab]::before {
+  content: "" !important;
+  position: absolute !important;
+  left: 0 !important;
+  top: 8px !important;
+  bottom: 8px !important;
+  width: 2px !important;
+  border-radius: 999px !important;
+  background: transparent !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar [data-template-space-tab]:hover {
+  border-color: #edf1f5 !important;
+  background: #f8fafc !important;
+  color: #475467 !important;
+  transform: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar [data-template-space-tab][class*="bg-primary-600"] {
+  border-color: #cfe0ff !important;
+  background: #eef4ff !important;
+  color: #2563eb !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar [data-template-space-tab][class*="bg-primary-600"]::before {
+  background: #407aff !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar [data-template-space-tab] button {
+  width: 18px !important;
+  height: 24px !important;
+  color: #98a2b3 !important;
+  background: transparent !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar [data-template-space-tab] input {
+  height: 32px !important;
+  color: #64748b !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  line-height: 20px !important;
+  text-align: left !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar [data-template-space-tab][class*="bg-primary-600"] input,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar [data-template-space-tab][class*="bg-primary-600"] button {
+  color: #2563eb !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar .quota-template-space-item-count {
+  height: 18px !important;
+  min-width: 18px !important;
+  border: 1px solid #e1e8f5 !important;
+  border-radius: 999px !important;
+  background: #ffffff !important;
+  color: #667085 !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  line-height: 16px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar [data-template-space-tab][class*="bg-primary-600"] .quota-template-space-item-count {
+  border-color: #c7d9ff !important;
+  background: #ffffff !important;
+  color: #2563eb !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar .quota-template-add-space {
+  width: 100% !important;
+  height: 34px !important;
+  min-height: 34px !important;
+  margin-top: 6px !important;
+  border: 1px dashed #cbd8ea !important;
+  border-radius: 6px !important;
+  background: #ffffff !important;
+  color: #64748b !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar .quota-template-add-space:hover {
+  border-color: #b6c7df !important;
+  background: #f8fafc !important;
+  color: #475467 !important;
+  box-shadow: none !important;
+}
+
+/* Give the space quote project module a calmer default working height. */
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-workbench {
+  min-height: 760px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-content {
+  display: flex !important;
+  min-height: 760px !important;
+  flex-direction: column !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-main {
+  display: flex !important;
+  min-height: 760px !important;
+  flex: 1 1 auto !important;
+  flex-direction: column !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board {
+  min-height: 680px !important;
+  flex: 1 1 auto !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-empty,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-table-empty {
+  min-height: 634px !important;
+}
+
+/* Keep the add-project footer flat; no glow/shadow under the button. */
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board > .border-t {
+  border-top: 1px solid #edf1f5 !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board > .border-t button {
+  box-shadow: none !important;
+  filter: none !important;
+  transform: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board > .border-t button:hover {
+  box-shadow: none !important;
+  filter: none !important;
+  transform: none !important;
+}
+
+/* Counts in the template space/project tabs should read as plain numbers. */
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar .quota-template-space-item-count,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-group-tabs [data-template-project-group-tab] > span {
+  min-width: auto !important;
+  height: auto !important;
+  margin-left: 6px !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  padding: 0 !important;
+  color: #8a96a8 !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  line-height: 20px !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar .quota-template-space-item-count::after,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-group-tabs [data-template-project-group-tab] > span::after {
+  content: "项";
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar [data-template-space-tab][class*="bg-primary-600"] .quota-template-space-item-count,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-group-tabs [data-template-project-group-tab][class*="bg-primary-600"] > span {
+  color: #ffffff !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar [data-template-space-tab][class*="bg-primary-600"] .quota-template-space-item-count {
+  color: #2563eb !important;
+  border: 0 !important;
+  background: transparent !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-group-tabs [data-template-project-group-tab] > button:last-of-type {
+  flex: 0 1 auto !important;
+}
+
+/* Remove the square-looking glow behind project group tabs. */
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-main-groups,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-group-tabs {
+  background: transparent !important;
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-group-tabs {
+  padding: 0 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-main-groups [data-template-project-group-tab],
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-main-groups [data-template-project-group-tab]:hover,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-main-groups [data-template-project-group-tab][class*="bg-primary-600"],
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-group-tabs [data-template-project-group-tab],
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-group-tabs [data-template-project-group-tab]:hover,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-group-tabs [data-template-project-group-tab][class*="bg-primary-600"] {
+  box-shadow: none !important;
+  filter: none !important;
+  transform: none !important;
+}
+
+/* Keep quotation change-log chrome flat while allowing the record list to scroll. */
+html body .dashboard-scale-root .fixed .quotation-change-log-modal.quotation-change-log-modal > .quotation-change-log-header,
+html body .dashboard-scale-root .fixed .quotation-change-log-modal.quotation-change-log-modal > .quotation-change-log-scroll {
+  border: 0 !important;
+  border-radius: 0 !important;
+  outline: 0 !important;
+  background-color: #ffffff !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .fixed .quotation-change-log-modal.quotation-change-log-modal > .quotation-change-log-header {
+  overflow: visible !important;
+}
+
+html body .dashboard-scale-root .fixed .quotation-change-log-modal.quotation-change-log-modal > .quotation-change-log-scroll {
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }

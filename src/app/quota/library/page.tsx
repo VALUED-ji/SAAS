@@ -757,13 +757,15 @@ export default function QuotaLibraryPage() {
                   <td className="quota-unit-cell px-3 py-3 text-center text-surface-700">{item.unit}</td>
                   <td className="quota-money-cell px-3 py-3 text-center tabular-nums text-surface-700">{formatAmount(item.laborPrice)}</td>
                   <td className="quota-money-cell px-3 py-3 text-center tabular-nums text-surface-700">{formatAmount(item.materialPrice)}</td>
-                  <td className="quota-money-cell quota-total-price relative px-3 py-3 text-center font-semibold tabular-nums text-red-600">
-                    {item.isSpecialPrice && (
-                      <span className="absolute right-1.5 top-1.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-red-200 bg-red-50 text-[10px] font-bold leading-none text-red-600" title="特价项目">
-                        特
-                      </span>
-                    )}
-                    {formatAmount(item.totalPrice)}
+                  <td className="quota-money-cell quota-total-price px-3 py-3 text-center font-semibold tabular-nums text-red-600">
+                    <span className="quota-total-price-inner">
+                      <span>{formatAmount(item.totalPrice)}</span>
+                      {item.isSpecialPrice && (
+                        <span className="quota-special-price-badge" title="特价项目">
+                          特
+                        </span>
+                      )}
+                    </span>
                   </td>
                   <td className="quota-description-cell px-3 py-3 text-left text-surface-700">
                     <p className="line-clamp-2 leading-5" title={item.constructionDescription || undefined}>{item.constructionDescription || "-"}</p>

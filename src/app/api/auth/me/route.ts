@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { getRequestSession, setSessionCookie, signSessionToken } from "@/lib/security/session";
 import { getCompanyShortNameForOrgUnit, getSidebarBrandLogoUrlForOrgUnit, getSidebarBrandNameForOrgUnit, getSidebarBrandSubtitleForOrgUnit } from "@/lib/branchSettingsLookup";
+import { ensureQuotationAccessColumns, parseQuotationAccessOrgUnitIds } from "@/lib/quotationOrgAccess";
 
 function parsePermissions(value: unknown) {
   try {
@@ -20,8 +21,9 @@ export async function GET(req: NextRequest) {
 
   try {
     const db = getDb();
+    ensureQuotationAccessColumns(db);
     const user = db.prepare(`
-      SELECT id, company_id, name, phone, avatar, role, org_unit_id, COALESCE(session_version, 0) as session_version
+      SELECT id, company_id, name, phone, avatar, role, org_unit_id, quotation_access_org_unit_ids, COALESCE(session_version, 0) as session_version
       FROM users
       WHERE id = ? AND company_id = ? AND deleted_at IS NULL AND is_active = 1
     `).get(decoded.userId, decoded.companyId) as any;
@@ -62,6 +64,7 @@ export async function GET(req: NextRequest) {
       role: user.role,
       permissions: parsePermissions(role?.permissions),
       org_unit_id: user.org_unit_id,
+      quotation_access_org_unit_ids: parseQuotationAccessOrgUnitIds(user.quotation_access_org_unit_ids),
       companyName: company?.name || "",
       companyShortName,
       sidebarBrandName,

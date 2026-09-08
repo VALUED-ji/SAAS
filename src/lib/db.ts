@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS users (
   avatar TEXT,
   role TEXT NOT NULL DEFAULT 'SALES',
   org_unit_id TEXT REFERENCES org_units(id),
+  quotation_access_org_unit_ids TEXT DEFAULT '[]',
   employee_no TEXT,
   hire_date TEXT,
   notes TEXT,
@@ -336,6 +337,7 @@ CREATE TABLE IF NOT EXISTS quotations (
   project_id TEXT REFERENCES projects(id),
   company_id TEXT NOT NULL REFERENCES companies(id),
   title TEXT,
+  quotation_type TEXT,
   version INTEGER DEFAULT 1,
   total_amount REAL NOT NULL,
   discount REAL DEFAULT 0,
@@ -352,6 +354,8 @@ CREATE TABLE IF NOT EXISTS quotations (
   temp_customer_address TEXT,
   temp_customer_area REAL,
   temp_customer_decoration_type TEXT,
+  quotation_org_unit_id TEXT REFERENCES org_units(id),
+  quotation_org_unit_name TEXT,
   created_by_id TEXT NOT NULL REFERENCES users(id),
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now')),
@@ -382,6 +386,9 @@ CREATE TABLE IF NOT EXISTS quotation_items (
   fee_calc_method TEXT,
   fee_calc_base TEXT,
   fee_rate REAL,
+  fee_scope_mode TEXT,
+  fee_scope_space_ids TEXT,
+  fee_scope_space_names TEXT,
   quota_source_id TEXT,
   quota_source_type TEXT,
   sort_order INTEGER DEFAULT 0,
@@ -951,11 +958,13 @@ function ensureDatabaseSchema(database: Database.Database): void {
   ensureColumn(database, "customer_deposit_records", "design_fee_unit_price", "REAL");
   ensureColumn(database, "customer_deposit_records", "designer_level", "TEXT");
   ensureColumn(database, "users", "session_version", "INTEGER DEFAULT 0");
+  ensureColumn(database, "users", "quotation_access_org_unit_ids", "TEXT DEFAULT '[]'");
   ensureColumn(database, "payment_records", "reversal_of_record_id", "TEXT");
   ensureColumn(database, "payment_records", "reversed_at", "TEXT");
   ensureColumn(database, "payment_records", "reversed_by_id", "TEXT");
   ensureColumn(database, "payment_records", "reversal_reason", "TEXT");
   ensureColumn(database, "quotations", "title", "TEXT");
+  ensureColumn(database, "quotations", "quotation_type", "TEXT");
   ensureColumn(database, "quotations", "terms", "TEXT");
   ensureColumn(database, "quotations", "settings", "TEXT");
   ensureColumn(database, "quotations", "temp_customer_name", "TEXT");
@@ -965,6 +974,8 @@ function ensureDatabaseSchema(database: Database.Database): void {
   ensureColumn(database, "quotations", "temp_customer_address", "TEXT");
   ensureColumn(database, "quotations", "temp_customer_area", "REAL");
   ensureColumn(database, "quotations", "temp_customer_decoration_type", "TEXT");
+  ensureColumn(database, "quotations", "quotation_org_unit_id", "TEXT REFERENCES org_units(id)");
+  ensureColumn(database, "quotations", "quotation_org_unit_name", "TEXT");
   ensureColumn(database, "roles", "data_scope", "TEXT DEFAULT 'self'");
   ensureColumn(database, "attachments", "customer_id", "TEXT REFERENCES customers(id)");
   ensureColumn(database, "attachments", "followup_id", "TEXT REFERENCES follow_ups(id)");
@@ -982,6 +993,9 @@ function ensureDatabaseSchema(database: Database.Database): void {
   ensureColumn(database, "quotation_items", "fee_calc_method", "TEXT");
   ensureColumn(database, "quotation_items", "fee_calc_base", "TEXT");
   ensureColumn(database, "quotation_items", "fee_rate", "REAL");
+  ensureColumn(database, "quotation_items", "fee_scope_mode", "TEXT");
+  ensureColumn(database, "quotation_items", "fee_scope_space_ids", "TEXT");
+  ensureColumn(database, "quotation_items", "fee_scope_space_names", "TEXT");
   ensureColumn(database, "quotation_items", "quota_source_id", "TEXT");
   ensureColumn(database, "quotation_items", "quota_source_type", "TEXT");
   ensureColumn(database, "custom_quota_items", "work_type_id", "TEXT");

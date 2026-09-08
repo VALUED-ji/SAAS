@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent as ReactChangeEvent, type ClipboardEvent as ReactClipboardEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { AlignCenter, AlignLeft, Bold, Building2, ChevronDown, Copy, Eraser, GripVertical, Italic, LayoutTemplate, List, ListOrdered, Loader2, Pencil, Plus, Power, Search, SlidersHorizontal, Trash2, Underline, X } from "lucide-react";
+import { createPortal } from "react-dom";
+import { AlignCenter, AlignLeft, Bold, Building2, Check, ChevronDown, Copy, Eraser, GripVertical, Italic, LayoutTemplate, List, ListOrdered, Loader2, Pencil, Plus, Power, Search, SlidersHorizontal, Trash2, Underline, X } from "lucide-react";
 import DataPagination, { useDataPagination } from "@/components/ui/DataPagination";
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
 import { useAuth } from "@/lib/auth";
@@ -11,6 +12,7 @@ import {
   normalizeFeeCalcBase,
   normalizeFeeCalcMethod,
   type FeeCalcMethod,
+  type FeeScopeMode,
 } from "@/lib/quotationFeeFormulas";
 import { formatAlphaSequence } from "@/lib/quotationSequence";
 import SystemSelect from "@/components/ui/SystemSelect";
@@ -114,6 +116,155 @@ import type {
   TemplateSpaceQuotaScope,
   TemplateStatus,
 } from "./quota-templates-shared";
+
+function hasBranchTemplateScope(template: QuotaTemplate) {
+  return template.autoScope?.scopeType === "branch" && Boolean(template.autoScope.orgUnitId || template.autoScope.branchOrgUnitId);
+}
+
+const templateFeeScopeModeOptions: Array<{ value: FeeScopeMode; label: string }> = [
+  { value: "all", label: "全部空间/类别都计入" },
+  { value: "exclude", label: "不计入选中的空间/类别" },
+  { value: "include", label: "只计入选中的空间/类别" },
+];
+
+function TemplateFeeScopeSelector({
+  mode,
+  selectedNames,
+  options,
+  onModeChange,
+  onToggleName,
+}: {
+  mode: FeeScopeMode;
+  selectedNames: string[];
+  options: string[];
+  onModeChange: (mode: FeeScopeMode) => void;
+  onToggleName: (name: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const [popoverPosition, setPopoverPosition] = useState({ left: 0, top: 0 });
+  const selectedSet = new Set(selectedNames);
+  const selectedText = selectedNames.length > 0 ? selectedNames.join("、") : "请选择范围";
+  const modeLabel = mode === "exclude" ? "排除" : mode === "include" ? "仅含" : "";
+  const summary = mode === "all" ? "全部计入" : `${modeLabel}：${selectedText}`;
+
+  const updatePopoverPosition = useCallback(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const width = 286;
+    const viewportPadding = 12;
+    const currentHeight = popoverRef.current?.offsetHeight;
+    const estimatedHeight = currentHeight || (mode === "all" ? 118 : Math.min(272, 100 + Math.min(Math.max(options.length, 1), 5) * 32));
+    const left = Math.min(Math.max(rect.left + rect.width / 2 - width / 2, viewportPadding), window.innerWidth - width - viewportPadding);
+    const hasRoomAbove = rect.top >= estimatedHeight + viewportPadding;
+    const top = hasRoomAbove ? rect.top - estimatedHeight - 6 : Math.min(rect.bottom + 6, window.innerHeight - estimatedHeight - viewportPadding);
+    setPopoverPosition({ left, top: Math.max(viewportPadding, top) });
+  }, [mode, options.length]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!wrapperRef.current?.contains(target) && !popoverRef.current?.contains(target)) {
+        setOpen(false);
+      }
+    };
+    updatePopoverPosition();
+    window.addEventListener("resize", updatePopoverPosition);
+    window.addEventListener("scroll", updatePopoverPosition, true);
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.removeEventListener("resize", updatePopoverPosition);
+      window.removeEventListener("scroll", updatePopoverPosition, true);
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [open, updatePopoverPosition]);
+
+  useEffect(() => {
+    if (open) updatePopoverPosition();
+  }, [open, mode, selectedNames.length, options.length, updatePopoverPosition]);
+
+  const popover = open && typeof document !== "undefined" ? createPortal(
+    <div className="quota-template-scope-popover-layer">
+      <div
+        ref={popoverRef}
+        className="quota-template-fee-scope-popover"
+        style={{ left: popoverPosition.left, top: popoverPosition.top }}
+      >
+        <div className="quota-template-fee-scope-popover-segment" role="group" aria-label="计费范围">
+          {templateFeeScopeModeOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              data-active={mode === option.value || undefined}
+              onClick={() => {
+                onModeChange(option.value);
+                if (option.value === "all") setOpen(false);
+              }}
+            >
+              <span>{option.label}</span>
+              <span className="quota-template-fee-scope-mode-dot" />
+            </button>
+          ))}
+        </div>
+        {mode !== "all" && (
+          <div className="quota-template-fee-scope-popover-list">
+            {options.length === 0 ? (
+              <span className="quota-template-fee-scope-empty">暂无空间/类别</span>
+            ) : options.map((name) => {
+              const checked = selectedSet.has(name);
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  data-active={checked || undefined}
+                  onClick={() => onToggleName(name)}
+                  title={name}
+                >
+                  <span className="quota-template-fee-scope-check">{checked && <Check className="h-2.5 w-2.5" />}</span>
+                  <span className="truncate">{name}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body,
+  ) : null;
+
+  return (
+    <>
+      <div className="quota-template-fee-scope-compact" ref={wrapperRef}>
+        <button
+          ref={triggerRef}
+          type="button"
+          className="quota-template-fee-scope-trigger"
+          onClick={() => {
+            updatePopoverPosition();
+            setOpen((current) => !current);
+          }}
+          title={summary}
+        >
+          {mode === "all" ? (
+            <span className="quota-template-fee-scope-trigger-text">{summary}</span>
+          ) : (
+            <>
+              <span className="quota-template-fee-scope-kind">{modeLabel}</span>
+              <span className="quota-template-fee-scope-trigger-text">{selectedText}</span>
+            </>
+          )}
+          <ChevronDown className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      {popover}
+    </>
+  );
+}
+
 export default function QuotaTemplatesPage() {
   const { user } = useAuth();
   const currentCreatorName = user?.name?.trim() || DEFAULT_TEMPLATE_CREATOR;
@@ -121,6 +272,8 @@ export default function QuotaTemplatesPage() {
   const [templatesLoaded, setTemplatesLoaded] = useState(false);
   const [search, setSearch] = useState("");
   const [pricingModeFilter, setPricingModeFilter] = useState<PricingMode | "">("");
+  const [statusFilter, setStatusFilter] = useState<TemplateStatus | "">("");
+  const [branchScopeFilter, setBranchScopeFilter] = useState("");
   const [selectedId, setSelectedId] = useState(templates[0]?.id || "");
   const [editingTemplate, setEditingTemplate] = useState<QuotaTemplate | null>(null);
   const [editingMode, setEditingMode] = useState<TemplateEditMode>("edit");
@@ -152,6 +305,7 @@ export default function QuotaTemplatesPage() {
   const [dragOverFee, setDragOverFee] = useState<DragOverFeeState>(null);
   const [recentlyMovedFeeId, setRecentlyMovedFeeId] = useState<string | null>(null);
   const [spaceAutoSaveStatus, setSpaceAutoSaveStatus] = useState<SpaceAutoSaveStatus>("idle");
+  const [templateSaveStatus, setTemplateSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [numberInputDrafts, setNumberInputDrafts] = useState<Record<string, string>>({});
   const templatesRef = useRef<QuotaTemplate[]>(initialTemplates);
   const pointerSpaceDragRef = useRef<{ sourceId: string; startX: number; startY: number; moved: boolean; targetId: string | null; position: ItemDropPosition } | null>(null);
@@ -163,6 +317,8 @@ export default function QuotaTemplatesPage() {
   const movedQuotaTimerRef = useRef<number | null>(null);
   const movedFeeTimerRef = useRef<number | null>(null);
   const spaceAutoSaveTimerRef = useRef<number | null>(null);
+  const templateSaveTimerRef = useRef<number | null>(null);
+  const templateSaveStatusTimerRef = useRef<number | null>(null);
   const spaceAutoSaveRunRef = useRef(0);
   const lastSpaceAutoSavePayloadRef = useRef("");
   const budgetCompilationEditorRef = useRef<HTMLDivElement | null>(null);
@@ -176,20 +332,6 @@ export default function QuotaTemplatesPage() {
       // 本地缓存保底，避免网络瞬断时编辑内容丢失。
     });
   }, []);
-
-  const makeGlobalTemplateScope = useCallback((source?: QuotaTemplateAutoScope | null): QuotaTemplateAutoScope => ({
-    scopeType: "global",
-    branchOrgUnitId: "",
-    branchOrgUnitName: "",
-    branchOrgUnitPath: "",
-    orgUnitId: "",
-    orgUnitName: "",
-    orgUnitPath: "",
-    orgUnitType: "",
-    companyName: source?.companyName || "",
-    createdByUserId: source?.createdByUserId || user?.id || "",
-    createdByName: source?.createdByName || currentCreatorName,
-  }), [currentCreatorName, user?.id]);
 
   const makeBranchTemplateScope = useCallback((branchId: string, source?: QuotaTemplateAutoScope | null): QuotaTemplateAutoScope | null => {
     const branch = templateScopeOptions.find((option) => option.id === branchId);
@@ -209,12 +351,17 @@ export default function QuotaTemplatesPage() {
     };
   }, [currentCreatorName, templateScopeOptions, user?.id]);
 
-  const normalizeEditableTemplateScope = useCallback((template: QuotaTemplate): QuotaTemplateAutoScope => {
+  const makeDefaultTemplateScope = useCallback((source?: QuotaTemplateAutoScope | null): QuotaTemplateAutoScope | null => {
+    const branchId = source?.orgUnitId || source?.branchOrgUnitId || templateScopeOptions[0]?.id || "";
+    return makeBranchTemplateScope(branchId, source);
+  }, [makeBranchTemplateScope, templateScopeOptions]);
+
+  const normalizeEditableTemplateScope = useCallback((template: QuotaTemplate): QuotaTemplateAutoScope | null => {
     if (template.autoScope?.scopeType === "branch" && template.autoScope.orgUnitId) {
       return makeBranchTemplateScope(template.autoScope.orgUnitId, template.autoScope) || template.autoScope;
     }
-    return makeGlobalTemplateScope(template.autoScope);
-  }, [makeBranchTemplateScope, makeGlobalTemplateScope]);
+    return makeDefaultTemplateScope(template.autoScope);
+  }, [makeBranchTemplateScope, makeDefaultTemplateScope]);
 
   const loadTemplateScopeOptionsFallback = useCallback(async () => {
     try {
@@ -350,7 +497,7 @@ export default function QuotaTemplatesPage() {
             }))
             .filter((option: { id: string; name: string; path: string; type: string }) => option.id && option.name)
           : [];
-	        const loadedTemplates = serverTemplates;
+	        const loadedTemplates = serverTemplates.filter(hasBranchTemplateScope);
 	        if (cancelled) return;
         setTemplateScopeOptions(nextScopeOptions);
         if (nextScopeOptions.length === 0) void loadTemplateScopeOptionsFallback();
@@ -360,8 +507,9 @@ export default function QuotaTemplatesPage() {
         setTemplatesLoaded(true);
       } catch {
         if (cancelled) return;
-	        setTemplates(localTemplates);
-	        setSelectedId(localTemplates[0]?.id || "");
+	        const fallbackTemplates = localTemplates.filter(hasBranchTemplateScope);
+	        setTemplates(fallbackTemplates);
+	        setSelectedId(fallbackTemplates[0]?.id || "");
 	        void loadQuotaLibraryOptions();
         void loadTemplateScopeOptionsFallback();
 	        setTemplatesLoaded(true);
@@ -388,8 +536,19 @@ export default function QuotaTemplatesPage() {
   }, [templates]);
 
   useEffect(() => {
+    if (branchScopeFilter === "__global__") setBranchScopeFilter("");
+  }, [branchScopeFilter]);
+
+  useEffect(() => {
     setNumberInputDrafts({});
   }, [editingTemplate?.id]);
+
+  useEffect(() => {
+    if (!editingTemplate || hasBranchTemplateScope(editingTemplate) || templateScopeOptions.length === 0) return;
+    const nextScope = makeDefaultTemplateScope(editingTemplate.autoScope);
+    if (!nextScope) return;
+    setEditingTemplate({ ...editingTemplate, autoScope: nextScope });
+  }, [editingTemplate, makeDefaultTemplateScope, templateScopeOptions.length]);
 
   useEffect(() => {
     if (!budgetCompilationEditorRef.current) return;
@@ -399,7 +558,7 @@ export default function QuotaTemplatesPage() {
     }
   }, [editingTemplate?.id, editingTemplate?.budgetCompilationHtml]);
 
-  const visibleTemplates = templates;
+  const visibleTemplates = templates.filter(hasBranchTemplateScope);
   const filteredTemplates = useMemo(() => {
     const keyword = search.trim().toLowerCase();
     return visibleTemplates.filter((template) => {
@@ -407,19 +566,24 @@ export default function QuotaTemplatesPage() {
       const matchesKeyword = !keyword || [
         template.name,
         template.remark,
-	        template.createdByName,
-	        getTemplateStatusLabel(template.status),
-	        getPricingModeLabel(template.quoteConfig.mode),
+        template.createdByName,
+        template.createdAt,
+        template.updatedAt,
+        getTemplateStatusLabel(template.status),
+        getPricingModeLabel(template.quoteConfig.mode),
         getQuotaTemplateScopeLabel(template, templateScopeOptions as any),
         getQuotaTemplateScopePath(template, templateScopeOptions as any),
-	        ...applicabilityTags,
-	      ].some((value) => value.toLowerCase().includes(keyword));
+        ...applicabilityTags,
+      ].some((value) => value.toLowerCase().includes(keyword));
       const matchesPricingMode = !pricingModeFilter || template.quoteConfig.mode === pricingModeFilter;
-      return matchesKeyword && matchesPricingMode;
+      const matchesStatus = !statusFilter || template.status === statusFilter;
+      const templateScopeId = String(template.autoScope?.orgUnitId || template.autoScope?.branchOrgUnitId || "").trim();
+      const matchesBranchScope = !branchScopeFilter || templateScopeId === branchScopeFilter;
+      return matchesKeyword && matchesPricingMode && matchesStatus && matchesBranchScope;
     });
-  }, [pricingModeFilter, search, templateScopeOptions, visibleTemplates]);
+  }, [branchScopeFilter, pricingModeFilter, search, statusFilter, templateScopeOptions, visibleTemplates]);
 
-  const pagination = useDataPagination(filteredTemplates, [search, pricingModeFilter].join("|"));
+  const pagination = useDataPagination(filteredTemplates, [search, pricingModeFilter, statusFilter, branchScopeFilter].join("|"));
   const selectedTemplate = visibleTemplates.find((template) => template.id === selectedId) || filteredTemplates[0] || visibleTemplates[0];
   const activeSpace = editingTemplate?.spaces.find((space) => space.id === activeSpaceId) || editingTemplate?.spaces[0] || null;
   const quotaCategoryOptions = useMemo(() => {
@@ -460,6 +624,11 @@ export default function QuotaTemplatesPage() {
   const pickerIsMultiSelect = Boolean(quotaPickerTarget && !quotaPickerTarget.quotaItemId);
   const visiblePickerIds = visibleQuotaLibraryItems.map((item) => item.id);
   const isVisiblePickerAllSelected = pickerIsMultiSelect && visiblePickerIds.length > 0 && visiblePickerIds.every((id) => pickedQuotaIdSet.has(id));
+  const pickedQuotaTotal = useMemo(() => (
+    quotaLibraryItems
+      .filter((item) => pickedQuotaIdSet.has(item.id))
+      .reduce((sum, item) => sum + Number(item.totalPrice || 0), 0)
+  ), [pickedQuotaIdSet, quotaLibraryItems]);
   const spaceAutoSaveText = getSpaceAutoSaveText(spaceAutoSaveStatus, editingMode);
   const quoteRemarkShouldFill = editingTemplate?.quoteConfig.mode === "list"
     || editingTemplate?.quoteConfig.mode === "package"
@@ -468,6 +637,18 @@ export default function QuotaTemplatesPage() {
   const spaceConfigCopy = getSpaceConfigModeCopy(editingTemplate?.quoteConfig.mode || "package");
   const templateProjectGroups = getTemplateProjectGroups(editingTemplate);
   const activeSpaceProjectGroups = getSpaceProjectGroups(activeSpace, templateProjectGroups);
+  const templateFeeScopeOptions = useMemo(() => {
+    const names = new Set<string>();
+    (editingTemplate?.spaces || []).forEach((space) => {
+      const name = space.name.trim();
+      if (name) names.add(name);
+    });
+    templateProjectGroups.forEach((group) => {
+      const name = group.name.trim();
+      if (name) names.add(name);
+    });
+    return Array.from(names);
+  }, [editingTemplate?.spaces, templateProjectGroups]);
   const templateFeeFormulaExamples = getTemplateFeeFormulaExamples(templateProjectGroups);
   const templateFeeFormulaExampleText = `${templateFeeFormulaExamples.join("、")}、A+B、(直接费+A)`;
   const templateFeeFormulaPlaceholder = getTemplateFeeFormulaPlaceholder(templateProjectGroups);
@@ -565,9 +746,10 @@ export default function QuotaTemplatesPage() {
 
   const openCreateTemplate = () => {
     const draftTemplate = loadTemplateDraftFromStorage();
+    const defaultScope = makeDefaultTemplateScope(draftTemplate?.autoScope || null);
     const template = draftTemplate
-      ? { ...draftTemplate, createdByName: draftTemplate.createdByName || currentCreatorName, autoScope: normalizeEditableTemplateScope(draftTemplate) }
-      : { ...makeEmptyTemplate(), createdByName: currentCreatorName, autoScope: makeGlobalTemplateScope() };
+      ? { ...draftTemplate, createdByName: draftTemplate.createdByName || currentCreatorName, autoScope: normalizeEditableTemplateScope(draftTemplate) || defaultScope }
+      : { ...makeEmptyTemplate(), createdByName: currentCreatorName, autoScope: defaultScope };
     setEditingMode("create");
     setEditingTemplate(template);
     setActiveSpaceId(template.spaces[0]?.id || "");
@@ -610,11 +792,13 @@ export default function QuotaTemplatesPage() {
         id: `space-copy-${copySeed}-${spaceIndex}`,
         quotaItems: space.quotaItems.map((item, itemIndex) => ({ ...item, id: `space-quota-copy-${copySeed}-${spaceIndex}-${itemIndex}` })),
       })),
+      createdAt: todayText(),
       updatedAt: todayText(),
     };
   };
 
   const handleCopyTemplate = (template: QuotaTemplate) => {
+    if (!window.confirm(`确认复制模板“${template.name}”吗？\n复制后会生成一份新的模板副本。`)) return;
     const copyTemplate = buildCopiedTemplate(template, `${template.name} 副本`);
     setTemplates((current) => [copyTemplate, ...current]);
     setSelectedId(copyTemplate.id);
@@ -622,6 +806,8 @@ export default function QuotaTemplatesPage() {
 
   const toggleTemplateStatus = (template: QuotaTemplate) => {
     const nextStatus: TemplateStatus = template.status === "disabled" ? "enabled" : "disabled";
+    const actionText = nextStatus === "disabled" ? "停用" : "启用";
+    if (!window.confirm(`确认${actionText}模板“${template.name}”吗？`)) return;
     const nextUpdatedAt = todayText();
     setTemplates((current) => current.map((currentTemplate) => currentTemplate.id === template.id
       ? { ...currentTemplate, status: nextStatus, updatedAt: nextUpdatedAt }
@@ -899,6 +1085,21 @@ export default function QuotaTemplatesPage() {
     } : current);
   };
 
+  const toggleComprehensiveFeeScopeName = (feeId: string, name: string) => {
+    const scopeName = name.trim();
+    if (!scopeName) return;
+    setEditingTemplate((current) => current ? {
+      ...current,
+      comprehensiveFees: current.comprehensiveFees.map((fee) => {
+        if (fee.id !== feeId) return fee;
+        const names = new Set(fee.fee_scope_space_names || []);
+        if (names.has(scopeName)) names.delete(scopeName);
+        else names.add(scopeName);
+        return { ...fee, fee_scope_space_names: Array.from(names) };
+      }),
+    } : current);
+  };
+
   const removeComprehensiveFee = (feeId: string) => {
     setEditingTemplate((current) => current ? {
       ...current,
@@ -1006,6 +1207,26 @@ export default function QuotaTemplatesPage() {
   const addQuotaToSpace = (spaceId: string, quoteScope: TemplateSpaceQuotaScope) => {
     setActiveSpaceId(spaceId);
     setActiveQuotaScope(quoteScope);
+    if (quoteScope !== "foundation") {
+      const groupName = getProjectGroupName(templateProjectGroups, quoteScope);
+      const nextItem = makeSpaceQuotaItem({
+        category: groupName,
+        name: `${groupName}项目`,
+        unit: quoteScope === "custom_cabinet" ? "㎡" : "项",
+        quoteScope,
+      });
+      setEditingTemplate((current) => current ? {
+        ...current,
+        spaces: current.spaces.map((space) => space.id === spaceId ? {
+          ...withSpaceProjectGroup(space, quoteScope),
+          quotaItems: [...space.quotaItems, nextItem],
+        } : space),
+      } : current);
+      setPickedQuotaIds([]);
+      setQuotaPickerTarget(null);
+      resetCustomQuotaDraft();
+      return;
+    }
     setQuotaPickerTarget({ spaceId, quoteScope });
     setQuotaPickerSearch("");
     setQuotaPickerCategory("");
@@ -1562,8 +1783,19 @@ export default function QuotaTemplatesPage() {
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [flushTemplateAutoSave]);
 
+  useEffect(() => {
+    return () => {
+      if (templateSaveTimerRef.current) window.clearTimeout(templateSaveTimerRef.current);
+      if (templateSaveStatusTimerRef.current) window.clearTimeout(templateSaveStatusTimerRef.current);
+    };
+  }, []);
+
   const closeEditingTemplate = () => {
     if (spaceAutoSaveTimerRef.current) window.clearTimeout(spaceAutoSaveTimerRef.current);
+    if (templateSaveTimerRef.current) window.clearTimeout(templateSaveTimerRef.current);
+    if (templateSaveStatusTimerRef.current) window.clearTimeout(templateSaveStatusTimerRef.current);
+    templateSaveTimerRef.current = null;
+    templateSaveStatusTimerRef.current = null;
     flushTemplateAutoSave();
     setEditingTemplate(null);
     setActiveSpaceId("");
@@ -1572,15 +1804,18 @@ export default function QuotaTemplatesPage() {
     setConstructionTemplatePickerOpen(false);
     setConstructionTemplateSearch("");
     setSpaceAutoSaveStatus("idle");
+    setTemplateSaveStatus("idle");
   };
 
 	  const saveEditingTemplate = () => {
 	    if (!editingTemplate) return;
+	    if (templateSaveStatus !== "idle") return;
 	    if (!editingTemplate.name.trim()) {
 	      window.alert("请填写模板名称");
 	      return;
 	    }
-    if (editingTemplate.autoScope?.scopeType === "branch" && !editingTemplate.autoScope.orgUnitId) {
+    const nextTemplateScope = normalizeEditableTemplateScope(editingTemplate);
+    if (!nextTemplateScope?.orgUnitId) {
       window.alert("请选择模板适用的分公司");
       return;
     }
@@ -1596,7 +1831,7 @@ export default function QuotaTemplatesPage() {
       ...editingTemplate,
       name: editingTemplate.name.trim(),
       remark: editingTemplate.remark.trim(),
-      autoScope: normalizeEditableTemplateScope(editingTemplate),
+      autoScope: nextTemplateScope,
       constructionTemplateConfig: nextConstructionTemplateConfig.name ? nextConstructionTemplateConfig : makeDefaultConstructionTemplateConfig(),
       quoteConfig: {
         ...editingTemplate.quoteConfig,
@@ -1641,6 +1876,8 @@ export default function QuotaTemplatesPage() {
           fee_rate: normalizeFeeCalcMethod(fee.fee_calc_method) === "percent" ? toAmount(fee.fee_rate) : 0,
           unit_price: normalizeFeeCalcMethod(fee.fee_calc_method) === "fixed" ? toAmount(fee.unit_price) : 0,
           remark: fee.remark.trim(),
+	          fee_scope_mode: (fee.fee_scope_mode === "include" || fee.fee_scope_mode === "exclude" ? fee.fee_scope_mode : "all") as FeeScopeMode,
+          fee_scope_space_names: Array.from(new Set((fee.fee_scope_space_names || []).map((name) => name.trim()).filter(Boolean))),
         }))
         .filter((fee) => fee.name),
       appendixNote: editingTemplate.appendixNote.trim(),
@@ -1667,8 +1904,10 @@ export default function QuotaTemplatesPage() {
             .filter((item) => item.name),
         }))
         .filter((space) => space.name),
+      createdAt: editingTemplate.createdAt || todayText(),
       updatedAt: todayText(),
     };
+    setTemplateSaveStatus("saving");
     setTemplates((current) => current.some((template) => template.id === nextTemplate.id)
       ? current.map((template) => template.id === nextTemplate.id ? nextTemplate : template)
       : [nextTemplate, ...current]
@@ -1677,13 +1916,22 @@ export default function QuotaTemplatesPage() {
     if (editingMode === "create") clearTemplateDraftFromStorage();
     if (spaceAutoSaveTimerRef.current) window.clearTimeout(spaceAutoSaveTimerRef.current);
     lastSpaceAutoSavePayloadRef.current = "";
-    setEditingTemplate(null);
-    setActiveSpaceId("");
-    setQuotaPickerTarget(null);
-    setPickedQuotaIds([]);
-    setConstructionTemplatePickerOpen(false);
-    setConstructionTemplateSearch("");
-    setSpaceAutoSaveStatus("idle");
+    setSpaceAutoSaveStatus("saved");
+    templateSaveStatusTimerRef.current = window.setTimeout(() => {
+      setTemplateSaveStatus("saved");
+      templateSaveStatusTimerRef.current = null;
+    }, 180);
+    templateSaveTimerRef.current = window.setTimeout(() => {
+      setEditingTemplate(null);
+      setActiveSpaceId("");
+      setQuotaPickerTarget(null);
+      setPickedQuotaIds([]);
+      setConstructionTemplatePickerOpen(false);
+      setConstructionTemplateSearch("");
+      setSpaceAutoSaveStatus("idle");
+      setTemplateSaveStatus("idle");
+      templateSaveTimerRef.current = null;
+    }, 680);
   };
 
   return (
@@ -1701,6 +1949,25 @@ export default function QuotaTemplatesPage() {
                 <option value="">全部报价模式</option>
                 {pricingModeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </SystemSelect>
+              <SystemSelect value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as TemplateStatus | "")} className="input-field h-10 w-32 py-0">
+                <option value="">全部状态</option>
+                <option value="enabled">启用</option>
+                <option value="disabled">停用</option>
+              </SystemSelect>
+              <SystemSelect
+                value={branchScopeFilter}
+                onChange={(event) => setBranchScopeFilter(event.target.value)}
+                className="input-field h-10 w-48 py-0"
+                menuMinWidth={340}
+                menuMaxHeight={260}
+                searchable
+                searchPlaceholder="搜索分公司"
+              >
+                <option value="">全部分公司</option>
+                {templateScopeOptions.map((option) => (
+                  <option key={option.id} value={option.id}>{option.path || option.name}</option>
+                ))}
+              </SystemSelect>
             </div>
             <span className="quota-template-toolbar-divider mx-1 h-5 w-px bg-surface-200" />
             <button type="button" onClick={openCreateTemplate} className="quota-template-primary-action btn-primary min-h-10 px-3"><Plus className="h-4 w-4" />新增模板</button>
@@ -1710,17 +1977,18 @@ export default function QuotaTemplatesPage() {
 
       <section className="table-shell quota-list-shell flex min-h-0 flex-1 flex-col">
         <ThinScrollArea className="quota-list-scroll min-h-0 flex-1" scrollClassName="h-full overflow-y-auto">
-	          <table className="quota-list-table w-full min-w-[1480px] table-fixed text-sm">
+	          <table className="quota-list-table w-full min-w-[1680px] table-fixed text-sm">
 	            <colgroup>
-	              <col className="w-[5%]" />
-	              <col className="w-[20%]" />
-	              <col className="w-[11%]" />
+	              <col className="w-[4%]" />
+	              <col className="w-[18%]" />
+	              <col className="w-[10%]" />
 	              <col className="w-[12%]" />
-	              <col className="w-[9%]" />
-	              <col className="w-[21%]" />
-	              <col className="w-[10%]" />
 	              <col className="w-[8%]" />
-	              <col className="w-[10%]" />
+	              <col className="w-[15%]" />
+	              <col className="w-[9%]" />
+	              <col className="w-[9%]" />
+	              <col className="w-[6%]" />
+	              <col className="w-[9%]" />
             </colgroup>
             <thead className="bg-surface-100 text-xs font-semibold text-surface-700">
               <tr className="border-b border-surface-300">
@@ -1728,9 +1996,10 @@ export default function QuotaTemplatesPage() {
 	                <th className="px-3 py-3 text-left">模板名称</th>
 	                <th className="px-3 py-3 text-center">报价模式</th>
 	                <th className="px-3 py-3 text-center">适用范围</th>
-	                <th className="px-3 py-3 text-center">创建人</th>
-	                <th className="px-3 py-3 text-left">备注说明</th>
+                <th className="px-3 py-3 text-center">创建人</th>
+                <th className="px-3 py-3 text-left">备注说明</th>
                 <th className="px-3 py-3 text-center">更新时间</th>
+                <th className="px-3 py-3 text-center">创建时间</th>
                 <th className="px-3 py-3 text-center">状态</th>
                 <th className="px-3 py-3 text-center">操作</th>
               </tr>
@@ -1738,7 +2007,7 @@ export default function QuotaTemplatesPage() {
             <tbody className="divide-y divide-surface-200">
               {pagination.pageItems.length === 0 ? (
                 <tr>
-	                  <td colSpan={9} className="quota-template-empty-cell px-3 py-10 text-center">
+	                  <td colSpan={10} className="quota-template-empty-cell px-3 py-10 text-center">
                     <div className="quota-template-empty-state mx-auto flex max-w-sm flex-col items-center text-center">
                       <span className="quota-template-empty-icon inline-flex items-center justify-center" aria-hidden="true">
                         <LayoutTemplate className="h-6 w-6" />
@@ -1765,7 +2034,7 @@ export default function QuotaTemplatesPage() {
                       event.preventDefault();
                       openEditTemplate(template);
                     }}
-                    className={selectedTemplate?.id === template.id ? "cursor-pointer bg-primary-50/70 outline-none ring-inset focus-visible:ring-2 focus-visible:ring-primary-200" : "cursor-pointer bg-white outline-none ring-inset hover:bg-surface-50 focus-visible:ring-2 focus-visible:ring-primary-200"}
+                    className="cursor-pointer bg-white outline-none ring-inset hover:bg-surface-50 focus-visible:ring-2 focus-visible:ring-primary-200"
                     title="点击编辑模板"
                   >
                     <td className="px-3 py-3 text-center font-semibold tabular-nums text-surface-500">{rowNumber}</td>
@@ -1789,6 +2058,7 @@ export default function QuotaTemplatesPage() {
                       <p className="line-clamp-2 leading-5" title={template.remark || undefined}>{template.remark || "-"}</p>
                     </td>
                     <td className="px-3 py-3 text-center text-surface-500">{template.updatedAt}</td>
+                    <td className="px-3 py-3 text-center text-surface-500">{template.createdAt || template.updatedAt}</td>
                     <td className="px-3 py-3 text-center">
                       <span className={`quota-status-tag ${isDisabled ? "quota-status-tag-disabled" : "quota-status-tag-enabled"} inline-flex h-6 items-center rounded-full border px-2 text-xs font-semibold ${getTemplateStatusBadgeClass(template.status)}`}>
                         {getTemplateStatusLabel(template.status)}
@@ -1851,39 +2121,25 @@ export default function QuotaTemplatesPage() {
 	                      <span className="text-xs font-semibold text-surface-600">模板名称 <span className="text-red-500">*</span></span>
 	                      <input value={editingTemplate.name} onChange={(event) => setEditingTemplate({ ...editingTemplate, name: event.target.value })} className="input-field" placeholder="如：番禺店标准半包模板" />
 	                    </label>
-	                    <div className="grid gap-3 md:grid-cols-[160px_minmax(0,1fr)]">
-	                      <label className="space-y-1.5">
-	                        <span className="text-xs font-semibold text-surface-600">适用范围</span>
-	                        <SystemSelect
-	                          value={editingTemplate.autoScope?.scopeType === "branch" ? "branch" : "global"}
-	                          onChange={(event) => {
-	                            const nextType = event.target.value;
-	                            const nextScope = nextType === "branch"
-	                              ? makeBranchTemplateScope(templateScopeOptions[0]?.id || "", editingTemplate.autoScope)
-	                              : makeGlobalTemplateScope(editingTemplate.autoScope);
-	                            if (!nextScope) return;
-	                            setEditingTemplate({ ...editingTemplate, autoScope: nextScope });
-	                          }}
-	                          className="input-field h-10 py-0"
-	                        >
-	                          <option value="global">总部通用</option>
-	                          <option value="branch" disabled={templateScopeOptions.length === 0}>指定分公司</option>
-	                        </SystemSelect>
-	                      </label>
-	                      <label className="space-y-1.5">
-	                        <span className="text-xs font-semibold text-surface-600">分公司</span>
-	                        <SystemSelect
-	                          value={editingTemplate.autoScope?.scopeType === "branch" ? editingTemplate.autoScope.orgUnitId : ""}
-	                          onChange={(event) => {
-	                            const nextScope = makeBranchTemplateScope(event.target.value, editingTemplate.autoScope);
-	                            if (!nextScope) return;
-	                            setEditingTemplate({ ...editingTemplate, autoScope: nextScope });
-	                          }}
-	                          disabled={editingTemplate.autoScope?.scopeType !== "branch" || templateScopeOptions.length === 0}
-	                          className="input-field h-10 py-0 disabled:cursor-not-allowed disabled:bg-surface-100 disabled:text-surface-400"
-	                        >
-	                          <option value="">{templateScopeOptions.length > 0 ? "选择分公司" : "暂无可选分公司"}</option>
-	                          {templateScopeOptions.map((option) => (
+		                    <div className="grid gap-3">
+		                      <label className="space-y-1.5">
+		                        <span className="text-xs font-semibold text-surface-600">适用分公司 <span className="text-red-500">*</span></span>
+		                        <SystemSelect
+		                          value={editingTemplate.autoScope?.orgUnitId || editingTemplate.autoScope?.branchOrgUnitId || ""}
+		                          onChange={(event) => {
+		                            const nextScope = makeBranchTemplateScope(event.target.value, editingTemplate.autoScope);
+		                            if (!nextScope) return;
+		                            setEditingTemplate({ ...editingTemplate, autoScope: nextScope });
+		                          }}
+		                          disabled={templateScopeOptions.length === 0}
+		                          className="input-field h-10 py-0 disabled:cursor-not-allowed disabled:bg-surface-100 disabled:text-surface-400"
+		                          menuMinWidth={360}
+		                          menuMaxHeight={260}
+		                          searchable
+		                          searchPlaceholder="搜索分公司"
+		                        >
+		                          <option value="">{templateScopeOptions.length > 0 ? "选择分公司" : "暂无可选分公司"}</option>
+		                          {templateScopeOptions.map((option) => (
 	                            <option key={option.id} value={option.id}>{option.path || option.name}</option>
 	                          ))}
 	                        </SystemSelect>
@@ -2303,7 +2559,7 @@ export default function QuotaTemplatesPage() {
                           })}
                           <button type="button" onClick={addSpace} className="quota-template-add-space btn-secondary min-h-9 px-3 text-xs">
                             <Plus className="h-3.5 w-3.5" />
-                            添加空间
+                            添加空间/类别
                           </button>
                         </div>
                       </div>
@@ -2485,14 +2741,14 @@ export default function QuotaTemplatesPage() {
                               <table className="quota-template-project-table w-full table-fixed text-sm">
                                 <colgroup>
                                   <col className="w-[4%]" />
-                                  <col className="w-[11%]" />
-                                  <col className="w-[22%]" />
+                                  <col className="w-[10%]" />
+                                  <col className="w-[21%]" />
                                   <col className="w-[5%]" />
                                   <col className="w-[7%]" />
                                   <col className="w-[7%]" />
                                   <col className="w-[7%]" />
-                                  <col className="w-[27%]" />
-                                  <col className="w-[10%]" />
+                                  <col className="w-[31%]" />
+                                  <col className="w-[8%]" />
                                 </colgroup>
                                 <thead className="bg-white text-xs font-semibold text-surface-600">
                                   <tr className="border-b border-surface-200">
@@ -2552,7 +2808,7 @@ export default function QuotaTemplatesPage() {
                                         <span
                                           contentEditable
                                           suppressContentEditableWarning
-	                                          className="quota-template-project-alias block truncate text-xs font-medium text-[#111827]"
+	                                          className="quota-template-project-alias block truncate text-xs font-medium text-surface-500"
                                           title="点击修改当前模板中的项目别名，不影响基装定额库"
                                           role="textbox"
                                           aria-label="项目别名"
@@ -2642,18 +2898,19 @@ export default function QuotaTemplatesPage() {
                       <p className="mt-1 text-xs text-surface-500">可添加管理费、税费、远程费等费用规则，生成报价时带入综合费用。</p>
                     </div>
                   ) : (
-                    <div className="overflow-hidden rounded-lg border border-surface-200">
+                    <div className="quota-template-fee-table-shell overflow-hidden rounded-lg border border-surface-200">
                       <div className="overflow-x-auto">
-                        <table className="w-full min-w-[1120px] table-fixed text-sm">
+                        <table className="w-full min-w-[1260px] table-fixed text-sm">
                           <colgroup>
                             <col className="w-[5%]" />
                             <col className="w-[6%]" />
-                            <col className="w-[15%]" />
-                            <col className="w-[12%]" />
-                            <col className="w-[15%]" />
-                            <col className="w-[12%]" />
-                            <col className="w-[17%]" />
-                            <col className="w-[12%]" />
+                            <col className="w-[13%]" />
+                            <col className="w-[10%]" />
+                            <col className="w-[9%]" />
+                            <col className="w-[8%]" />
+                            <col className="w-[18%]" />
+                            <col className="w-[14%]" />
+                            <col className="w-[11%]" />
                             <col className="w-[6%]" />
                           </colgroup>
                           <thead className="bg-surface-50 text-xs font-semibold text-surface-600">
@@ -2664,6 +2921,7 @@ export default function QuotaTemplatesPage() {
                               <th className="px-3 py-2 text-center">计算方式</th>
                               <th className="px-3 py-2 text-left">基础公式</th>
                               <th className="px-3 py-2 text-right">金额/比例</th>
+                              <th className="px-3 py-2 text-left">计费范围</th>
                               <th className="px-3 py-2 text-left">规则预览</th>
                               <th className="px-3 py-2 text-left">备注</th>
                               <th className="px-3 py-2 text-center">操作</th>
@@ -2700,7 +2958,7 @@ export default function QuotaTemplatesPage() {
                                     <input
                                       value={fee.name}
                                       onChange={(event) => updateComprehensiveFee(fee.id, { name: event.target.value })}
-                                      className="h-8 w-full rounded-md border border-transparent bg-transparent px-2 text-sm font-semibold text-surface-900 outline-none transition hover:border-surface-200 hover:bg-white focus:border-primary-300 focus:bg-white focus:ring-2 focus:ring-primary-100"
+                                      className="quota-template-fee-plain-field h-8 w-full bg-transparent text-xs font-medium leading-5 text-surface-500 outline-none"
                                       placeholder="如：管理费"
                                     />
                                   </td>
@@ -2708,7 +2966,7 @@ export default function QuotaTemplatesPage() {
                                     <SystemSelect
                                       value={feeMethod}
                                       onChange={(event) => updateComprehensiveFee(fee.id, getComprehensiveFeeMethodPatch(event.target.value as FeeCalcMethod, fee))}
-                                      className="input-field h-8 w-full py-0 text-xs"
+                                      className="quota-template-fee-plain-field input-field h-8 w-full py-0 text-xs font-medium leading-5 text-surface-500"
                                     >
                                       {Object.entries(feeCalcMethodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                                     </SystemSelect>
@@ -2719,7 +2977,7 @@ export default function QuotaTemplatesPage() {
                                       onChange={(event) => updateComprehensiveFee(fee.id, { fee_calc_base: event.target.value })}
                                       disabled={feeMethod === "fixed"}
                                       aria-invalid={!!feeBaseError}
-                                      className={`input-field h-8 w-full py-1 text-sm disabled:bg-surface-50 disabled:text-surface-300 ${feeBaseError ? "border-red-300 bg-red-50 text-red-700 ring-1 ring-inset ring-red-300 focus:border-red-400 focus:ring-red-100" : ""}`}
+                                      className={`quota-template-fee-plain-field input-field h-8 w-full py-1 text-xs font-medium leading-5 text-surface-500 disabled:text-surface-300 ${feeBaseError ? "border-red-300 bg-red-50 text-red-700 ring-1 ring-inset ring-red-300 focus:border-red-400 focus:ring-red-100" : ""}`}
                                       placeholder={feeMethod === "fixed" ? "" : templateFeeFormulaPlaceholder}
                                       title={feeBaseError || (feeMethod === "fixed" ? "" : `可输入 ${templateFeeFormulaExampleText} 等`)}
                                     />
@@ -2736,17 +2994,29 @@ export default function QuotaTemplatesPage() {
                                           feeMethod === "percent" ? fee.fee_rate : fee.unit_price,
                                           (value) => updateComprehensiveFee(fee.id, feeMethod === "percent" ? { fee_rate: value } : { unit_price: value }),
                                         )}
-                                        className="input-field h-8 w-24 py-1 text-right font-semibold tabular-nums text-red-600 disabled:bg-surface-50 disabled:text-surface-300"
+                                        className="quota-template-fee-plain-field input-field h-8 w-16 py-1 text-right text-xs font-medium leading-5 tabular-nums text-surface-500 disabled:text-surface-300"
                                       />
-                                      <span className="w-4 text-xs font-semibold text-surface-500">{feeMethod === "percent" ? "%" : feeMethod === "fixed" ? "元" : ""}</span>
+                                      <span className="w-4 text-xs font-medium leading-5 text-surface-500">{feeMethod === "percent" ? "%" : feeMethod === "fixed" ? "元" : ""}</span>
                                     </div>
+                                  </td>
+                                  <td className="px-2 py-2">
+                                    <TemplateFeeScopeSelector
+                                      mode={fee.fee_scope_mode}
+                                      selectedNames={fee.fee_scope_space_names}
+                                      options={templateFeeScopeOptions}
+                                      onModeChange={(mode) => updateComprehensiveFee(fee.id, {
+                                        fee_scope_mode: mode,
+                                        fee_scope_space_names: fee.fee_scope_space_names,
+                                      })}
+                                      onToggleName={(name) => toggleComprehensiveFeeScopeName(fee.id, name)}
+                                    />
                                   </td>
                                   <td className={`px-3 py-2 text-xs font-medium leading-5 ${feeBaseError ? "text-red-600" : "text-surface-500"}`}>{feeBaseError ? "无法计算" : getTemplateFeeRulePreview(fee)}</td>
                                   <td className="px-2 py-2">
                                     <input
                                       value={fee.remark}
                                       onChange={(event) => updateComprehensiveFee(fee.id, { remark: event.target.value })}
-                                      className="h-8 w-full rounded-md border border-transparent bg-transparent px-2 text-sm text-surface-700 outline-none transition hover:border-surface-200 hover:bg-white focus:border-primary-300 focus:bg-white focus:ring-2 focus:ring-primary-100"
+                                      className="quota-template-fee-plain-field h-8 w-full bg-transparent text-xs font-medium leading-5 text-surface-500 outline-none"
                                       placeholder="费用说明"
                                     />
                                   </td>
@@ -2841,9 +3111,25 @@ export default function QuotaTemplatesPage() {
                 </div>
               </section>
             </div>
-            <div className="quota-template-editor-footer flex justify-end gap-2 px-6 py-4">
-              <button type="button" onClick={closeEditingTemplate} className="btn-secondary">关闭</button>
-              <button type="button" onClick={saveEditingTemplate} className="btn-primary">保存</button>
+            <div className="quota-template-editor-footer flex items-center justify-between gap-3 px-6 py-4">
+              <div className="quota-template-save-status" data-state={templateSaveStatus} aria-live="polite">
+                {templateSaveStatus !== "idle" && (
+                  <>
+                    <span className="quota-template-save-status-icon">
+                      {templateSaveStatus === "saving" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                    </span>
+                    <span>{templateSaveStatus === "saving" ? "正在保存模板" : "已保存，正在返回列表"}</span>
+                  </>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={closeEditingTemplate} className="btn-secondary" disabled={templateSaveStatus !== "idle"}>关闭</button>
+                <button type="button" onClick={saveEditingTemplate} className="btn-primary quota-template-save-button" data-save-status={templateSaveStatus} disabled={templateSaveStatus !== "idle"}>
+                  {templateSaveStatus === "saving" && <Loader2 className="h-4 w-4 animate-spin" />}
+                  {templateSaveStatus === "saved" && <Check className="h-4 w-4" />}
+                  <span>{templateSaveStatus === "idle" ? "保存" : templateSaveStatus === "saving" ? "保存中" : "已保存"}</span>
+                </button>
+              </div>
             </div>
           </div>
           {constructionTemplatePickerOpen && (
@@ -3020,49 +3306,81 @@ export default function QuotaTemplatesPage() {
             </div>
           )}
           {quotaPickerTarget && (
-            <div className="quota-template-picker absolute inset-0 z-[70]">
-              <div className="quota-template-picker-shell flex h-full w-full flex-col overflow-hidden bg-surface-50">
-                <div className="quota-template-picker-header flex items-center justify-between border-b border-surface-200 bg-white px-6 py-4">
+            <div
+              className="quota-template-picker fixed inset-0 z-[9998] flex items-center justify-center bg-[#0b1220]/35 px-4 py-6 backdrop-blur-[2px]"
+              onClick={(event) => {
+                event.stopPropagation();
+                setQuotaPickerTarget(null);
+                setPickedQuotaIds([]);
+                resetCustomQuotaDraft();
+              }}
+            >
+              <div
+                className="quota-template-picker-shell quote-library-picker-modal quote-base-library-picker-modal flex w-full max-w-[1500px] flex-col overflow-hidden rounded-[16px] border border-[#d9e2ef] bg-white shadow-[0_24px_70px_rgba(15,35,70,0.20)]"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="quota-template-picker-header quote-library-header flex items-center justify-between gap-4 border-b border-[#e8eef6] bg-[#fbfcff] px-5 py-3.5">
                   <div className="min-w-0">
-                    <p className="quota-template-picker-title truncate text-base font-semibold text-surface-900">
-                      {quotaPickerTarget.quotaItemId
-                        ? "更换定额"
-                        : getProjectGroupAddText(templateProjectGroups, quotaPickerTarget.quoteScope)}
-                    </p>
-                    <p className="quota-template-picker-summary mt-0.5 text-xs text-surface-500">
-                      共 {filteredQuotaLibraryItems.length} 条结果{filteredQuotaLibraryItems.length > visibleQuotaLibraryItems.length ? "，已显示前 200 条" : ""}{pickerIsMultiSelect ? `，已选 ${pickedQuotaIds.length} 条` : ""}
-                    </p>
+                    <div className="flex min-w-0 items-center gap-3">
+                      <div className="quota-template-picker-title quote-library-title text-base font-semibold leading-6 text-[#182230]">
+                        {quotaPickerTarget.quotaItemId
+                          ? "替换定额"
+                          : getProjectGroupAddText(templateProjectGroups, quotaPickerTarget.quoteScope)}
+                      </div>
+                      <span className="quote-library-target-pill max-w-full truncate">
+                        {activeSpace?.name || "当前空间"} · {getProjectGroupName(templateProjectGroups, quotaPickerTarget.quoteScope)}
+                      </span>
+                    </div>
                   </div>
-                  <button type="button" onClick={() => { setQuotaPickerTarget(null); setPickedQuotaIds([]); resetCustomQuotaDraft(); }} className="quota-template-picker-close inline-flex h-9 w-9 items-center justify-center rounded-lg text-surface-500 hover:bg-surface-100 hover:text-surface-900" aria-label="关闭定额选择">
+                  <button type="button" onClick={() => { setQuotaPickerTarget(null); setPickedQuotaIds([]); resetCustomQuotaDraft(); }} className="quota-template-picker-close quote-library-close inline-flex h-9 w-9 items-center justify-center text-[#667085] transition hover:bg-[#edf4ff] hover:text-[#407AFF]" aria-label="关闭定额选择">
                     <X className="h-4 w-4" />
                   </button>
                 </div>
 
-                <div className="quota-template-picker-toolbar grid gap-3 border-b border-surface-200 bg-white p-4 md:grid-cols-[minmax(0,1fr)_220px_auto]">
-                  <label className="quota-template-picker-search flex min-h-10 items-center gap-2 rounded-lg border border-surface-200 bg-white px-3 text-sm text-surface-500">
-                    <Search className="h-4 w-4 shrink-0" />
+                <div className="quota-template-picker-toolbar quote-library-filter-row grid gap-3 border-b border-[#e8eef6] bg-[#f7f9fc] px-5 py-3 md:grid-cols-[minmax(320px,1fr)_220px_auto_auto] md:items-end">
+                  <label className="quota-template-picker-search quote-library-filter-field relative block">
+                    <span>搜索项目</span>
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#9aa8bb]" />
                     <input
                       value={quotaPickerSearch}
                       onChange={(event) => setQuotaPickerSearch(event.target.value)}
-                      className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-surface-400"
-                      placeholder="搜索定额编码、项目名称、分类、单位"
+                      className="quote-library-search-input h-10 w-full rounded-[10px] border border-[#d9e2ef] bg-white pl-9 pr-3 text-sm text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407AFF] focus:ring-2 focus:ring-[#407AFF]/10"
+                      placeholder="搜索编号、名称、施工说明"
                       autoFocus
                     />
                   </label>
-                  <SystemSelect value={quotaPickerCategory} onChange={(event) => setQuotaPickerCategory(event.target.value)} className="quota-template-picker-select input-field h-10 py-0">
-                    <option value="">全部分类</option>
-                    {quotaCategoryOptions.map((category) => (
-                      <option key={category} value={category}>{category}</option>
-                    ))}
-                  </SystemSelect>
-                  <button
-                    type="button"
-                    onClick={() => setShowCustomQuotaForm((current) => !current)}
-                    className="quota-template-picker-custom-toggle inline-flex h-10 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-primary-200 bg-primary-50 px-3 text-sm font-semibold text-primary-700 transition hover:bg-primary-100"
-                  >
-                    <Plus className="h-4 w-4" />
-                    新增自定义项目
-                  </button>
+                  <label className="quote-library-filter-field block">
+                    <span>项目分类</span>
+                    <SystemSelect
+                      value={quotaPickerCategory}
+                      onChange={(event) => setQuotaPickerCategory(event.target.value)}
+                      className="quota-template-picker-select quote-library-category-select h-10 rounded-[10px] border border-[#d9e2ef] bg-white px-3 text-sm font-medium text-[#182230] outline-none transition focus:border-[#407AFF] focus:ring-2 focus:ring-[#407AFF]/10"
+                      menuClassName="quote-system-select-menu"
+                      optionClassName="quote-system-select-option"
+                    >
+                      <option value="">全部分类</option>
+                      {quotaCategoryOptions.map((category) => (
+                        <option key={category} value={category}>{category}</option>
+                      ))}
+                    </SystemSelect>
+                  </label>
+                  {pickerIsMultiSelect ? (
+                    <button
+                      type="button"
+                      onClick={toggleVisiblePickedQuotas}
+                      disabled={visibleQuotaLibraryItems.length === 0}
+                      className="quota-template-picker-select-all quote-library-select-all quote-library-primary-text inline-flex h-10 items-center justify-center rounded-[10px] border border-[#cfe0ff] bg-white px-4 text-sm font-semibold text-[#407AFF] transition hover:bg-[#edf4ff] disabled:cursor-not-allowed disabled:border-[#e9eff7] disabled:text-[#9aa8bb]"
+                    >
+                      {isVisiblePickerAllSelected ? "取消全选" : "全选当前"}
+                    </button>
+                  ) : (
+                    <div className="quote-library-select-all inline-flex h-10 items-center justify-center rounded-[10px] border border-[#e8eef6] bg-white px-4 text-sm font-semibold text-[#6f7f96]">
+                      单选替换
+                    </div>
+                  )}
+                  <div className="quote-library-filter-note">
+                    <b>{quotaPickerCategory || "全部分类"}</b><span>{filteredQuotaLibraryItems.length} 项</span><span>已选 {pickedQuotaIds.length}</span>
+                  </div>
                 </div>
 
                 {showCustomQuotaForm && (
@@ -3146,108 +3464,94 @@ export default function QuotaTemplatesPage() {
                   </div>
                 )}
 
-                <div className="quota-template-picker-body min-h-0 flex-1 overflow-y-auto p-5">
+                <div className="quota-template-picker-body quote-library-body min-h-0 flex-1 bg-white">
                   {quotaLibraryItems.length === 0 ? (
-                    <div className="flex min-h-56 flex-col items-center justify-center rounded-lg border border-dashed border-surface-300 bg-surface-50 px-4 text-center">
-                      <p className="text-sm font-semibold text-surface-700">定额库暂无启用定额</p>
-                      <p className="mt-1 text-xs text-surface-500">可先在定额库维护定额，也可以点击上方“新增自定义项目”直接加入当前模板。</p>
+                    <div className="quote-library-empty-state flex h-full flex-col items-center justify-center px-6 text-center">
+                      <div className="text-sm font-semibold text-[#34445a]">暂无可添加的基础项目</div>
+                      <div className="mt-1 text-xs text-[#9aa8bb]">请先在定额库维护启用状态的基础项目，再回到模板中添加。</div>
                     </div>
                   ) : visibleQuotaLibraryItems.length === 0 ? (
-                    <div className="flex min-h-56 flex-col items-center justify-center rounded-lg border border-dashed border-surface-300 bg-surface-50 px-4 text-center">
-                      <p className="text-sm font-semibold text-surface-700">没有匹配的定额</p>
-                      <p className="mt-1 text-xs text-surface-500">换个关键词或分类再试，也可以点击上方“新增自定义项目”。</p>
+                    <div className="quote-library-empty-state flex h-full flex-col items-center justify-center px-6 text-center">
+                      <div className="text-sm font-semibold text-[#34445a]">没有符合条件的定额</div>
+                      <div className="mt-1 text-xs text-[#9aa8bb]">可以换一个关键词或分类继续查找。</div>
                     </div>
                   ) : (
-                    <div className="quota-template-picker-table-wrap overflow-hidden rounded-lg border border-surface-200">
-                      <table className="quota-template-picker-table w-full table-fixed text-sm">
+                    <div className="quota-template-picker-table-wrap quote-library-table-wrap h-full overflow-auto bg-white">
+                      <table className="quota-template-picker-table quote-library-table quote-base-library-table w-full min-w-[1580px] border-separate border-spacing-0 text-sm">
                         <colgroup>
-                          <col style={{ width: 40 }} />
+                          <col style={{ width: 56 }} />
                           <col style={{ width: 112 }} />
-                          <col style={{ width: 78 }} />
-                          <col style={{ width: 230 }} />
-                          <col style={{ width: 52 }} />
-                          <col style={{ width: 76 }} />
-                          <col style={{ width: 76 }} />
-                          <col style={{ width: 78 }} />
-                          <col />
-                          <col style={{ width: 58 }} />
+                          <col style={{ width: 300 }} />
+                          <col style={{ width: 72 }} />
+                          <col style={{ width: 112 }} />
+                          <col style={{ width: 112 }} />
+                          <col style={{ width: 112 }} />
+                          <col style={{ width: 520 }} />
+                          <col style={{ width: 176 }} />
                         </colgroup>
-                        <thead className="bg-surface-50 text-xs font-semibold text-surface-600">
-                          <tr className="border-b border-surface-200">
-                            <th className="px-3 py-2 text-center">
-                              {pickerIsMultiSelect ? (
-                                <input
-                                  type="checkbox"
-                                  checked={isVisiblePickerAllSelected}
-                                  disabled={visiblePickerIds.length === 0}
-                                  onChange={toggleVisiblePickedQuotas}
-                                  className="h-4 w-4 rounded border-surface-300 text-primary-600 focus:ring-primary-500"
-                                  aria-label="选择当前显示的定额"
-                                />
-                              ) : "选择"}
-                            </th>
-                            <th className="px-3 py-2 text-left">定额编码</th>
-                            <th className="px-3 py-2 text-left">分类</th>
-                            <th className="px-3 py-2 text-left">项目名称</th>
-                            <th className="px-3 py-2 text-center">单位</th>
-                            <th className="px-3 py-2 text-right">人工单价</th>
-                            <th className="px-3 py-2 text-right">材料单价</th>
-                            <th className="px-3 py-2 text-right">客户单价</th>
-                            <th className="px-3 py-2 text-left">施工说明</th>
-                            <th className="px-3 py-2 text-center">操作</th>
+                        <thead className="sticky top-0 z-10 bg-[#f4f7fb] text-left text-xs font-semibold text-[#34445a]">
+                          <tr>
+                            <th className="quote-library-sticky-select px-3 py-0 text-center whitespace-nowrap">{pickerIsMultiSelect ? "选择" : "替换"}</th>
+                            <th className="quote-library-sticky-category px-3 py-0 whitespace-nowrap">分类</th>
+                            <th className="quote-library-sticky-name px-3 py-0 whitespace-nowrap">项目名称</th>
+                            <th className="px-3 py-0 text-center whitespace-nowrap">单位</th>
+                            <th className="px-3 py-0 text-right whitespace-nowrap">材料单价</th>
+                            <th className="px-3 py-0 text-right whitespace-nowrap">人工单价</th>
+                            <th className="px-3 py-0 text-right whitespace-nowrap">总价</th>
+                            <th className="px-3 py-0 whitespace-nowrap">施工说明</th>
+                            <th className="quote-library-code-column px-3 py-0 whitespace-nowrap">编号</th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-surface-100 bg-white">
+                        <tbody>
                           {visibleQuotaLibraryItems.map((quota) => {
                             const isPicked = pickedQuotaIdSet.has(quota.id);
+                            const categoryName = quota.category || "未分类";
                             return (
-                            <tr key={quota.id} className={isPicked ? "bg-primary-50/70 hover:bg-primary-50" : "bg-white hover:bg-surface-50"}>
-                              <td className="px-3 py-2 text-center">
+                            <tr
+                              key={quota.id}
+                              onClick={() => pickerIsMultiSelect ? togglePickedQuota(quota.id) : chooseQuotaForTarget(quota)}
+                              className={`quote-library-row cursor-pointer transition ${isPicked ? "quote-library-row-selected bg-[#edf4ff]" : "bg-white"}`}
+                            >
+                              <td className="quote-library-sticky-select px-3 py-0 text-center whitespace-nowrap">
                                 {pickerIsMultiSelect ? (
                                   <input
                                     type="checkbox"
                                     checked={isPicked}
                                     onChange={() => togglePickedQuota(quota.id)}
+                                    onClick={(event) => event.stopPropagation()}
                                     className="h-4 w-4 rounded border-surface-300 text-primary-600 focus:ring-primary-500"
                                     aria-label={`选择${quota.name}`}
                                   />
                                 ) : (
-                                  <span className="text-xs text-surface-400">单选</span>
+                                  <input
+                                    type="radio"
+                                    name="template-quota-replace-item"
+                                    checked={isPicked}
+                                    readOnly
+                                    className="h-4 w-4 rounded border-[#cfe0ff] accent-[#407AFF]"
+                                    aria-label={`替换为${quota.name}`}
+                                  />
                                 )}
                               </td>
-                              <td className="px-3 py-2 text-surface-600">{quota.code || "-"}</td>
-                              <td className="px-3 py-2 text-surface-600">
-                                <span className="block truncate" title={quota.category || undefined}>{quota.category || "-"}</span>
+                              <td className="quote-library-sticky-category px-3 py-0 text-[#52647b] whitespace-nowrap">
+                                <span className="quote-library-category-badge">{categoryName}</span>
                               </td>
-                              <td className="px-3 py-2">
-                                <span className="block truncate font-semibold text-surface-900" title={quota.name}>{quota.name}</span>
+                              <td className="quote-library-sticky-name px-3 py-0">
+                                <div className="quote-library-item-title min-w-0">
+                                  <div className="flex min-w-0 items-center gap-2">
+                                    <span className="whitespace-nowrap" title={quota.name}>{quota.name}</span>
+                                    {quota.isSpecialPrice && <span className="quote-library-special-tag shrink-0" title="特价项目">特</span>}
+                                  </div>
+                                </div>
                               </td>
-                              <td className="px-3 py-2 text-center text-surface-600">{quota.unit || "-"}</td>
-                              <td className="px-3 py-2 text-right tabular-nums text-surface-700">{formatAmount(quota.laborPrice)}</td>
-                              <td className="px-3 py-2 text-right tabular-nums text-surface-700">{formatAmount(quota.materialPrice)}</td>
-                              <td className="relative px-3 py-2 pr-7 text-right font-semibold tabular-nums text-red-600">
-                                {quota.isSpecialPrice && (
-                                  <span className="absolute right-1.5 top-1.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-red-200 bg-red-50 text-[10px] font-bold leading-none text-red-600" title="特价项目">
-                                    特
-                                  </span>
-                                )}
-                                {formatAmount(quota.totalPrice)}
+                              <td className="px-3 py-0 text-center font-medium text-[#52647b] whitespace-nowrap">{quota.unit || "-"}</td>
+                              <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatAmount(quota.materialPrice)}</td>
+                              <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatAmount(quota.laborPrice)}</td>
+                              <td className="quote-library-total-price px-3 py-0 text-right font-semibold tabular-nums whitespace-nowrap">{formatAmount(quota.totalPrice)}</td>
+                              <td className="px-3 py-0">
+                                <div className="quote-library-description-cell truncate" title={quota.constructionDescription || "暂无施工说明"}>{quota.constructionDescription || "暂无施工说明"}</div>
                               </td>
-                              <td className="px-3 py-2 text-surface-700">
-                                <p className="line-clamp-3 leading-5" title={quota.constructionDescription || undefined}>{quota.constructionDescription || "-"}</p>
-                              </td>
-                              <td className="px-3 py-2 text-center">
-                                <button
-                                  type="button"
-                                  onClick={() => chooseQuotaForTarget(quota)}
-                                  className={isPicked
-                                    ? "inline-flex h-8 w-[52px] items-center justify-center rounded-[8px] border border-primary-200 bg-primary-50 px-3 text-xs font-semibold text-primary-700 transition hover:bg-primary-100"
-                                    : "inline-flex h-8 w-[52px] items-center justify-center rounded-[8px] border border-primary-600 bg-primary-600 px-3 text-xs font-semibold text-white transition hover:bg-primary-700"
-                                  }
-                                >
-                                  {pickerIsMultiSelect ? (isPicked ? "取消" : "选择") : "选择"}
-                                </button>
-                              </td>
+                              <td className="quote-library-code-column px-3 py-0 whitespace-nowrap" title={quota.code || "-"}>{quota.code || "-"}</td>
                             </tr>
                             );
                           })}
@@ -3256,17 +3560,41 @@ export default function QuotaTemplatesPage() {
                     </div>
                   )}
                 </div>
-                {pickerIsMultiSelect && (
-                  <div className="quota-template-picker-footer flex items-center justify-between border-t border-surface-200 bg-white px-6 py-4">
-                    <button type="button" onClick={() => setPickedQuotaIds([])} className="btn-secondary" disabled={pickedQuotaIds.length === 0}>清空选择</button>
+                <div className="quota-template-picker-footer quote-library-footer flex min-h-[64px] flex-col gap-3 border-t border-[#e8eef6] bg-[#fbfcff] px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="quote-library-footer-summary text-xs text-[#6f7f96]">
+                    {pickerIsMultiSelect ? (
+                      <>
+                        <span>已选择 <b>{pickedQuotaIds.length}</b> 项</span>
+                        <span>合计 {formatAmount(pickedQuotaTotal)}</span>
+                        <span>添加后会进入当前空间的项目分组</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>单选替换</span>
+                        <span>仅替换当前模板项目的定额内容</span>
+                      </>
+                    )}
+                  </div>
+                  {pickerIsMultiSelect && (
                     <div className="flex items-center gap-2">
-                      <button type="button" onClick={() => { setQuotaPickerTarget(null); setPickedQuotaIds([]); resetCustomQuotaDraft(); }} className="btn-secondary">取消</button>
-                      <button type="button" onClick={addPickedQuotasForTarget} disabled={pickedQuotaIds.length === 0} className="btn-primary">
-                        添加所选{pickedQuotaIds.length > 0 ? `（${pickedQuotaIds.length}）` : ""}
+                      <button
+                        type="button"
+                        onClick={() => { setQuotaPickerTarget(null); setPickedQuotaIds([]); resetCustomQuotaDraft(); }}
+                        className="inline-flex h-10 items-center justify-center rounded-[10px] border border-[#d9e2ef] bg-white px-4 text-sm font-semibold text-[#52647b] transition hover:bg-[#f7f9fd]"
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        onClick={addPickedQuotasForTarget}
+                        disabled={pickedQuotaIds.length === 0}
+                        className="quote-library-primary-action inline-flex h-10 items-center justify-center rounded-[10px] border border-[#407AFF] bg-[#407AFF] px-4 text-sm font-semibold text-white transition hover:bg-[#2f66e8] disabled:cursor-not-allowed disabled:border-[#cfe0ff] disabled:bg-[#cfe0ff]"
+                      >
+                        添加到模板{pickedQuotaIds.length > 0 ? `（${pickedQuotaIds.length}）` : ""}
                       </button>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -3287,6 +3615,148 @@ export default function QuotaTemplatesPage() {
         .quota-template-space-config textarea,
         .quota-template-space-config select {
           font-size: 12px !important;
+        }
+        .quota-template-fee-scope-compact {
+          position: relative;
+          width: 100%;
+          min-width: 160px;
+        }
+        .quota-template-fee-scope-trigger {
+          display: inline-flex;
+          height: 32px;
+          width: calc(100% - 8px);
+          margin: 0 auto;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          border: 0;
+          border-radius: 8px;
+          background: transparent;
+          padding: 0 6px;
+          color: #475467;
+          font-size: 12px;
+          font-weight: 650;
+          line-height: 1;
+          transition: background-color 0.15s ease, color 0.15s ease;
+        }
+        .quota-template-fee-scope-trigger:hover {
+          background: #f6f8fb;
+          color: #182230;
+        }
+        .quota-template-fee-scope-trigger-text {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .quota-template-fee-scope-kind {
+          flex: 0 0 auto;
+          color: #182230;
+          font-weight: 700;
+        }
+        .quota-template-fee-scope-popover {
+          position: fixed;
+          z-index: 10040;
+          width: 286px;
+          border: 1px solid #c8d4e4;
+          border-radius: 10px;
+          background: #fbfdff;
+          padding: 6px;
+          box-shadow: 0 10px 28px rgba(38, 56, 84, 0.08);
+        }
+        .quota-template-fee-scope-popover-segment {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 2px;
+          margin-bottom: 6px;
+          border-radius: 8px;
+          background: #f4f7fb;
+          padding: 3px;
+        }
+        .quota-template-fee-scope-popover-segment button {
+          display: flex;
+          height: 30px;
+          align-items: center;
+          justify-content: space-between;
+          border-radius: 7px;
+          padding: 0 8px;
+          color: #526275;
+          font-size: 12px;
+          font-weight: 650;
+        }
+        .quota-template-fee-scope-popover-segment button:hover {
+          background: rgba(255, 255, 255, 0.72);
+          color: #24364b;
+        }
+        .quota-template-fee-scope-popover-segment button[data-active] {
+          background: #ffffff;
+          color: #2563eb;
+          box-shadow: inset 0 0 0 1px #d8e5ff;
+        }
+        .quota-template-fee-scope-popover-list {
+          display: grid;
+          max-height: 176px;
+          grid-template-columns: 1fr;
+          gap: 2px;
+          overflow-y: auto;
+          border-top: 1px solid #e5edf7;
+          padding-top: 6px;
+        }
+        .quota-template-fee-scope-popover-list button {
+          display: inline-flex;
+          height: 30px;
+          min-width: 0;
+          align-items: center;
+          justify-content: flex-start;
+          gap: 6px;
+          border: 0;
+          border-radius: 7px;
+          background: transparent;
+          padding: 0 8px;
+          color: #536579;
+          font-size: 12px;
+          font-weight: 600;
+        }
+        .quota-template-fee-scope-popover-list button:hover {
+          background: #f5f8fc;
+          color: #24364b;
+        }
+        .quota-template-fee-scope-popover-list button[data-active] {
+          background: #eef5ff;
+          color: #1d4ed8;
+        }
+        .quota-template-fee-scope-mode-dot {
+          height: 7px;
+          width: 7px;
+          border: 1px solid #aeb9c8;
+          border-radius: 999px;
+        }
+        .quota-template-fee-scope-popover-segment button[data-active] .quota-template-fee-scope-mode-dot {
+          border-color: #407aff;
+          background: #407aff;
+        }
+        .quota-template-fee-scope-check {
+          display: inline-flex;
+          height: 12px;
+          width: 12px;
+          flex: 0 0 auto;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid #b8c5d6;
+          border-radius: 3px;
+          color: #ffffff;
+        }
+        .quota-template-fee-scope-popover-list button[data-active] .quota-template-fee-scope-check {
+          border-color: #407aff;
+          background: #407aff;
+        }
+        .quota-template-fee-scope-empty {
+          grid-column: 1 / -1;
+          padding: 2px 4px;
+          color: #98a2b3;
+          font-size: 11px;
+          font-weight: 600;
+          text-align: center;
         }
         .quota-template-space-config-head {
           min-height: 56px;
@@ -3913,103 +4383,134 @@ export default function QuotaTemplatesPage() {
           align-items: center;
           justify-content: center;
           left: 0 !important;
-          padding: 54px 72px;
-          background: rgba(15, 23, 42, 0.06) !important;
-          backdrop-filter: blur(6px) saturate(1.04);
-          -webkit-backdrop-filter: blur(6px) saturate(1.04);
+          padding: 24px 16px !important;
+          background: rgba(11, 18, 32, 0.35) !important;
+          backdrop-filter: blur(2px);
+          -webkit-backdrop-filter: blur(2px);
         }
         .quota-template-picker-shell {
-          width: min(1260px, 100%);
-          height: min(680px, calc(100vh - 108px)) !important;
-          min-height: 500px;
+          --quote-library-primary: #407AFF;
+          --quote-library-primary-hover: #2f66e8;
+          --quote-library-border: #d9e2ef;
+          --quote-library-divider: #e8eef6;
+          --quote-library-text: #182230;
+          --quote-library-muted: #667085;
+          --quote-library-sticky-bg: #ffffff;
+          height: min(78vh, calc(100vh - 48px)) !important;
+          min-height: 560px;
           overflow: hidden;
-          border: 1px solid rgba(214, 224, 238, 0.95);
-          border-radius: 14px;
-          background: #f6f8fb !important;
-          box-shadow: 0 20px 54px rgba(15, 23, 42, 0.16);
+          border-color: #d9e2ef !important;
+          border-radius: 16px !important;
+          background: #ffffff !important;
+          box-shadow: 0 24px 70px rgba(15, 35, 70, 0.20) !important;
           color: #182230;
-          font-size: 12px;
         }
         .quota-template-picker-header {
-          min-height: 48px;
-          padding: 8px 14px !important;
-          border-color: #e3eaf3 !important;
-          background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%) !important;
+          flex: 0 0 auto;
+          min-height: 64px;
+          padding: 14px 20px !important;
+          border-color: #e8eef6 !important;
+          background: #fbfcff !important;
         }
         .quota-template-picker-title {
-          font-size: 14px !important;
-          font-weight: 750 !important;
+          color: #182230 !important;
+          font-size: 16px !important;
+          font-weight: 650 !important;
           letter-spacing: 0 !important;
-          line-height: 20px;
+          line-height: 24px !important;
         }
-        .quota-template-picker-summary {
-          color: #667085 !important;
+        .quota-template-picker .quote-library-target-pill {
+          display: inline-flex;
+          max-width: min(520px, 100%);
+          height: 24px;
+          align-items: center;
+          border-left: 1px solid #d8e1ee;
+          padding: 0 0 0 12px;
+          color: #61728a;
           font-size: 12px !important;
-          line-height: 18px;
+          font-weight: 600;
+          line-height: 1;
         }
         .quota-template-picker-close {
-          height: 30px !important;
-          width: 30px !important;
-          border: 1px solid transparent;
-          border-radius: 9px !important;
+          border-radius: 10px !important;
         }
         .quota-template-picker-close:hover {
-          border-color: #dce5f0;
-          background: #f6f8fb !important;
-          color: #182230 !important;
+          background: #edf4ff !important;
+          color: #407aff !important;
         }
         .quota-template-picker-toolbar {
-          grid-template-columns: minmax(280px, 1fr) 210px auto !important;
-          align-items: center;
-          gap: 8px !important;
-          padding: 8px 14px !important;
-          border-color: #e3eaf3 !important;
-          background: #f8fafc !important;
+          flex: 0 0 auto;
+          grid-template-columns: minmax(320px, 1fr) 220px auto auto !important;
+          align-items: end;
+          gap: 12px !important;
+          padding: 12px 20px !important;
+          border-color: #e8eef6 !important;
+          background: #f7f9fc !important;
         }
-        .quota-template-picker-search,
-        .quota-template-picker-select,
-        .quota-template-picker-custom-toggle {
-          height: 32px !important;
-          min-height: 32px !important;
-          border-radius: 8px !important;
+        .quota-template-picker .quote-library-filter-field > span {
+          display: block;
+          margin-bottom: 6px;
+          color: #52647b;
           font-size: 12px !important;
+          font-weight: 700;
+          line-height: 1;
+        }
+        .quota-template-picker .quote-library-filter-field svg {
+          top: auto !important;
+          bottom: 12px !important;
+          transform: none !important;
+        }
+        .quota-template-picker .quote-library-search-input,
+        .quota-template-picker .quote-library-category-select,
+        .quota-template-picker .quote-library-select-all,
+        .quota-template-picker .quote-library-footer button,
+        .quota-template-picker .quote-library-close {
+          border-radius: 10px !important;
+        }
+        .quota-template-picker .quote-library-search-input,
+        .quota-template-picker .quote-library-category-select,
+        .quota-template-picker .quote-library-select-all {
+          height: 40px !important;
+          min-height: 40px !important;
+          font-size: 14px !important;
         }
         .quota-template-picker-search {
-          border-color: #dce5f0 !important;
+          border: 0 !important;
           background: #ffffff !important;
-          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85), 0 1px 1px rgba(16, 24, 40, 0.025);
-        }
-        .quota-template-picker-search:focus-within {
-          border-color: #9fc0ff !important;
-          box-shadow: 0 0 0 3px rgba(47, 111, 235, 0.1);
-        }
-        .quota-template-picker-search input {
-          height: 30px;
-          color: #182230;
-          font-size: 12px !important;
-        }
-        .quota-template-picker-select {
-          padding-top: 0 !important;
-          padding-bottom: 0 !important;
-          color: #34445a !important;
-          font-weight: 650 !important;
-        }
-        .quota-template-picker-custom-toggle {
-          border-color: #b7e4d2 !important;
-          background: #f0fdf7 !important;
-          padding: 0 10px !important;
-          color: #047857 !important;
-          font-size: 12px !important;
-          font-weight: 750 !important;
           box-shadow: none !important;
         }
-        .quota-template-picker-custom-toggle:hover {
-          border-color: #86d9b9 !important;
-          background: #dcfce7 !important;
+        .quota-template-picker-search:focus-within {
+          box-shadow: none !important;
+        }
+        .quota-template-picker-select {
+          color: #182230 !important;
+          font-weight: 500 !important;
+        }
+        .quota-template-picker-select-all {
+          color: #407aff !important;
+        }
+        .quota-template-picker .quote-library-filter-note {
+          display: inline-flex;
+          min-height: 40px;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 8px;
+          color: #7b8aa0;
+          font-size: 12px !important;
+          line-height: 1.4;
+          white-space: nowrap;
+        }
+        .quota-template-picker .quote-library-filter-note b {
+          color: #182230;
+          font-weight: 700;
+        }
+        .quota-template-picker .quote-library-filter-note span {
+          color: #667085;
+          font-weight: 600;
         }
         .quota-template-picker-custom {
-          padding: 8px 14px !important;
-          border-color: #e3eaf3 !important;
+          padding: 12px 20px !important;
+          border-color: #e8eef6 !important;
           background: #ffffff !important;
         }
         .quota-template-picker-custom-panel {
@@ -4044,19 +4545,27 @@ export default function QuotaTemplatesPage() {
           font-weight: 750 !important;
         }
         .quota-template-picker-body {
-          padding: 10px 14px !important;
-          background: #f6f8fb;
+          min-height: 0;
+          background: #ffffff;
+        }
+        .quota-template-picker .quote-library-empty-state {
+          min-height: 220px;
+          background: linear-gradient(180deg, rgba(248, 251, 255, 0.92) 0%, rgba(255, 255, 255, 1) 100%);
         }
         .quota-template-picker-table-wrap {
           height: 100%;
           overflow: auto !important;
-          border-color: #dce5f0 !important;
-          border-radius: 12px !important;
+          border-top: 1px solid #e8eef6;
+          border-right: 0 !important;
+          border-bottom: 0 !important;
+          border-left: 0 !important;
+          border-radius: 0 !important;
           background: #ffffff;
-          box-shadow: 0 1px 2px rgba(16, 24, 40, 0.035);
+          box-shadow: none !important;
+          scrollbar-gutter: stable;
         }
         .quota-template-picker-table {
-          min-width: 980px;
+          min-width: 1580px;
           border-collapse: separate;
           border-spacing: 0;
           font-size: 12px !important;
@@ -4064,27 +4573,49 @@ export default function QuotaTemplatesPage() {
         .quota-template-picker-table thead {
           position: sticky;
           top: 0;
-          z-index: 2;
-          background: #f8fafc !important;
-          color: #52647b !important;
+          z-index: 10;
+          background: #f4f7fb !important;
+          color: #34445a !important;
           font-size: 12px !important;
         }
         .quota-template-picker-table th {
-          height: 30px;
-          border-bottom: 1px solid #dce5f0;
-          padding: 0 8px !important;
+          height: 42px !important;
+          border-bottom: 1px solid #e8eef6 !important;
+          background: #f3f6fb !important;
+          padding: 0 12px !important;
+          color: #34445a !important;
           font-size: 12px !important;
-          font-weight: 750 !important;
+          font-weight: 650 !important;
+          line-height: 1.25 !important;
           vertical-align: middle;
-          white-space: nowrap;
+          white-space: nowrap !important;
+        }
+        .quota-template-picker-table th:first-child {
+          border-top-left-radius: 10px !important;
+        }
+        .quota-template-picker-table th:last-child {
+          border-top-right-radius: 10px !important;
+        }
+        .quota-template-picker-table thead th:not(:last-child),
+        .quota-template-picker-table tbody td:not(:last-child) {
+          border-right: 1px solid #edf2f7 !important;
+        }
+        .quota-template-picker-table thead th {
+          border-right-color: #e2eaf4 !important;
+        }
+        .quota-template-picker-table thead th:last-child,
+        .quota-template-picker-table tbody td:last-child {
+          border-right: 0 !important;
         }
         .quota-template-picker-table td {
-          height: 36px;
-          padding: 0 8px !important;
+          height: 52px !important;
+          border-bottom: 1px solid #edf2f7 !important;
+          padding: 0 12px !important;
           color: #111827 !important;
           font-size: 12px !important;
+          font-weight: 500 !important;
           line-height: 18px;
-          vertical-align: middle;
+          vertical-align: middle !important;
         }
         .quota-template-picker-table td span,
         .quota-template-picker-table td p,
@@ -4104,46 +4635,114 @@ export default function QuotaTemplatesPage() {
         .quota-template-picker-table tbody tr:hover {
           background: #f8fbff !important;
         }
-        .quota-template-picker-table tbody tr[class*="bg-primary-50"] {
-          background: #eef6ff !important;
+        .quota-template-picker-table .quote-library-row-selected td {
+          background: #edf4ff !important;
+        }
+        .quota-template-picker-table .quote-library-row-selected td:first-child {
+          box-shadow: inset 3px 0 0 #407aff;
         }
         .quota-template-picker-table input[type="checkbox"] {
-          height: 14px !important;
-          width: 14px !important;
+          height: 16px !important;
+          width: 16px !important;
+          border-radius: 4px !important;
+          accent-color: #407aff;
         }
-        .quota-template-picker-table p.line-clamp-3 {
+        .quota-template-picker-table input[type="radio"] {
+          height: 16px !important;
+          width: 16px !important;
+          accent-color: #407aff;
+        }
+        .quota-template-picker .quote-library-category-badge {
+          display: inline-flex;
+          max-width: 100%;
+          height: 22px;
+          align-items: center;
+          border: 1px solid #e5ebf3 !important;
+          border-radius: 7px;
+          background: #f8fafc !important;
+          padding: 0 7px;
+          color: #52647b !important;
+          font-size: 11px !important;
+          font-weight: 600 !important;
+          line-height: 1;
+        }
+        .quota-template-picker .quote-library-special-tag {
+          display: inline-flex !important;
+          height: 17px !important;
+          min-width: 17px !important;
+          align-items: center !important;
+          justify-content: center !important;
+          border: 1px solid #fed7aa !important;
+          border-radius: 5px !important;
+          background: #fff7ed !important;
+          padding: 0 !important;
+          color: #c2410c !important;
+          font-size: 11px !important;
+          font-weight: 750 !important;
+          line-height: 1 !important;
+          box-shadow: none !important;
+        }
+        .quota-template-picker .quote-library-description-cell {
           display: block;
+          width: 520px;
+          max-width: 520px;
           overflow: hidden;
           color: #111827 !important;
           line-height: 18px !important;
           text-overflow: ellipsis;
           white-space: nowrap;
         }
-        .quota-template-picker-table button {
-          height: 26px !important;
-          min-height: 26px !important;
-          width: 46px !important;
-          border-radius: 7px !important;
-          padding: 0 !important;
-          font-size: 12px !important;
-          font-weight: 750 !important;
-          box-shadow: none !important;
+        .quota-template-picker-table .quote-library-total-price {
+          color: #dc2626 !important;
+          font-weight: 600 !important;
         }
         .quota-template-picker-footer {
-          min-height: 48px;
-          padding: 8px 14px !important;
-          border-color: #e3eaf3 !important;
-          background: rgba(255, 255, 255, 0.96) !important;
-          box-shadow: 0 -10px 24px rgba(15, 23, 42, 0.06);
+          flex: 0 0 auto;
+          min-height: 64px;
+          padding: 12px 20px !important;
+          border-color: #e8eef6 !important;
+          background: #fbfcff !important;
+          box-shadow: none !important;
+        }
+        .quota-template-picker .quote-library-footer-summary {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 12px;
+        }
+        .quota-template-picker .quote-library-footer-summary span {
+          display: inline-flex;
+          min-height: 20px;
+          align-items: center;
+          color: #667085;
+          font-weight: 600;
+        }
+        .quota-template-picker .quote-library-footer-summary span + span {
+          position: relative;
+          padding-left: 12px;
+        }
+        .quota-template-picker .quote-library-footer-summary span + span::before {
+          content: "";
+          position: absolute;
+          left: 0;
+          top: 50%;
+          width: 1px;
+          height: 12px;
+          transform: translateY(-50%);
+          background: #d8e1ee;
+        }
+        .quota-template-picker .quote-library-footer-summary b {
+          color: #407aff;
+          font-weight: 800;
         }
         .quota-template-picker-footer .btn-secondary,
         .quota-template-picker-footer .btn-primary {
-          min-height: 32px !important;
-          height: 32px !important;
-          border-radius: 8px !important;
-          padding: 0 11px !important;
-          font-size: 12px !important;
-          font-weight: 750 !important;
+          min-height: 40px !important;
+          height: 40px !important;
+          border-radius: 10px !important;
+          padding: 0 16px !important;
+          font-size: 14px !important;
+          font-weight: 600 !important;
         }
         @media (max-width: 900px) {
           .quota-template-picker {

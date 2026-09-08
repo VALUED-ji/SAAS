@@ -240,7 +240,7 @@ function hasLoadedOrgOptions(orgOptions: QuotaTemplateOrgOption[] = []) {
 export function canViewQuotaTemplate(template: QuotaTemplateLike, context: QuotaTemplateMatchContext = {}) {
   const user = context.user;
   const scope = getQuotaTemplateScope(template);
-  if (!scope?.orgUnitId) return true;
+  if (!scope?.orgUnitId || scope.scopeType === "global") return false;
   if (hasLoadedOrgOptions(context.orgOptions) && !findActiveOrgOption(scope.orgUnitId, context.orgOptions)) return false;
   const currentOrgUnitId = cleanText(user?.org_unit_id);
   if (!currentOrgUnitId) return false;
@@ -250,7 +250,7 @@ export function canViewQuotaTemplate(template: QuotaTemplateLike, context: Quota
 
 export function getQuotaTemplateScopeLabel(template: QuotaTemplateLike, orgOptions: QuotaTemplateOrgOption[] = []) {
   const scope = getQuotaTemplateScope(template);
-  if (!scope?.orgUnitId || scope.scopeType === "global") return "总部通用";
+  if (!scope?.orgUnitId || scope.scopeType === "global") return "未指定分公司";
   const org = orgOptions.find((option) => option.id === scope.orgUnitId);
   if (hasLoadedOrgOptions(orgOptions) && !isOrgOptionActive(org)) return "查看范围已失效";
   const orgName = org?.name || scope.branchOrgUnitName || scope.orgUnitName || "指定分公司";
@@ -259,7 +259,7 @@ export function getQuotaTemplateScopeLabel(template: QuotaTemplateLike, orgOptio
 
 export function getQuotaTemplateScopePath(template: QuotaTemplateLike, orgOptions: QuotaTemplateOrgOption[] = []) {
   const scope = getQuotaTemplateScope(template);
-  if (!scope?.orgUnitId || scope.scopeType === "global") return "全部分公司均可使用";
+  if (!scope?.orgUnitId || scope.scopeType === "global") return "模板未绑定分公司，无法使用";
   const org = orgOptions.find((option) => option.id === scope.orgUnitId);
   if (hasLoadedOrgOptions(orgOptions) && !isOrgOptionActive(org)) return "原查看范围对应的组织已删除或停用";
   return org?.path || scope.branchOrgUnitPath || scope.orgUnitPath || scope.orgUnitName || "指定分公司";
@@ -314,7 +314,7 @@ function isDecorationTypeMatched(template: QuotaTemplateLike, customerDecoration
 
 function isCustomerInTemplateScope(template: QuotaTemplateLike, context: QuotaTemplateMatchContext) {
   const scope = getQuotaTemplateScope(template);
-  if (!scope?.orgUnitId) return true;
+  if (!scope?.orgUnitId || scope.scopeType === "global") return false;
   if (hasLoadedOrgOptions(context.orgOptions) && !findActiveOrgOption(scope.orgUnitId, context.orgOptions)) return false;
   const customerOrgUnitId = cleanText(context.customerOrgUnitId);
   if (customerOrgUnitId) return isSameOrDescendant(customerOrgUnitId, scope.orgUnitId, context.orgOptions);

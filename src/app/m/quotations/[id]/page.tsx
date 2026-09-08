@@ -66,6 +66,20 @@ function categoryLabel(category: string) {
   return categoryLabels[key] || category;
 }
 
+function feeScopeCategoryKey(category: unknown) {
+  const name = String(category || "").trim();
+  if (name === "base" || name === "基装" || name === "基装项目") return "base";
+  if (name === "main_material" || name === "主材" || name === "主材项目" || name === "产品" || name === "产品项目") return "main_material";
+  if (name === "custom_cabinet" || name === "定制柜" || name === "定制柜项目") return "custom_cabinet";
+  if (name === "other") return "other";
+  return name;
+}
+
+function feeScopeCategoryLabel(category: unknown) {
+  const key = feeScopeCategoryKey(category);
+  return categoryLabels[key] || key;
+}
+
 function formatMoney(value: unknown) {
   const number = toNumber(value);
   return new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(number);
@@ -108,6 +122,19 @@ function directItemTotal(item: QuotationItem) {
   return toMoney(toNumber(item.quantity) * directUnitPrice(item));
 }
 
+function baseLaborSubtotal(item: QuotationItem) {
+  if (!isBaseCategory(item.category)) return 0;
+  const material = toNumber(item.material_cost);
+  const labor = toNumber(item.labor_cost);
+  const laborUnit = material || labor ? labor : toNumber(item.unit_price);
+  return toMoney(toNumber(item.quantity) * laborUnit);
+}
+
+function baseMaterialSubtotal(item: QuotationItem) {
+  if (!isBaseCategory(item.category)) return 0;
+  return toMoney(toNumber(item.quantity) * toNumber(item.material_cost));
+}
+
 function visibleItemRemark(value: unknown) {
   return String(value || "")
     .split(/\r?\n/)
@@ -139,7 +166,23 @@ function buildFeeContext(items: QuotationItem[], categories: string[]): FeeFormu
     const label = categoryLabel(item.category);
     categoryAmounts[label] = toMoney(toNumber(categoryAmounts[label]) + directItemTotal(item));
   });
-  return { mainMaterialAmount, directItemAmount: mainMaterialAmount + Object.values(categoryAmounts).reduce((sum, amount) => sum + amount, 0), categoryAmounts };
+  return {
+    mainMaterialAmount,
+    directItemAmount: mainMaterialAmount + Object.values(categoryAmounts).reduce((sum, amount) => sum + amount, 0),
+    laborAmount: items.reduce((sum, item) => sum + baseLaborSubtotal(item), 0),
+    materialCostAmount: items.reduce((sum, item) => sum + baseMaterialSubtotal(item), 0),
+    categoryAmounts,
+    directItems: items
+      .filter((item) => !isOtherCategory(item.category))
+      .map((item) => ({
+        category: feeScopeCategoryKey(item.category),
+        categoryLabel: feeScopeCategoryLabel(item.category),
+        space: String(item.space || "").trim(),
+        total: directItemTotal(item),
+        laborAmount: baseLaborSubtotal(item),
+        materialCostAmount: baseMaterialSubtotal(item),
+      })),
+  };
 }
 
 function ItemRow({ item }: { item: QuotationItem }) {

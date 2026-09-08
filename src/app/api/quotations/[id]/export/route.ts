@@ -11,6 +11,8 @@ import {
   getFeeFormulaText,
   getFeeRuleText,
   getLegacyManagementFeeRate,
+  normalizeFeeScopeMode,
+  parseFeeScopeValues,
   toMoney,
   toNumber,
   type FeeFormulaContext,
@@ -47,6 +49,9 @@ type ExportItem = {
   fee_calc_method?: string | null;
   fee_calc_base?: string | null;
   fee_rate?: number | null;
+  fee_scope_mode?: string | null;
+  fee_scope_space_ids?: string[] | string | null;
+  fee_scope_space_names?: string[] | string | null;
 };
 
 type DiscountRule = {
@@ -94,6 +99,16 @@ const builtInCategoryLabels: Record<string, string> = {
   custom_cabinet: "定制柜",
   other: "综合费用",
 };
+
+function getCategoryKey(category: unknown) {
+  const name = String(category || "").trim();
+  if (name === "base" || name === "基装" || name === "基装项目") return "base";
+  if (name === "main_material" || name === "主材" || name === "主材项目" || name === "产品" || name === "产品项目") return "main_material";
+  if (name === "custom_cabinet" || name === "定制柜" || name === "定制柜项目") return "custom_cabinet";
+  if (name === "other") return "other";
+  if (!name) return "";
+  return "main_material";
+}
 
 function isBaseCategory(category: unknown) {
   const name = String(category || "").trim();
@@ -232,6 +247,9 @@ function ensureQuotationItemColumns(db: any) {
   if (!names.has("fee_calc_method")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_calc_method TEXT").run();
   if (!names.has("fee_calc_base")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_calc_base TEXT").run();
   if (!names.has("fee_rate")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_rate REAL").run();
+  if (!names.has("fee_scope_mode")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_scope_mode TEXT").run();
+  if (!names.has("fee_scope_space_ids")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_scope_space_ids TEXT").run();
+  if (!names.has("fee_scope_space_names")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_scope_space_names TEXT").run();
 }
 
 function parseSettings(value: string | null) {
@@ -688,7 +706,30 @@ function buildFeeFormulaContext(items: ExportItem[], categories: string[] = []):
     laborAmount,
     materialCostAmount,
     categoryAmounts,
+    directItems: items
+      .filter((item) => !isOtherCategory(item.category))
+      .map((item) => ({
+        category: getCategoryKey(item.category),
+        categoryLabel: getCategoryLabel(item.category),
+        space: inferItemSpace(item),
+        total: getBaseOrMaterialItemTotal(item),
+        laborAmount: getItemLaborSubtotal(item),
+        materialCostAmount: getItemMaterialSubtotal(item),
+      })),
   };
+}
+
+function shouldShowAutoOtherFeeRule(item: ExportItem) {
+  const name = String(item.name || "").trim();
+  return name === "工程直接费" || name === "直接费" || name === "工程总造价" || name === "总造价";
+}
+
+function getOtherFeeRuleDisplay(item: ExportItem, total: number, context?: FeeFormulaContext) {
+  const remark = String(item.remark || "").trim();
+  if (!shouldShowAutoOtherFeeRule(item)) return remark;
+
+  const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context);
+  return remark ? `${remark}；${rule}` : rule;
 }
 
 function itemText(value?: string | number | null) {
@@ -1377,7 +1418,7 @@ function addOtherFeeSection(
 
   items.forEach((item, index) => {
     const total = otherFeeTotals[index] || 0;
-    const ruleText = String(item.remark || "").trim() || getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false }, feeFormulaContext);
+    const ruleText = getOtherFeeRuleDisplay(item, total, feeFormulaContext);
     addFeeRow([formatAlphaSequence(index + 1), item.name || "", getFeeFormulaText(item), total, ruleText], { rowColor: item.row_color });
   });
 
@@ -1802,7 +1843,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   ensureQuotationSchema(db);
   ensureQuotationItemColumns(db);
   const quotation = db.prepare(`
-    SELECT q.*, company.name as company_name, p.name as project_name, p.address as project_address, p.area as project_area,
+	    SELECT q.*, company.name as company_name, p.name as project_name, p.address as project_address, p.area as project_area,
       c.id as customer_id,
       COALESCE(c.name, q.temp_customer_name) as customer_name,
       COALESCE(c.phone, q.temp_customer_phone) as customer_phone,
@@ -1835,7 +1876,13 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   const appendixNote = buildAppendixNoteContent(rawSettings, quotation);
   const budgetCompilationContent = getBudgetCompilationContent(rawSettings);
   const rawItems = db.prepare("SELECT * FROM quotation_items WHERE quotation_id = ? ORDER BY sort_order ASC, created_at ASC").all(params.id) as ExportItem[];
-  const items = migrateManagementFeeToOtherItem(rawItems, rawSettings).map((item) => ({ ...item, space: inferItemSpace(item) }));
+  const items = migrateManagementFeeToOtherItem(rawItems, rawSettings).map((item) => ({
+    ...item,
+    space: inferItemSpace(item),
+    fee_scope_mode: isOtherCategory(item.category) ? normalizeFeeScopeMode(item.fee_scope_mode) : null,
+    fee_scope_space_ids: isOtherCategory(item.category) ? parseFeeScopeValues(item.fee_scope_space_ids) : [],
+    fee_scope_space_names: isOtherCategory(item.category) ? parseFeeScopeValues(item.fee_scope_space_names) : [],
+  }));
   const quoteCategories = getQuoteCategoriesForItems(
     Array.isArray(rawSettings.quoteCategories) ? rawSettings.quoteCategories : [],
     items,

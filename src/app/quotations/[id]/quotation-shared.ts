@@ -34,6 +34,9 @@ export type QuotationItem = {
   fee_calc_method?: FeeCalcMethod;
   fee_calc_base?: FeeCalcBase;
   fee_rate?: number;
+  fee_scope_mode?: "all" | "include" | "exclude";
+  fee_scope_space_ids?: string[];
+  fee_scope_space_names?: string[];
 };
 
 export function normalizeCategoryName(category: unknown) {

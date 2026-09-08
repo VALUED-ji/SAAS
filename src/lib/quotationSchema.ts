@@ -1,4 +1,5 @@
 const quotationTempColumns = [
+  ["quotation_type", "TEXT"],
   ["temp_customer_name", "TEXT"],
   ["temp_customer_designer_name", "TEXT"],
   ["temp_customer_phone", "TEXT"],

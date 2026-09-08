@@ -30,6 +30,9 @@ export type PrintableQuotationItem = {
   fee_calc_method?: string | null;
   fee_calc_base?: string | null;
   fee_rate?: number | null;
+  fee_scope_mode?: string | null;
+  fee_scope_space_ids?: string[] | string | null;
+  fee_scope_space_names?: string[] | string | null;
 };
 
 export type PrintableQuotationSettings = {
@@ -68,6 +71,7 @@ export type PrintableQuotationDetail = {
   branch_company_short_name?: string | null;
   branch_company_phone?: string | null;
   title?: string | null;
+  quotation_type?: string | null;
   project_name?: string | null;
   project_address?: string | null;
   project_area?: number | null;
@@ -493,7 +497,30 @@ function buildFeeFormulaContext(items: PrintableQuotationItem[], categories: str
     laborAmount,
     materialCostAmount,
     categoryAmounts,
+    directItems: items
+      .filter((item) => !isOtherCategory(item.category))
+      .map((item) => ({
+        category: getCategoryKey(item.category),
+        categoryLabel: getCategoryLabel(item.category),
+        space: inferItemSpace(item),
+        total: getItemTotal(item),
+        laborAmount: getItemLaborSubtotal(item),
+        materialCostAmount: getItemMaterialSubtotal(item),
+      })),
   };
+}
+
+function shouldShowAutoOtherFeeRule(item: PrintableQuotationItem) {
+  const name = String(item.name || "").trim();
+  return name === "工程直接费" || name === "直接费" || name === "工程总造价" || name === "总造价";
+}
+
+function getOtherFeeRuleDisplay(item: PrintableQuotationItem, total: number, context?: FeeFormulaContext) {
+  const remark = String(item.remark || "").trim();
+  if (!shouldShowAutoOtherFeeRule(item)) return remark;
+
+  const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context);
+  return remark ? `${remark}；${rule}` : rule;
 }
 
 function calculateQuotationTotals(items: PrintableQuotationItem[], settings?: PrintableQuotationSettings): Totals {
@@ -1238,7 +1265,7 @@ function OtherFeesTable({ items, allItems, totals, settings }: { items: Printabl
                 <td className="text-right font-semibold text-surface-950">
                   {formatPrintAmount(otherFeeTotals[index] || 0)}
                 </td>
-                <td className="quotation-print-rule-cell leading-relaxed text-surface-600">{String(item.remark || "").trim() || getFeeRuleText(item, otherFeeTotals[index] || 0, { currencySymbol: false, useGrouping: false }, totals.feeFormulaContext)}</td>
+                <td className="quotation-print-rule-cell leading-relaxed text-surface-600">{getOtherFeeRuleDisplay(item, otherFeeTotals[index] || 0, totals.feeFormulaContext)}</td>
               </tr>
             );
           })}
@@ -1617,6 +1644,8 @@ export function QuotationPrintDocument({
           white-space: nowrap;
         }
         .quotation-print-head-table {
+          --quotation-print-head-line-color: #111111;
+          --quotation-print-head-inner-line-color: #4f4f4f;
           --quotation-print-head-line-width: 1px;
           --quotation-print-head-inner-line-width: var(--quotation-print-head-line-width);
           position: relative;
@@ -1624,13 +1653,38 @@ export function QuotationPrintDocument({
           display: grid;
           grid-template-columns: 34% repeat(3, minmax(0, 1fr)) 10%;
           grid-template-rows: repeat(2, 44px);
-          border: var(--quotation-print-head-line-width) solid #111111;
+          border: var(--quotation-print-head-line-width) solid var(--quotation-print-head-line-color);
           border-radius: 10px;
           overflow: hidden;
           background: #ffffff;
         }
         .quotation-print-head-table::before {
           display: none;
+        }
+        .quotation-print-head-table::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          pointer-events: none;
+          background-image:
+            linear-gradient(var(--quotation-print-head-inner-line-color), var(--quotation-print-head-inner-line-color)),
+            linear-gradient(var(--quotation-print-head-inner-line-color), var(--quotation-print-head-inner-line-color)),
+            linear-gradient(var(--quotation-print-head-inner-line-color), var(--quotation-print-head-inner-line-color)),
+            linear-gradient(var(--quotation-print-head-inner-line-color), var(--quotation-print-head-inner-line-color)),
+            linear-gradient(90deg, transparent 0 34%, var(--quotation-print-head-inner-line-color) 34% 90%, transparent 90% 100%);
+          background-position:
+            34% 0,
+            52.6667% 0,
+            71.3333% 0,
+            90% 0,
+            0 50%;
+          background-repeat: no-repeat;
+          background-size:
+            1px 100%,
+            1px 100%,
+            1px 100%,
+            1px 100%,
+            100% 1px;
         }
         .quotation-print-head-title-cell {
           position: relative;
@@ -1682,7 +1736,7 @@ export function QuotationPrintDocument({
           align-items: center;
           justify-content: center;
           background: #ffffff;
-          border-left: var(--quotation-print-head-inner-line-width) solid #111111;
+          border: 0;
           padding: 8px 6px;
           text-align: center;
           color: #475467;
@@ -1726,7 +1780,7 @@ export function QuotationPrintDocument({
           flex-direction: column;
           justify-content: center;
           background: #ffffff;
-          border-left: var(--quotation-print-head-inner-line-width) solid #111111;
+          border: 0;
           padding: 7px 12px;
         }
         .quotation-print-head-field-phone {
@@ -1744,17 +1798,17 @@ export function QuotationPrintDocument({
         .quotation-print-head-field-designer {
           grid-column: 2;
           grid-row: 2;
-          border-top: var(--quotation-print-head-inner-line-width) solid #111111;
+          border-top: 0;
         }
         .quotation-print-head-field-creator {
           grid-column: 3;
           grid-row: 2;
-          border-top: var(--quotation-print-head-inner-line-width) solid #111111;
+          border-top: 0;
         }
         .quotation-print-head-field-company-phone {
           grid-column: 4;
           grid-row: 2;
-          border-top: var(--quotation-print-head-inner-line-width) solid #111111;
+          border-top: 0;
         }
         .quotation-print-head-field-wide {
           grid-column: span 2;
@@ -2366,11 +2420,11 @@ export function QuotationPrintDocument({
             grid-column: 5;
             grid-row: 1 / span 2;
             width: auto;
-            border-left: var(--quotation-print-head-inner-line-width) solid #111111;
+            border: 0;
             border-top: 0;
           }
           .quotation-print-head-field {
-            border-left: var(--quotation-print-head-inner-line-width) solid #111111;
+            border: 0;
           }
           .quotation-print-head-field-phone {
             grid-column: 2;
@@ -2390,17 +2444,17 @@ export function QuotationPrintDocument({
           .quotation-print-head-field-designer {
             grid-column: 2;
             grid-row: 2;
-            border-top: var(--quotation-print-head-inner-line-width) solid #111111;
+            border-top: 0;
           }
           .quotation-print-head-field-creator {
             grid-column: 3;
             grid-row: 2;
-            border-top: var(--quotation-print-head-inner-line-width) solid #111111;
+            border-top: 0;
           }
           .quotation-print-head-field-company-phone {
             grid-column: 4;
             grid-row: 2;
-            border-top: var(--quotation-print-head-inner-line-width) solid #111111;
+            border-top: 0;
           }
           .quotation-print-composition,
           .quotation-print-composition-detail-grid {
@@ -2591,6 +2645,193 @@ export function QuotationPrintDocument({
           }
           .quotation-print-base-subtotal-head {
             border-left: 1px solid #111111 !important;
+          }
+          .quotation-print-document,
+          .quotation-print-document * {
+            text-shadow: none !important;
+            filter: none !important;
+            -webkit-font-smoothing: antialiased !important;
+            text-rendering: geometricPrecision !important;
+          }
+          .quotation-print-document {
+            box-shadow: none !important;
+          }
+          .quotation-print-document th,
+          .quotation-print-document td,
+          .quotation-print-document .quotation-print-item-name,
+          .quotation-print-document .quotation-print-base-description,
+          .quotation-print-document .quotation-print-rule-cell {
+            color: #222222 !important;
+          }
+          .quotation-print-document td,
+          .quotation-print-document .quotation-print-item-name,
+          .quotation-print-document .quotation-print-base-description,
+          .quotation-print-document .quotation-print-rule-cell {
+            font-weight: 400 !important;
+          }
+          .quotation-print-document th,
+          .quotation-print-document .quotation-print-space-row td,
+          .quotation-print-document .quotation-print-space-total-row td,
+          .quotation-print-document .quotation-print-total-row td {
+            font-weight: 600 !important;
+          }
+          .quotation-print-document .tabular-nums,
+          .quotation-print-document .text-right,
+          .quotation-print-document td.text-center {
+            font-weight: 400 !important;
+          }
+          .quotation-print-document .quotation-print-space-total-row .text-right,
+          .quotation-print-document .quotation-print-total-row .text-right {
+            font-weight: 600 !important;
+          }
+          .quotation-print-document table,
+          .quotation-print-document th,
+          .quotation-print-document td,
+          .quotation-print-document .quotation-print-item-name,
+          .quotation-print-document .quotation-print-base-description,
+          .quotation-print-document .quotation-print-rule-cell {
+            font-family: SimSun, STSong, "Songti SC", serif !important;
+            -webkit-text-stroke: 0 transparent !important;
+          }
+          .quotation-print-document th,
+          .quotation-print-document .quotation-print-space-row td,
+          .quotation-print-document .quotation-print-space-total-row td,
+          .quotation-print-document .quotation-print-total-row td,
+          .quotation-print-document .quotation-print-space-total-row .text-right,
+          .quotation-print-document .quotation-print-total-row .text-right {
+            font-weight: 500 !important;
+          }
+          .quotation-print-document td,
+          .quotation-print-document td *,
+          .quotation-print-document .quotation-print-base-description,
+          .quotation-print-document .quotation-print-rule-cell {
+            font-weight: 400 !important;
+          }
+          .quotation-print-document .quotation-print-space-row td,
+          .quotation-print-document .quotation-print-space-total-row td,
+          .quotation-print-document .quotation-print-total-row td {
+            font-weight: 500 !important;
+          }
+          .quotation-print-document {
+            --quotation-print-ink: #242424;
+            --quotation-print-line: #2f2f2f;
+            color: var(--quotation-print-ink) !important;
+          }
+          .quotation-print-document,
+          .quotation-print-document :where(h1, h2, h3, p, span, strong, small, em, th, td, footer, div) {
+            color: var(--quotation-print-ink) !important;
+            font-family: SimSun, STSong, "Songti SC", serif !important;
+            text-shadow: none !important;
+            filter: none !important;
+            -webkit-text-stroke: 0 transparent !important;
+            font-synthesis-weight: none !important;
+          }
+          .quotation-print-cover-main h1,
+          .quotation-print-cover-main h1 em,
+          .quotation-print-cover-main h2,
+          .quotation-print-cover-brand-mark strong,
+          .quotation-print-head-title-cell h1,
+          .quotation-print-section-heading h2,
+          .quotation-print-budget-compilation-head span {
+            font-weight: 500 !important;
+          }
+          .quotation-print-cover-main p,
+          .quotation-print-cover-field span,
+          .quotation-print-cover-field strong,
+          .quotation-print-head-title-cell p,
+          .quotation-print-head-field span,
+          .quotation-print-head-field strong,
+          .quotation-print-qr p,
+          .quotation-print-appendix-note,
+          .quotation-print-appendix-note *,
+          .quotation-print-budget-compilation-content,
+          .quotation-print-budget-compilation-content *,
+          .quotation-print-signature-card p {
+            font-weight: 400 !important;
+          }
+          .quotation-print-document table,
+          .quotation-print-base-table,
+          .quotation-print-material-table,
+          .quotation-print-fee-table,
+          .quotation-print-cabinet-table,
+          .quotation-print-composition-table,
+          .quotation-print-appendix-note,
+          .quotation-print-budget-compilation-content,
+          .quotation-print-head-table {
+            border-color: var(--quotation-print-line) !important;
+            border-width: 0.75px !important;
+          }
+          .quotation-print-document th,
+          .quotation-print-document td,
+          .quotation-print-base-table th,
+          .quotation-print-base-table td,
+          .quotation-print-material-table th,
+          .quotation-print-material-table td,
+          .quotation-print-fee-table th,
+          .quotation-print-fee-table td,
+          .quotation-print-cabinet-table th,
+          .quotation-print-cabinet-table td,
+          .quotation-print-composition-table th,
+          .quotation-print-composition-table td,
+          .quotation-print-head-field,
+          .quotation-print-qr,
+          .quotation-print-appendix-note-label {
+            border-color: var(--quotation-print-line) !important;
+            border-width: 0.75px !important;
+          }
+          .quotation-print-document th {
+            font-weight: 500 !important;
+          }
+          .quotation-print-document td,
+          .quotation-print-document td *,
+          .quotation-print-base-description,
+          .quotation-print-rule-cell {
+            font-weight: 400 !important;
+          }
+          .quotation-print-space-row td,
+          .quotation-print-space-row td *,
+          .quotation-print-space-total-row td,
+          .quotation-print-total-row td {
+            font-weight: 500 !important;
+          }
+          .quotation-print-cover-field strong {
+            border: 0 !important;
+            border-bottom: 0.75px solid var(--quotation-print-line) !important;
+          }
+          .quotation-print-signature-card {
+            border: 0 !important;
+            border-bottom: 0.75px solid var(--quotation-print-line) !important;
+          }
+          .quotation-print-head-table {
+            --quotation-print-head-line-color: var(--quotation-print-line) !important;
+            --quotation-print-head-inner-line-color: var(--quotation-print-line) !important;
+            --quotation-print-head-line-width: 1px !important;
+            --quotation-print-head-inner-line-width: 1px !important;
+            border: 1px solid var(--quotation-print-head-line-color) !important;
+          }
+          .quotation-print-head-field {
+            border: 0 !important;
+          }
+          .quotation-print-head-field-phone,
+          .quotation-print-head-field-area,
+          .quotation-print-head-field-date {
+            border-top: 0 !important;
+          }
+          .quotation-print-head-field-designer,
+          .quotation-print-head-field-creator,
+          .quotation-print-head-field-company-phone {
+            border-top: 0 !important;
+          }
+          .quotation-print-qr {
+            border: 0 !important;
+          }
+          .quotation-print-appendix-note {
+            border: 0.75px solid var(--quotation-print-line) !important;
+            border-collapse: initial !important;
+          }
+          .quotation-print-appendix-note-label {
+            border: 0 !important;
+            border-right: 0.75px solid var(--quotation-print-line) !important;
           }
         }
         @media print and (orientation: landscape) {

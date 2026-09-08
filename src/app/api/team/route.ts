@@ -2,12 +2,33 @@ import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { DEFAULT_ROLES, ensureDefaultRoles, getDb } from "@/lib/db";
 import { getCustomerBranchScope } from "@/lib/branchSettingsLookup";
+import { ensureQuotationAccessColumns, serializeQuotationAccessOrgUnitIds } from "@/lib/quotationOrgAccess";
 import { canManageTeam, getAuthContext } from "@/lib/security/authorization";
+
+function normalizeQuotationAccessOrgUnitIds(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.map((item) => String(item || "").trim()).filter(Boolean)));
+}
+
+function validateQuotationAccessOrgUnitIds(db: ReturnType<typeof getDb>, companyId: string, ids: string[]) {
+  if (ids.length === 0) return true;
+  const placeholders = ids.map(() => "?").join(",");
+  const row = db.prepare(`
+    SELECT COUNT(*) as total
+    FROM org_units
+    WHERE company_id = ?
+      AND id IN (${placeholders})
+      AND deleted_at IS NULL
+      AND COALESCE(is_active, 1) = 1
+  `).get(companyId, ...ids) as { total?: number } | undefined;
+  return Number(row?.total || 0) === ids.length;
+}
 
 export async function GET(req: NextRequest) {
   const auth = getAuthContext(req);
   if (!auth) return NextResponse.json({ message: "请先登录" }, { status: 401 });
   const db = getDb();
+  ensureQuotationAccessColumns(db);
   const url = new URL(req.url);
   const pickerMode = url.searchParams.get("picker") === "1";
   const now = new Date().toISOString();
@@ -110,6 +131,7 @@ export async function GET(req: NextRequest) {
         COALESCE((SELECT r.name FROM roles r WHERE r.company_id = u.company_id AND r.code = u.role AND r.deleted_at IS NULL LIMIT 1), u.role) as role_name,
         u.employee_no,
         u.org_unit_id,
+        u.quotation_access_org_unit_ids,
         o.name as org_unit_name,
         COALESCE(u.is_active, 1) as is_active,
         (SELECT COUNT(*) FROM projects WHERE manager_id = u.id AND company_id = ? AND deleted_at IS NULL AND status IN ('CONSTRUCTION','SIGNED')) as project_count
@@ -144,6 +166,7 @@ export async function GET(req: NextRequest) {
       u.id, u.name, u.phone, u.avatar, u.role,
       COALESCE((SELECT r.name FROM roles r WHERE r.company_id = u.company_id AND r.code = u.role AND r.deleted_at IS NULL LIMIT 1), u.role) as role_name,
       u.org_unit_id,
+      u.quotation_access_org_unit_ids,
       u.employee_no, u.hire_date, u.notes, u.last_login_at, u.last_seen_at,
       COALESCE(u.is_active, 1) as is_active,
       o.name as org_unit_name,
@@ -195,14 +218,17 @@ export async function POST(req: NextRequest) {
       is_active = 1,
       notes,
       avatar,
+      quotation_access_org_unit_ids,
     } = body;
+    const quotationAccessOrgUnitIds = normalizeQuotationAccessOrgUnitIds(quotation_access_org_unit_ids);
 
     const rows = Array.isArray(body?.employees) ? body.employees : null;
     if (rows) {
       const db = getDb();
+      ensureQuotationAccessColumns(db);
       const insert = db.prepare(`
-        INSERT INTO users (id, company_id, name, phone, password, role, org_unit_id, employee_no, hire_date, is_active, notes, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        INSERT INTO users (id, company_id, name, phone, password, role, org_unit_id, quotation_access_org_unit_ids, employee_no, hire_date, is_active, notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
       `);
       const created: { id: string; name: string }[] = [];
       const errors: { row: number; message: string }[] = [];
@@ -275,6 +301,7 @@ export async function POST(req: NextRequest) {
           hashed,
           rowRole,
           rowOrgUnitId,
+          "[]",
           item.employee_no?.trim() || null,
           item.hire_date || null,
           rowIsActive,
@@ -293,8 +320,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ message: "初始密码需为 8-32 位且同时包含字母和数字，不能包含空格" }, { status: 400 });
     }
     const db = getDb();
+    ensureQuotationAccessColumns(db);
     if (!isAllowedRole(db, auth.companyId, role)) return NextResponse.json({ message: "请选择员工角色" }, { status: 400 });
     if (!org_unit_id) return NextResponse.json({ message: "请选择所属组织" }, { status: 400 });
+    if (!validateQuotationAccessOrgUnitIds(db, auth.companyId, quotationAccessOrgUnitIds)) {
+      return NextResponse.json({ message: "额外报价范围包含无效组织" }, { status: 400 });
+    }
 
     const existing = db.prepare("SELECT id FROM users WHERE phone = ? AND deleted_at IS NULL").get(phone.trim());
     if (existing) return NextResponse.json({ message: "该手机号已存在员工账号" }, { status: 400 });
@@ -310,8 +341,8 @@ export async function POST(req: NextRequest) {
     const hashed = await bcrypt.hash(String(password), 10);
 
     db.prepare(`
-      INSERT INTO users (id, company_id, name, phone, password, avatar, role, org_unit_id, employee_no, hire_date, is_active, notes, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      INSERT INTO users (id, company_id, name, phone, password, avatar, role, org_unit_id, quotation_access_org_unit_ids, employee_no, hire_date, is_active, notes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     `).run(
       id,
       auth.companyId,
@@ -321,6 +352,7 @@ export async function POST(req: NextRequest) {
       avatarInput.value,
       role,
       org_unit_id,
+      serializeQuotationAccessOrgUnitIds(quotationAccessOrgUnitIds),
       employee_no?.trim() || null,
       hire_date || null,
       is_active ? 1 : 0,
@@ -330,7 +362,7 @@ export async function POST(req: NextRequest) {
     const user = db.prepare(`
       SELECT u.id, u.name, u.phone, u.avatar, u.role,
         COALESCE((SELECT r.name FROM roles r WHERE r.company_id = u.company_id AND r.code = u.role AND r.deleted_at IS NULL LIMIT 1), u.role) as role_name,
-        u.org_unit_id, u.employee_no,
+        u.org_unit_id, u.quotation_access_org_unit_ids, u.employee_no,
         u.hire_date, u.notes, u.last_login_at, u.last_seen_at, COALESCE(u.is_active, 1) as is_active,
         o.name as org_unit_name, 0 as project_count
       FROM users u
@@ -361,7 +393,9 @@ export async function PATCH(req: NextRequest) {
       is_active = 1,
       notes,
       avatar,
+      quotation_access_org_unit_ids,
     } = body;
+    const quotationAccessOrgUnitIds = normalizeQuotationAccessOrgUnitIds(quotation_access_org_unit_ids);
 
     if (!id) return NextResponse.json({ message: "缺少员工 ID" }, { status: 400 });
     if (!name?.trim()) return NextResponse.json({ message: "员工姓名为必填项" }, { status: 400 });
@@ -371,8 +405,12 @@ export async function PATCH(req: NextRequest) {
       return NextResponse.json({ message: "新密码需为 8-32 位且同时包含字母和数字，不能包含空格" }, { status: 400 });
     }
     const db = getDb();
+    ensureQuotationAccessColumns(db);
     if (!isAllowedRole(db, auth.companyId, role)) return NextResponse.json({ message: "请选择员工角色" }, { status: 400 });
     if (!org_unit_id) return NextResponse.json({ message: "请选择所属组织" }, { status: 400 });
+    if (!validateQuotationAccessOrgUnitIds(db, auth.companyId, quotationAccessOrgUnitIds)) {
+      return NextResponse.json({ message: "额外报价范围包含无效组织" }, { status: 400 });
+    }
 
     const user = db.prepare("SELECT id, org_unit_id, avatar FROM users WHERE id = ? AND company_id = ? AND deleted_at IS NULL")
       .get(id, auth.companyId) as any;
@@ -399,7 +437,7 @@ export async function PATCH(req: NextRequest) {
       const hashed = await bcrypt.hash(passwordValue, 10);
       db.prepare(`
         UPDATE users
-        SET name = ?, phone = ?, password = ?, avatar = ?, role = ?, org_unit_id = ?, employee_no = ?, hire_date = ?, is_active = ?, notes = ?,
+        SET name = ?, phone = ?, password = ?, avatar = ?, role = ?, org_unit_id = ?, quotation_access_org_unit_ids = ?, employee_no = ?, hire_date = ?, is_active = ?, notes = ?,
           session_version = COALESCE(session_version, 0) + 1, updated_at = datetime('now')
         WHERE id = ? AND company_id = ?
       `).run(
@@ -409,6 +447,7 @@ export async function PATCH(req: NextRequest) {
         nextAvatar,
         role,
         org_unit_id,
+        serializeQuotationAccessOrgUnitIds(quotationAccessOrgUnitIds),
         employee_no?.trim() || null,
         hire_date || null,
         nextIsActive,
@@ -419,7 +458,7 @@ export async function PATCH(req: NextRequest) {
     } else {
       db.prepare(`
         UPDATE users
-        SET name = ?, phone = ?, avatar = ?, role = ?, org_unit_id = ?, employee_no = ?, hire_date = ?, is_active = ?, notes = ?, updated_at = datetime('now')
+        SET name = ?, phone = ?, avatar = ?, role = ?, org_unit_id = ?, quotation_access_org_unit_ids = ?, employee_no = ?, hire_date = ?, is_active = ?, notes = ?, updated_at = datetime('now')
         WHERE id = ? AND company_id = ?
       `).run(
         name.trim(),
@@ -427,6 +466,7 @@ export async function PATCH(req: NextRequest) {
         nextAvatar,
         role,
         org_unit_id,
+        serializeQuotationAccessOrgUnitIds(quotationAccessOrgUnitIds),
         employee_no?.trim() || null,
         hire_date || null,
         nextIsActive,
@@ -439,7 +479,7 @@ export async function PATCH(req: NextRequest) {
     const updated = db.prepare(`
       SELECT u.id, u.name, u.phone, u.avatar, u.role,
         COALESCE((SELECT r.name FROM roles r WHERE r.company_id = u.company_id AND r.code = u.role AND r.deleted_at IS NULL LIMIT 1), u.role) as role_name,
-        u.org_unit_id, u.employee_no,
+        u.org_unit_id, u.quotation_access_org_unit_ids, u.employee_no,
         u.hire_date, u.notes, u.last_login_at, u.last_seen_at, COALESCE(u.is_active, 1) as is_active,
         o.name as org_unit_name,
         (SELECT COUNT(*) FROM projects WHERE manager_id = u.id AND company_id = ? AND deleted_at IS NULL AND status IN ('CONSTRUCTION','SIGNED')) as project_count

@@ -12,6 +12,7 @@ interface User {
   role: string;
   permissions?: string[];
   org_unit_id: string | null;
+  quotation_access_org_unit_ids?: string[];
   companyName: string;
   companyShortName?: string;
   sidebarBrandName?: string;

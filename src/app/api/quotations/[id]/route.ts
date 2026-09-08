@@ -7,6 +7,8 @@ import {
   getLegacyManagementFeeRate,
   normalizeFeeCalcBase,
   normalizeFeeCalcMethod,
+  normalizeFeeScopeMode,
+  parseFeeScopeValues,
   toMoney,
   type FeeFormulaContext,
 } from "@/lib/quotationFeeFormulas";
@@ -23,6 +25,12 @@ import {
   getQuotationItemsForChangeLog,
   recordQuotationItemChanges,
 } from "@/lib/quotationChangeLogs";
+import {
+  canAccessQuotationOrg,
+  ensureQuotationAccessColumns,
+  getOrgById,
+  getStoreOrgByName,
+} from "@/lib/quotationOrgAccess";
 
 type ItemInput = {
   id?: string;
@@ -52,6 +60,9 @@ type ItemInput = {
   fee_calc_method?: string | null;
   fee_calc_base?: string | null;
   fee_rate?: number | null;
+  fee_scope_mode?: string | null;
+  fee_scope_space_ids?: string[] | string | null;
+  fee_scope_space_names?: string[] | string | null;
 };
 
 type DiscountRule = {
@@ -73,6 +84,7 @@ type DiscountScopeOption = {
 
 function ensureQuotationColumns(db: any) {
   ensureQuotationSchema(db);
+  ensureQuotationAccessColumns(db);
   const customerColumns = db.prepare("PRAGMA table_info(customers)").all() as { name: string }[];
   const customerNames = new Set(customerColumns.map((column) => column.name));
   if (!customerNames.has("weixin")) db.prepare("ALTER TABLE customers ADD COLUMN weixin TEXT").run();
@@ -93,6 +105,9 @@ function ensureQuotationItemColumns(db: any) {
   if (!names.has("fee_calc_method")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_calc_method TEXT").run();
   if (!names.has("fee_calc_base")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_calc_base TEXT").run();
   if (!names.has("fee_rate")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_rate REAL").run();
+  if (!names.has("fee_scope_mode")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_scope_mode TEXT").run();
+  if (!names.has("fee_scope_space_ids")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_scope_space_ids TEXT").run();
+  if (!names.has("fee_scope_space_names")) db.prepare("ALTER TABLE quotation_items ADD COLUMN fee_scope_space_names TEXT").run();
   if (!names.has("cost_material_unit")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_material_unit REAL").run();
   if (!names.has("cost_labor_unit")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_labor_unit REAL").run();
   if (!names.has("cost_loss_rate")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_loss_rate REAL").run();
@@ -239,6 +254,35 @@ function getQuotationCustomerId(db: any, quotationId: string) {
     LIMIT 1
   `).get(quotationId) as any;
   return row?.customer_id || null;
+}
+
+function getQuotationOwnedStoreOrg(db: any, quotation: any, companyId: string) {
+  const quotationOrgUnitId = String(quotation?.quotation_org_unit_id || "").trim();
+  if (quotationOrgUnitId) {
+    const org = getOrgById(db, quotationOrgUnitId, companyId);
+    if (org?.type === "store") return org;
+  }
+  const customerId = String(quotation?.customer_id || "").trim() || (quotation?.id ? getQuotationCustomerId(db, quotation.id) : "");
+  if (!customerId) return null;
+  const customer = db.prepare("SELECT service_store FROM customers WHERE id = ? AND company_id = ? AND deleted_at IS NULL")
+    .get(customerId, companyId) as any;
+  return getStoreOrgByName(db, customer?.service_store || "", companyId);
+}
+
+function isUnassignedLegacyQuotation(db: any, quotation: any, companyId: string) {
+  if (String(quotation?.quotation_org_unit_id || "").trim()) return false;
+  const customerId = String(quotation?.customer_id || "").trim() || (quotation?.id ? getQuotationCustomerId(db, quotation.id) : "");
+  if (!customerId) return true;
+  const customer = db.prepare("SELECT service_store FROM customers WHERE id = ? AND company_id = ? AND deleted_at IS NULL")
+    .get(customerId, companyId) as any;
+  return !String(customer?.service_store || "").trim();
+}
+
+function canAccessQuotationRecord(db: any, quotation: any, auth: NonNullable<ReturnType<typeof getAuthContext>>) {
+  const quotationOrg = getQuotationOwnedStoreOrg(db, quotation, auth.companyId);
+  if (quotationOrg?.id) return canAccessQuotationOrg(db, auth.userId, auth.companyId, quotationOrg.id);
+  if (!isUnassignedLegacyQuotation(db, quotation, auth.companyId)) return false;
+  return auth.isAdmin || String(quotation?.created_by_id || "") === auth.userId;
 }
 
 function isQuotationUsedBySignedContract(db: any, quotationId: string) {
@@ -522,6 +566,41 @@ function isDirectItemCategory(category: unknown) {
   return !isOtherCategory(category);
 }
 
+function getCategoryKey(category: unknown) {
+  if (isBaseCategory(category)) return "base";
+  if (isOtherCategory(category)) return "other";
+  if (isCustomCabinetCategory(category)) return "custom_cabinet";
+  if (isMainMaterialCategory(category)) return "main_material";
+  return String(category || "").trim();
+}
+
+function getCategoryLabel(category: unknown) {
+  const key = getCategoryKey(category);
+  if (key === "base") return "基装";
+  if (key === "main_material") return "产品";
+  if (key === "custom_cabinet") return "定制柜";
+  if (key === "other") return "综合费用";
+  return String(category || "").trim();
+}
+
+function getFeeScopeCategoryKey(category: unknown) {
+  const name = String(category || "").trim();
+  if (isBaseCategory(name)) return "base";
+  if (isOtherCategory(name)) return "other";
+  if (isCustomCabinetCategory(name)) return "custom_cabinet";
+  if (name === "main_material" || name === "主材" || name === "产品" || name === "产品项目") return "main_material";
+  return name;
+}
+
+function getFeeScopeCategoryLabel(category: unknown) {
+  const key = getFeeScopeCategoryKey(category);
+  if (key === "base") return "基装";
+  if (key === "main_material") return "产品";
+  if (key === "custom_cabinet") return "定制柜";
+  if (key === "other") return "综合费用";
+  return key;
+}
+
 function uniqueValues(values: string[]) {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
 }
@@ -757,6 +836,16 @@ function buildFeeFormulaContext(items: any[], categories: string[] = []): FeeFor
     laborAmount,
     materialCostAmount,
     categoryAmounts,
+    directItems: items
+      .filter((item) => isDirectItemCategory(item.category))
+      .map((item) => ({
+        category: getFeeScopeCategoryKey(item.category),
+        categoryLabel: getFeeScopeCategoryLabel(item.category),
+        space: inferItemSpace(item),
+        total: getBaseOrMaterialItemTotal(item),
+        laborAmount: getBaseLaborSubtotal(item),
+        materialCostAmount: getBaseMaterialSubtotal(item),
+      })),
   };
 }
 
@@ -803,6 +892,9 @@ function migrateManagementFeeToOtherItem(items: any[], settings: any) {
         fee_calc_method: "percent",
         fee_calc_base: "直接费",
         fee_rate: managementFeeRate,
+        fee_scope_mode: "all",
+        fee_scope_space_ids: [],
+        fee_scope_space_names: [],
         sort_order: items.length + 1,
       },
     ],
@@ -979,7 +1071,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
       COALESCE(c.room_no, q.temp_customer_room_no) as customer_room_no,
       COALESCE(c.no_room_number, q.temp_customer_no_room_number, 0) as customer_no_room_number,
       COALESCE(c.area_size, q.temp_customer_area) as customer_area_size,
-      COALESCE(c.decoration_type, q.temp_customer_decoration_type) as customer_decoration_type,
+      c.decoration_type as customer_decoration_type,
       u.name as creator_name,
       COALESCE((
         SELECT designer.name
@@ -998,6 +1090,11 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
     WHERE q.id = ? AND q.company_id = ? AND q.deleted_at IS NULL
   `).get(params.id, companyId) as any;
   if (!quotation) return NextResponse.json({ message: "报价不存在" }, { status: 404 });
+  if (auth) {
+    if (!canAccessQuotationRecord(db, quotation, auth)) {
+      return NextResponse.json({ message: "没有该报价的查看权限" }, { status: 403 });
+    }
+  }
 
   const rawItems = db.prepare("SELECT * FROM quotation_items WHERE quotation_id = ? ORDER BY sort_order ASC, created_at ASC").all(params.id) as any[];
   const rawSettings = parseSettings(quotation.settings);
@@ -1041,10 +1138,13 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
     ensureQuotationChangeLogSchema(db);
     const existing = db.prepare("SELECT * FROM quotations WHERE id = ? AND company_id = ?").get(params.id, auth.companyId) as any;
     if (!existing) return NextResponse.json({ message: "报价不存在" }, { status: 404 });
+    const userId = auth.userId;
+    if (!canAccessQuotationRecord(db, existing, auth)) {
+      return NextResponse.json({ message: "没有该报价的管理权限" }, { status: 403 });
+    }
 
     const body = await req.json();
     const action = String(body.action || "").trim();
-    const userId = auth.userId;
     if (isReadonlyQuotationRecipient(db, params.id, userId)) {
       return NextResponse.json({ message: "设计师只能查看、打印和下载报价单，不能修改报价内容" }, { status: 403 });
     }
@@ -1212,7 +1312,7 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
 
     if (existing.deleted_at) return NextResponse.json({ message: "报价已在回收站，请先恢复后再操作" }, { status: 400 });
     const contentLockMessage = getQuotationContentLockMessage(getQuotationContentLockReason(db, existing));
-    const contentMutationActions = new Set(["syncQuotaItems", "updateProjectInfo", "bindCustomer", "updateNotes", "applyTemplateBudgetCompilation"]);
+    const contentMutationActions = new Set(["syncQuotaItems", "updateProjectInfo", "updateQuotationType", "bindCustomer", "updateNotes", "applyTemplateBudgetCompilation"]);
     if (contentLockMessage && contentMutationActions.has(action)) {
       return NextResponse.json({ message: contentLockMessage }, { status: 423 });
     }
@@ -1267,6 +1367,37 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
       return NextResponse.json({ success: true, settings: nextSettings, mode: budgetCompilationUpdate.currentExists ? "update" : "insert" });
     }
 
+    if (action === "updateQuotationType") {
+      const quotationType = String(body.quotation_type || "").trim().slice(0, 20);
+      const currentSettings = parseSettings(existing.settings);
+      const nextSettings = {
+        ...currentSettings,
+        quotationType,
+      };
+      db.prepare(`
+        UPDATE quotations
+        SET quotation_type = ?, settings = ?, updated_at = datetime('now')
+        WHERE id = ? AND company_id = ?
+      `).run(quotationType || null, JSON.stringify(nextSettings), params.id, auth.companyId);
+
+      const customerId = getQuotationCustomerId(db, params.id);
+      if (customerId) {
+        recordCustomerOperation(db, {
+          userId,
+          customerId,
+          action: "customer.quotation.type_update",
+          module: "预算报价",
+          title: "更新报价类型",
+          content: quotationType ? `报价类型更新为：${quotationType}` : "清空报价类型",
+          targetName: existing.title || "",
+          metadata: { quotationId: params.id, quotationType: quotationType || null },
+          ipAddress: getRequestIp(req),
+        });
+      }
+
+      return NextResponse.json({ success: true, quotation_type: quotationType || null, settings: nextSettings });
+    }
+
     if (action === "updateProjectInfo") {
       const customerName = String(body.customer_name || "").trim();
       const designerName = String(body.designer_name || "").trim();
@@ -1283,11 +1414,12 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
       const buildingNo = String(body.building_no || "").trim();
       const unitNo = String(body.unit_no || "").trim();
       const roomNo = String(body.room_no || "").trim();
-      const noRoomNumber = Boolean(body.no_room_number);
-      const areaSize = safeNonNegativeNumber(body.area_size);
-      const decorationType = String(body.decoration_type || "").trim();
-      const quoteNotes = String(body.quote_notes ?? body.notes ?? "").trim();
-      const customerVisibleNote = String(body.customer_visible_note || "").trim();
+	      const noRoomNumber = Boolean(body.no_room_number);
+	      const areaSize = safeNonNegativeNumber(body.area_size);
+	      const quotationType = Object.prototype.hasOwnProperty.call(body, "quotation_type")
+	        ? String(body.quotation_type || "").trim().slice(0, 20)
+	        : String(existing.quotation_type || parseSettings(existing.settings).quotationType || "").trim().slice(0, 20);
+	      const decorationType = String(body.decoration_type || "").trim();
       const roomText = noRoomNumber ? "暂无房号" : [buildingNo, unitNo, roomNo].filter(Boolean).join("-");
       const projectName = roomText || String(body.project_name || "").trim() || customerAddress || houseAddress || "工地";
       const projectAddress = houseAddress || customerAddress;
@@ -1305,8 +1437,14 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
         : null;
 
       const tx = (db as any).transaction(() => {
-        db.prepare("UPDATE quotations SET notes = ?, customer_visible_note = ?, updated_at = datetime('now') WHERE id = ? AND company_id = ?")
-          .run(quoteNotes || null, customerVisibleNote || null, params.id, auth.companyId);
+        const currentSettings = parseSettings(existing.settings);
+	        const nextSettings = {
+	          ...currentSettings,
+	          quotationType,
+	          quotationDecorationType: decorationType,
+	        };
+	        db.prepare("UPDATE quotations SET quotation_type = ?, temp_customer_decoration_type = ?, settings = ?, updated_at = datetime('now') WHERE id = ? AND company_id = ?")
+	          .run(quotationType || null, decorationType || null, JSON.stringify(nextSettings), params.id, auth.companyId);
         if (bound?.project_id && bound?.customer_id) {
           db.prepare(`
             UPDATE customers
@@ -1397,6 +1535,14 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
       if (!customerId) return NextResponse.json({ message: "请选择要绑定的客户" }, { status: 400 });
       const customer = db.prepare("SELECT * FROM customers WHERE id = ? AND company_id = ? AND deleted_at IS NULL").get(customerId, auth.companyId) as any;
       if (!customer) return NextResponse.json({ message: "客户不存在" }, { status: 404 });
+      const customerStoreName = String(customer.service_store || "").trim();
+      const quotationOrg = customerStoreName
+        ? getStoreOrgByName(db, customerStoreName, auth.companyId)
+        : getQuotationOwnedStoreOrg(db, existing, auth.companyId);
+      if (!quotationOrg?.id) return NextResponse.json({ message: "请选择报价归属门店后再绑定客户" }, { status: 400 });
+      if (!canAccessQuotationOrg(db, userId, auth.companyId, quotationOrg.id)) {
+        return NextResponse.json({ message: "没有该门店的报价权限" }, { status: 403 });
+      }
       let project = db.prepare(`
         SELECT * FROM projects
         WHERE customer_id = ? AND company_id = ? AND deleted_at IS NULL
@@ -1425,14 +1571,21 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
         const latest = db.prepare("SELECT COALESCE(MAX(version), 0) as version FROM quotations WHERE project_id = ? AND deleted_at IS NULL").get(project.id) as any;
         db.prepare(`
           UPDATE quotations
-          SET project_id = ?, version = ?, temp_customer_name = NULL, temp_customer_designer_name = NULL, temp_customer_phone = NULL, temp_customer_weixin = NULL,
+          SET project_id = ?, version = ?, quotation_org_unit_id = ?, quotation_org_unit_name = ?,
+            temp_customer_name = NULL, temp_customer_designer_name = NULL, temp_customer_phone = NULL, temp_customer_weixin = NULL,
             temp_customer_address = NULL, temp_customer_house_address = NULL,
             temp_customer_address_location_name = NULL, temp_customer_address_location_address = NULL,
             temp_customer_address_latitude = NULL, temp_customer_address_longitude = NULL,
             temp_customer_building_no = NULL, temp_customer_unit_no = NULL, temp_customer_room_no = NULL,
-            temp_customer_no_room_number = NULL, temp_customer_area = NULL, temp_customer_decoration_type = NULL, updated_at = datetime('now')
+            temp_customer_no_room_number = NULL, temp_customer_area = NULL,
+            temp_customer_decoration_type = COALESCE(NULLIF(TRIM(COALESCE(temp_customer_decoration_type, '')), ''), ?),
+            updated_at = datetime('now')
           WHERE id = ?
-        `).run(project.id, Number(latest?.version || 0) + 1, params.id);
+        `).run(project.id, Number(latest?.version || 0) + 1, quotationOrg.id, quotationOrg.name, String(customer.decoration_type || "").trim() || null, params.id);
+        if (!customerStoreName) {
+          db.prepare("UPDATE customers SET service_store = ?, updated_at = datetime('now') WHERE id = ? AND company_id = ?")
+            .run(quotationOrg.name, customer.id, auth.companyId);
+        }
         db.prepare("UPDATE projects SET contract_amount = ?, status = CASE WHEN status = 'LEAD' THEN 'QUOTED' ELSE status END, updated_at = datetime('now') WHERE id = ?")
           .run(Number(existing.final_amount ?? existing.total_amount ?? 0), project.id);
       });
@@ -1494,14 +1647,36 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
       const latest = targetProjectId
         ? db.prepare("SELECT COALESCE(MAX(version), 0) as version FROM quotations WHERE project_id = ? AND deleted_at IS NULL").get(targetProjectId) as any
         : { version: 0 };
+      const nextQuotationOrg = targetCustomer
+        ? getStoreOrgByName(db, targetCustomer.service_store || "", auth.companyId)
+        : getQuotationOwnedStoreOrg(db, existing, auth.companyId);
+      if (!nextQuotationOrg?.id) {
+        return NextResponse.json({
+          message: targetCustomer ? "目标客户没有有效服务门店，不能复制报价" : "原报价没有归属门店，不能复制报价",
+        }, { status: 400 });
+      }
+      if (!canAccessQuotationOrg(db, userId, auth.companyId, nextQuotationOrg.id)) {
+        return NextResponse.json({ message: "没有该门店的报价权限" }, { status: 403 });
+      }
       const nextQuotationId = makeId("QUO");
       const sourceItems = db.prepare("SELECT * FROM quotation_items WHERE quotation_id = ? ORDER BY sort_order ASC, created_at ASC").all(params.id) as any[];
       const nextTitle = copyToOtherCustomer && targetCustomer
         ? `${buildDefaultQuotationTitle(targetCustomer)} 副本`
         : `${existing.title || "装修报价单"} 副本`;
+	      const existingSettings = parseSettings(existing.settings);
+	      const nextQuotationType = String(existing.quotation_type || existingSettings.quotationType || "").trim().slice(0, 20);
+	      const nextDecorationType = String(
+        existing.temp_customer_decoration_type
+          || existingSettings.quotationDecorationType
+          || existingSettings.decorationType
+          || targetCustomer?.decoration_type
+          || "",
+      ).trim();
       const nextSettings = copyItemsOnly
         ? {
-            ...parseSettings(existing.settings),
+	            ...existingSettings,
+	            quotationType: nextQuotationType,
+	            quotationDecorationType: nextDecorationType,
             discount: 0,
             discountMode: "amount",
             discountRate: 1,
@@ -1511,22 +1686,28 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             discountRules: [],
             excludeSpecificDiscountAmount: 0,
           }
-        : parseSettings(existing.settings);
+        : {
+	            ...existingSettings,
+	            quotationType: nextQuotationType,
+	            quotationDecorationType: nextDecorationType,
+          };
 
       const tx = (db as any).transaction(() => {
         db.prepare(`
-          INSERT INTO quotations (
-            id, project_id, company_id, title, version, total_amount, discount, final_amount, status, notes, customer_visible_note, terms, settings,
-            temp_customer_name, temp_customer_designer_name, temp_customer_phone, temp_customer_weixin, temp_customer_address, temp_customer_area, temp_customer_decoration_type,
-            created_by_id, created_at, updated_at
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-        `).run(
-          nextQuotationId,
-          targetProjectId,
-          existing.company_id,
-          nextTitle,
-          Number(latest?.version || 0) + 1,
+	          INSERT INTO quotations (
+	            id, project_id, company_id, title, quotation_type, version, total_amount, discount, final_amount, status, notes, customer_visible_note, terms, settings,
+	            quotation_org_unit_id, quotation_org_unit_name,
+	            temp_customer_name, temp_customer_designer_name, temp_customer_phone, temp_customer_weixin, temp_customer_address, temp_customer_area, temp_customer_decoration_type,
+	            created_by_id, created_at, updated_at
+	          )
+	          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+	        `).run(
+	          nextQuotationId,
+	          targetProjectId,
+	          existing.company_id,
+	          nextTitle,
+	          nextQuotationType || null,
+	          Number(latest?.version || 0) + 1,
           copyItemsOnly ? 0 : Number(existing.total_amount || 0),
           copyItemsOnly ? 0 : Number(existing.discount || 0),
           copyItemsOnly ? 0 : Number(existing.final_amount ?? 0),
@@ -1534,19 +1715,21 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
           existing.customer_visible_note || null,
           existing.terms || null,
           JSON.stringify(nextSettings),
+          nextQuotationOrg.id,
+          nextQuotationOrg.name,
           targetCustomerId ? null : existing.temp_customer_name || null,
           targetCustomerId ? null : existing.temp_customer_designer_name || null,
           targetCustomerId ? null : existing.temp_customer_phone || null,
           targetCustomerId ? null : existing.temp_customer_weixin || null,
           targetCustomerId ? null : existing.temp_customer_address || null,
           targetCustomerId ? null : existing.temp_customer_area || null,
-          targetCustomerId ? null : existing.temp_customer_decoration_type || null,
+          nextDecorationType || null,
           existing.created_by_id
         );
 
         const insertItem = db.prepare(`
-          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         sourceItems.forEach((item) => {
           insertItem.run(
@@ -1573,6 +1756,9 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             item.fee_calc_method,
             item.fee_calc_base,
             item.fee_rate,
+            isOtherCategory(item.category) ? normalizeFeeScopeMode(item.fee_scope_mode) : null,
+            isOtherCategory(item.category) ? JSON.stringify(parseFeeScopeValues(item.fee_scope_space_ids)) : null,
+            isOtherCategory(item.category) ? JSON.stringify(parseFeeScopeValues(item.fee_scope_space_names)) : null,
             item.cost_material_unit || 0,
             item.cost_labor_unit || 0,
             item.cost_loss_rate || 0,
@@ -1730,7 +1916,10 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
     }
 
     if (action === "updateNotes") {
-      db.prepare("UPDATE quotations SET notes = ?, updated_at = datetime('now') WHERE id = ?").run(String(body.notes || "").trim() || null, params.id);
+      const notes = String(body.notes || "").trim();
+      const customerVisibleNote = String(body.customer_visible_note || "").trim();
+      db.prepare("UPDATE quotations SET notes = ?, customer_visible_note = ?, updated_at = datetime('now') WHERE id = ? AND company_id = ?")
+        .run(notes || null, customerVisibleNote || null, params.id, auth.companyId);
       const customerId = getQuotationCustomerId(db, params.id);
       if (customerId) {
         recordCustomerOperation(db, {
@@ -1739,7 +1928,7 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
           action: "customer.quotation.notes_update",
           module: "预算报价",
           title: "更新报价备注",
-          content: existing.title || "更新报价备注",
+          content: `${existing.title || "装修报价单"} 更新了报价备注`,
           targetName: existing.title || "",
           metadata: { quotationId: params.id },
           ipAddress: getRequestIp(req),
@@ -1794,6 +1983,8 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
       warrantyMonths: Number(body.settings?.warrantyMonths || 24),
       quotaTemplateId: String(body.settings?.quotaTemplateId ?? existingSettings.quotaTemplateId ?? "").trim(),
       quotaTemplateName: String(body.settings?.quotaTemplateName ?? existingSettings.quotaTemplateName ?? "").trim(),
+      quotationType: String(body.quotation_type ?? body.settings?.quotationType ?? existingSettings.quotationType ?? existing.quotation_type ?? "").trim().slice(0, 20),
+      quotationDecorationType: String(body.settings?.quotationDecorationType ?? existingSettings.quotationDecorationType ?? existing.temp_customer_decoration_type ?? "").trim(),
       appendixNote: String(body.settings?.appendixNote ?? existingSettings.appendixNote ?? "").trim(),
       budgetCompilationHtml: String(body.settings?.budgetCompilationHtml ?? existingSettings.budgetCompilationHtml ?? "").trim(),
       quoteSpaces: Array.isArray(body.settings?.quoteSpaces)
@@ -1863,6 +2054,9 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           fee_calc_method: isOther ? feeMethod : null,
           fee_calc_base: isOther ? feeCalcBase : null,
           fee_rate: isOther ? feeRate : null,
+          fee_scope_mode: isOther ? normalizeFeeScopeMode(item.fee_scope_mode) : null,
+          fee_scope_space_ids: isOther ? parseFeeScopeValues(item.fee_scope_space_ids) : [],
+          fee_scope_space_names: isOther ? parseFeeScopeValues(item.fee_scope_space_names) : [],
           sort_order: index + 1,
         };
       })
@@ -1906,8 +2100,8 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
     const tx = (db as any).transaction(() => {
       db.prepare("DELETE FROM quotation_items WHERE quotation_id = ?").run(params.id);
       const insertItem = db.prepare(`
-        INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, sort_order, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, sort_order, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       `);
       normalizedItems.forEach((item) => {
         insertItem.run(
@@ -1934,6 +2128,9 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           item.fee_calc_method,
           item.fee_calc_base,
           item.fee_rate,
+          isOtherCategory(item.category) ? normalizeFeeScopeMode(item.fee_scope_mode) : null,
+          isOtherCategory(item.category) ? JSON.stringify(parseFeeScopeValues(item.fee_scope_space_ids)) : null,
+          isOtherCategory(item.category) ? JSON.stringify(parseFeeScopeValues(item.fee_scope_space_names)) : null,
           Number(item.cost_material_unit || 0),
           Number(item.cost_labor_unit || 0),
           Number(item.cost_loss_rate || 0),
@@ -1943,13 +2140,14 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           item.sort_order
         );
       });
-      db.prepare(`
-        UPDATE quotations
-        SET title = ?, total_amount = ?, discount = ?, final_amount = ?, status = ?, notes = ?, customer_visible_note = ?, terms = ?, settings = ?, updated_at = datetime('now')
-        WHERE id = ?
-      `).run(
-        String(body.title ?? existing.title ?? "装修报价单").trim() || "装修报价单",
-        totals.directAmount + totals.taxAmount,
+	      db.prepare(`
+	        UPDATE quotations
+	        SET title = ?, quotation_type = ?, total_amount = ?, discount = ?, final_amount = ?, status = ?, notes = ?, customer_visible_note = ?, terms = ?, settings = ?, updated_at = datetime('now')
+	        WHERE id = ?
+	      `).run(
+	        String(body.title ?? existing.title ?? "装修报价单").trim() || "装修报价单",
+	        settings.quotationType || null,
+	        totals.directAmount + totals.taxAmount,
         totals.discount,
         totals.finalAmount,
         body.status || existing.status || "DRAFT",
@@ -2007,10 +2205,13 @@ export async function DELETE(req: NextRequest, { params: paramsPromise }: { para
   try {
     const db = getDb();
     ensureQuotationColumns(db);
-    const existing = db.prepare("SELECT id, title, status FROM quotations WHERE id = ? AND company_id = ? AND deleted_at IS NULL")
+    const existing = db.prepare("SELECT * FROM quotations WHERE id = ? AND company_id = ? AND deleted_at IS NULL")
       .get(params.id, auth.companyId) as any;
     if (!existing) return NextResponse.json({ message: "报价不存在" }, { status: 404 });
     const userId = auth.userId;
+    if (!canAccessQuotationRecord(db, existing, auth)) {
+      return NextResponse.json({ message: "没有该报价的管理权限" }, { status: 403 });
+    }
     if (isReadonlyQuotationRecipient(db, params.id, userId)) {
       return NextResponse.json({ message: "设计师只能查看、打印和下载报价单，不能修改报价内容" }, { status: 403 });
     }

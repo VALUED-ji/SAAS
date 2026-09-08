@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Briefcase, Calendar, Download, Edit3, Loader2, Lock, Phone, Plus, RotateCcw, Search, Upload, User, Users, X } from "lucide-react";
+import { Briefcase, Calendar, Download, Edit3, Loader2, Lock, Phone, Plus, RotateCcw, Search, ShieldCheck, Upload, User, Users, X } from "lucide-react";
 import StatusBadge from "@/components/ui/StatusBadge";
 import { TeamData, useTeam } from "@/lib/queries";
 import { formatDate, formatDateTime } from "@/lib/utils";
@@ -51,6 +51,16 @@ function isUserOnline(lastSeenAt: string | null): boolean {
 
 function formatLoginTime(value: string | null): string {
   return value ? formatDateTime(value) : "从未登录";
+}
+
+function parseQuotationAccessOrgUnitIds(value: unknown) {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+  try {
+    const parsed = JSON.parse(String(value || "[]"));
+    return Array.isArray(parsed) ? parsed.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
 }
 
 export default function TeamPage() {
@@ -192,7 +202,7 @@ export default function TeamPage() {
                 <th className="pr-4">状态</th>
                 <th className="pr-4">在施项目</th>
                 <th className="pr-4">备注</th>
-                <th className="pr-5 text-right">操作</th>
+                <th className="px-3 text-center">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-surface-100">
@@ -252,7 +262,7 @@ export default function TeamPage() {
                     </td>
                     <td className="whitespace-nowrap pr-4 text-surface-700">{member.project_count || 0}</td>
                     <td className="truncate pr-4 text-surface-700" title={member.notes || ""}>{member.notes || <span className="text-surface-400">-</span>}</td>
-                    <td className="whitespace-nowrap pr-5 text-right">
+                    <td className="whitespace-nowrap px-3 text-center">
                       <button
                         type="button"
                         onClick={() => setEditingMember(member)}
@@ -345,11 +355,19 @@ function AddEmployeeModal({
     is_active: "1",
     notes: "",
     avatar: "",
+    quotation_access_org_unit_ids: [] as string[],
   });
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [avatarUploading, setAvatarUploading] = useState(false);
+  const [quotationAccessPickerValue, setQuotationAccessPickerValue] = useState("");
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  const orgOptions = useMemo(() => buildOrgOptions(orgUnits), [orgUnits]);
+  const activeOrgOptions = useMemo(() => orgOptions.filter((option) => isOrgActive(option)), [orgOptions]);
+  const orgOptionById = useMemo(() => new Map(orgOptions.map((option) => [option.id, option])), [orgOptions]);
+  const selectedQuotationAccessOptions = form.quotation_access_org_unit_ids
+    .map((id) => orgOptionById.get(id))
+    .filter((option): option is OrgOption => Boolean(option));
 
   useEffect(() => {
     if (!isOpen) return;
@@ -368,16 +386,37 @@ function AddEmployeeModal({
         is_active: member.is_active ? "1" : "0",
         notes: member.notes || "",
         avatar: member.avatar || "",
+        quotation_access_org_unit_ids: parseQuotationAccessOrgUnitIds(member.quotation_access_org_unit_ids),
       });
+      setQuotationAccessPickerValue("");
       return;
     }
-    setForm({ name: "", phone: "", password: "", role: roleOptions.find((role) => role.value === "SALES")?.value || roleOptions[0]?.value || "SALES", org_unit_id: "", employee_no: "", hire_date: "", is_active: "1", notes: "", avatar: "" });
+    setForm({ name: "", phone: "", password: "", role: roleOptions.find((role) => role.value === "SALES")?.value || roleOptions[0]?.value || "SALES", org_unit_id: "", employee_no: "", hire_date: "", is_active: "1", notes: "", avatar: "", quotation_access_org_unit_ids: [] });
+    setQuotationAccessPickerValue("");
   }, [isOpen, member, roleOptions]);
 
   if (!isOpen) return null;
 
-  const set = (key: keyof typeof form, value: string) => {
+  const set = (key: keyof typeof form, value: string | string[]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
+    setError("");
+  };
+
+  const addQuotationAccessOrgUnit = () => {
+    if (!quotationAccessPickerValue) return;
+    setForm((prev) => ({
+      ...prev,
+      quotation_access_org_unit_ids: Array.from(new Set([...prev.quotation_access_org_unit_ids, quotationAccessPickerValue])),
+    }));
+    setQuotationAccessPickerValue("");
+    setError("");
+  };
+
+  const removeQuotationAccessOrgUnit = (id: string) => {
+    setForm((prev) => ({
+      ...prev,
+      quotation_access_org_unit_ids: prev.quotation_access_org_unit_ids.filter((item) => item !== id),
+    }));
     setError("");
   };
 
@@ -436,7 +475,7 @@ function AddEmployeeModal({
       onSuccess();
       window.dispatchEvent(new Event("auth:user-updated"));
       onClose();
-      setForm({ name: "", phone: "", password: "", role: roleOptions.find((item) => item.value === "SALES")?.value || roleOptions[0]?.value || "SALES", org_unit_id: "", employee_no: "", hire_date: "", is_active: "1", notes: "", avatar: "" });
+      setForm({ name: "", phone: "", password: "", role: roleOptions.find((item) => item.value === "SALES")?.value || roleOptions[0]?.value || "SALES", org_unit_id: "", employee_no: "", hire_date: "", is_active: "1", notes: "", avatar: "", quotation_access_org_unit_ids: [] });
     } catch (err: any) {
       setError(err.message || "保存失败");
     } finally {
@@ -445,9 +484,9 @@ function AddEmployeeModal({
   };
 
   return (
-    <div className="org-access-overlay fixed inset-0 z-50 flex items-center justify-center overflow-hidden px-4 py-6">
+    <div className="org-access-overlay fixed inset-0 z-50 flex items-center justify-center overflow-hidden px-4 py-2.5">
       <div className="fixed inset-0 bg-black/45" onClick={onClose} />
-      <div className="org-access-modal-shell team-editor-modal relative z-10 flex max-h-[calc(100dvh-48px)] w-full max-w-3xl flex-col overflow-hidden border border-surface-200 bg-white">
+      <div className="org-access-modal-shell team-editor-modal relative z-10 flex max-h-[calc(100dvh-48px)] w-full max-w-4xl flex-col overflow-hidden border border-surface-200 bg-white">
         <div className="org-access-modal-header flex items-center justify-between border-b border-surface-200 px-6 py-4">
           <div>
             <h2 className="text-lg font-semibold text-surface-900">{isEdit ? "编辑员工" : "新增员工"}</h2>
@@ -458,100 +497,154 @@ function AddEmployeeModal({
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="org-access-modal-body team-editor-body min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
-          {isEdit && (
-            <div className="employee-avatar-panel rounded-[16px] border border-[#e7eff9] bg-[#f8fbff] px-4 py-4">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
-                <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#EDF4FF] text-xl font-black text-[#407AFF] ring-1 ring-[#cfe0ff]">
-                  {form.avatar ? (
-                    <NativeImage src={form.avatar} alt={`${form.name || "员工"}头像`} className="h-full w-full object-cover" loading="eager" />
-                  ) : (
-                    form.name?.[0] || "员"
-                  )}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-black text-[#162033]">员工头像</p>
-                  <p className="mt-1 text-xs font-semibold leading-5 text-[#7c8aa0]">
-                    建议上传正方形图片，大小不超过 2MB；上传或恢复默认头像后点击保存修改生效。
-                  </p>
-                </div>
-                <input
-                  ref={avatarInputRef}
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={handleAvatarUpload}
-                />
-                <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
-                  <button
-                    type="button"
-                    className="btn-secondary h-9 text-sm"
-                    disabled={avatarUploading || submitting}
-                    onClick={() => avatarInputRef.current?.click()}
-                  >
-                    {avatarUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-                    {avatarUploading ? "上传中..." : form.avatar ? "更换头像" : "上传头像"}
-                  </button>
-                  {form.avatar && (
+        <form onSubmit={handleSubmit} className="team-editor-form flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="org-access-modal-body team-editor-body team-editor-scroll min-h-0 flex-1 space-y-5 overflow-y-auto overflow-x-hidden px-6 py-5">
+            {isEdit && (
+              <div className="employee-avatar-panel rounded-[16px] border border-[#e7eff9] bg-[#f8fbff] px-4 py-4">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+                  <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#EDF4FF] text-xl font-black text-[#407AFF] ring-1 ring-[#cfe0ff]">
+                    {form.avatar ? (
+                      <NativeImage src={form.avatar} alt={`${form.name || "员工"}头像`} className="h-full w-full object-cover" loading="eager" />
+                    ) : (
+                      form.name?.[0] || "员"
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-black text-[#162033]">员工头像</p>
+                    <p className="mt-1 text-xs font-semibold leading-5 text-[#7c8aa0]">
+                      建议上传正方形图片，大小不超过 2MB；上传或恢复默认头像后点击保存修改生效。
+                    </p>
+                  </div>
+                  <input
+                    ref={avatarInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={handleAvatarUpload}
+                  />
+                  <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
                     <button
                       type="button"
-                      className="inline-flex h-9 items-center justify-center gap-1.5 rounded-[10px] border border-[#dce8f8] bg-white px-3 text-sm font-semibold text-[#52647b] transition hover:border-[#cfe0ff] hover:bg-[#f8fbff] hover:text-[#407AFF] disabled:cursor-not-allowed disabled:opacity-60"
+                      className="btn-secondary h-9 text-sm"
                       disabled={avatarUploading || submitting}
-                      onClick={() => set("avatar", "")}
+                      onClick={() => avatarInputRef.current?.click()}
                     >
-                      <RotateCcw className="h-4 w-4" />
-                      恢复默认头像
+                      {avatarUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+                      {avatarUploading ? "上传中..." : form.avatar ? "更换头像" : "上传头像"}
                     </button>
+                    {form.avatar && (
+                      <button
+                        type="button"
+                        className="btn-secondary h-9 text-sm"
+                        disabled={avatarUploading || submitting}
+                        onClick={() => set("avatar", "")}
+                      >
+                        <RotateCcw className="h-4 w-4" />
+                        恢复默认头像
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="team-form-grid grid gap-4 md:grid-cols-2">
+              <Field label="员工姓名" icon={User} required>
+                <input value={form.name} onChange={(event) => set("name", event.target.value)} className="input-field" placeholder="请输入员工姓名" />
+              </Field>
+              <Field label="手机号" icon={Phone} required>
+                <input value={form.phone} onChange={(event) => set("phone", event.target.value)} className="input-field" placeholder="用于登录" />
+              </Field>
+              <Field label={isEdit ? "重置密码" : "初始密码"} icon={Lock} required={!isEdit}>
+                <input value={form.password} onChange={(event) => set("password", event.target.value.replace(/\s/g, ""))} className="input-field" placeholder={isEdit ? "留空则不修改密码" : "8-32 位，包含字母和数字"} />
+              </Field>
+              <Field label="角色" icon={Briefcase} required>
+                <SystemSelect value={form.role} onChange={(event) => set("role", event.target.value)} className="input-field" menuClassName="org-access-select-menu" optionClassName="org-access-select-option">
+                  {roleOptions.map((role) => <option key={role.value} value={role.value}>{role.label}</option>)}
+                </SystemSelect>
+              </Field>
+              <Field label="所属组织" icon={Users} required>
+                <OrgUnitPicker
+                  units={orgUnits}
+                  value={form.org_unit_id}
+                  onChange={(value) => set("org_unit_id", value)}
+                />
+              </Field>
+              <Field label="在职状态" icon={User}>
+                <SystemSelect value={form.is_active} onChange={(event) => set("is_active", event.target.value)} className="input-field" menuClassName="org-access-select-menu" optionClassName="org-access-select-option">
+                  <option value="1">在职</option>
+                  <option value="0">停用</option>
+                </SystemSelect>
+              </Field>
+              <div className="team-quote-scope-panel team-quote-scope-panel-compact md:col-span-2">
+                <div className="team-quote-scope-head">
+                  <div className="team-quote-scope-icon">
+                    <ShieldCheck className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="team-quote-scope-title">额外报价范围</p>
+                  </div>
+                  <span className="team-quote-scope-count">{selectedQuotationAccessOptions.length} 项</span>
+                </div>
+                <div className="team-quote-scope-control">
+                  <SystemSelect
+                    value={quotationAccessPickerValue}
+                    onChange={(event) => setQuotationAccessPickerValue(event.target.value)}
+                    className="team-quote-scope-select input-field min-h-10 flex-1 py-2"
+                    menuClassName="org-access-select-menu"
+                    optionClassName="org-access-select-option"
+                    searchable
+                    searchPlaceholder="搜索组织"
+                    menuMinWidth={360}
+                  >
+                    <option value="">选择额外负责组织</option>
+                    {activeOrgOptions
+                      .filter((option) => !form.quotation_access_org_unit_ids.includes(option.id) && option.id !== form.org_unit_id)
+                      .map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.path}
+                        </option>
+                      ))}
+                  </SystemSelect>
+                  <button
+                    type="button"
+                    className="team-quote-scope-add"
+                    disabled={!quotationAccessPickerValue}
+                    onClick={addQuotationAccessOrgUnit}
+                  >
+                    <Plus className="h-4 w-4" />
+                    添加范围
+                  </button>
+                </div>
+                <div className="team-quote-scope-list">
+                  {selectedQuotationAccessOptions.length > 0 ? selectedQuotationAccessOptions.map((option) => (
+                    <div key={option.id} className="team-quote-scope-item">
+                      <span className="team-quote-scope-path" title={option.path}>{option.path}</span>
+                      <button type="button" className="team-quote-scope-remove" onClick={() => removeQuotationAccessOrgUnit(option.id)} aria-label={`移除${option.name}`}>
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  )) : (
+                    <div className="team-quote-scope-empty">当前没有额外范围，仅按所属组织控制报价权限。</div>
                   )}
                 </div>
               </div>
+              <Field label="工号" icon={Briefcase}>
+                <input value={form.employee_no} onChange={(event) => set("employee_no", event.target.value)} className="input-field" placeholder="可选" />
+              </Field>
+              <Field label="入职日期" icon={Calendar}>
+                <SystemDateInput value={form.hire_date} onChange={(nextValue) => set("hire_date", nextValue)} className="team-editor-date-input input-field" />
+              </Field>
+              <div className="team-editor-notes-field md:col-span-2">
+                <label className="mb-1 block text-sm font-medium text-surface-700">备注</label>
+                <textarea value={form.notes} onChange={(event) => set("notes", event.target.value)} className="team-editor-notes input-field resize-none" placeholder="可记录岗位说明、负责范围或入职备注" />
+              </div>
             </div>
-          )}
 
-          <div className="team-form-grid grid gap-4 md:grid-cols-2">
-            <Field label="员工姓名" icon={User} required>
-              <input value={form.name} onChange={(event) => set("name", event.target.value)} className="input-field" placeholder="请输入员工姓名" />
-            </Field>
-            <Field label="手机号" icon={Phone} required>
-              <input value={form.phone} onChange={(event) => set("phone", event.target.value)} className="input-field" placeholder="用于登录" />
-            </Field>
-            <Field label={isEdit ? "重置密码" : "初始密码"} icon={Lock} required={!isEdit}>
-              <input value={form.password} onChange={(event) => set("password", event.target.value.replace(/\s/g, ""))} className="input-field" placeholder={isEdit ? "留空则不修改密码" : "8-32 位，包含字母和数字"} />
-            </Field>
-            <Field label="角色" icon={Briefcase} required>
-              <SystemSelect value={form.role} onChange={(event) => set("role", event.target.value)} className="input-field" menuClassName="org-access-select-menu" optionClassName="org-access-select-option">
-                {roleOptions.map((role) => <option key={role.value} value={role.value}>{role.label}</option>)}
-              </SystemSelect>
-            </Field>
-            <Field label="所属组织" icon={Users} required>
-              <OrgUnitPicker
-                units={orgUnits}
-                value={form.org_unit_id}
-                onChange={(value) => set("org_unit_id", value)}
-              />
-            </Field>
-            <Field label="工号" icon={Briefcase}>
-              <input value={form.employee_no} onChange={(event) => set("employee_no", event.target.value)} className="input-field" placeholder="可选" />
-            </Field>
-            <Field label="入职日期" icon={Calendar}>
-              <SystemDateInput value={form.hire_date} onChange={(nextValue) => set("hire_date", nextValue)} className="input-field" />
-            </Field>
-            <Field label="在职状态" icon={User}>
-              <SystemSelect value={form.is_active} onChange={(event) => set("is_active", event.target.value)} className="input-field" menuClassName="org-access-select-menu" optionClassName="org-access-select-option">
-                <option value="1">在职</option>
-                <option value="0">停用</option>
-              </SystemSelect>
-            </Field>
+            {error && <div className="rounded-lg bg-red-50 px-4 py-2.5 text-sm text-red-600">{error}</div>}
           </div>
 
-          <div>
-            <label className="mb-1 block text-sm font-medium text-surface-700">备注</label>
-            <textarea value={form.notes} onChange={(event) => set("notes", event.target.value)} className="input-field min-h-20 resize-y" placeholder="可记录岗位说明、负责范围或入职备注" />
-          </div>
-
-          {error && <div className="rounded-lg bg-red-50 px-4 py-2.5 text-sm text-red-600">{error}</div>}
-
-          <div className="org-access-form-actions flex items-center justify-end gap-3 border-t border-surface-100 pt-4">
+          <div className="org-access-form-actions flex shrink-0 items-center justify-end gap-3 border-t border-surface-100 px-6 py-4">
             <button type="button" className="btn-secondary" onClick={onClose}>取消</button>
             <button type="submit" className="btn-primary" disabled={submitting || avatarUploading}>
               {submitting && <Loader2 className="h-4 w-4 animate-spin" />}

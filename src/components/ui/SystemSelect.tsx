@@ -13,7 +13,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties, HTMLAttributes, KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type SelectChangeEvent = {
@@ -24,6 +24,7 @@ type SelectChangeEvent = {
 type ParsedOption = {
   value: string;
   label: string;
+  selectedLabel?: string;
   disabled?: boolean;
 };
 
@@ -35,8 +36,12 @@ type SystemSelectProps = Omit<HTMLAttributes<HTMLDivElement>, "onChange" | "onKe
   onChange?: (event: SelectChangeEvent) => void;
   onKeyDown?: (event: any) => void;
   menuPlacement?: "auto" | "top" | "bottom";
+  menuMinWidth?: number;
+  menuMaxHeight?: number;
   menuClassName?: string;
   optionClassName?: string;
+  searchable?: boolean;
+  searchPlaceholder?: string;
   disabled?: boolean;
   name?: string;
   required?: boolean;
@@ -53,11 +58,12 @@ function nodeToText(node: ReactNode): string {
 
 function parseOptions(children: ReactNode): ParsedOption[] {
   return Children.toArray(children).flatMap((child) => {
-    if (!isValidElement<{ children?: ReactNode; disabled?: boolean; label?: string; value?: string | number }>(child)) return [];
+    if (!isValidElement<{ children?: ReactNode; disabled?: boolean; label?: string; value?: string | number; "data-selected-label"?: string }>(child)) return [];
     if (child.type !== "option") return parseOptions(child.props.children);
     const label = child.props.label || nodeToText(child.props.children).trim();
     const value = child.props.value == null ? label : String(child.props.value);
-    return [{ value, label, disabled: child.props.disabled }];
+    const selectedLabel = String(child.props["data-selected-label"] || "").trim();
+    return [{ value, label, selectedLabel, disabled: child.props.disabled }];
   });
 }
 
@@ -75,7 +81,11 @@ export default function SystemSelect({
   children,
   className,
   menuClassName,
+  menuMinWidth = 168,
+  menuMaxHeight = 300,
   optionClassName,
+  searchable = false,
+  searchPlaceholder = "搜索",
   onKeyDown,
   menuPlacement = "auto",
   tabIndex,
@@ -89,25 +99,31 @@ export default function SystemSelect({
   const [open, setOpen] = useState(false);
   const [focused, setFocused] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [searchText, setSearchText] = useState("");
   const [mounted, setMounted] = useState(false);
   const [menuStyle, setMenuStyle] = useState<MenuStyle>({ left: 0, top: 0, width: 180, maxHeight: 300 });
   const rootRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const menuId = useId();
 
-  const enabledOptions = options.filter((option) => !option.disabled);
+  const visibleOptions = useMemo(() => {
+    const keyword = searchText.trim().toLowerCase();
+    if (!searchable || !keyword) return options;
+    return options.filter((option) => option.label.toLowerCase().includes(keyword));
+  }, [options, searchable, searchText]);
+  const enabledOptions = visibleOptions.filter((option) => !option.disabled);
 
   const updateMenuPosition = useCallback(() => {
     const rect = rootRef.current?.getBoundingClientRect();
     if (!rect) return;
     const gap = 6;
     const viewportPadding = 12;
-    const width = Math.max(rect.width, 168);
+    const width = Math.max(rect.width, menuMinWidth, 168);
     const left = Math.max(viewportPadding, Math.min(rect.left, window.innerWidth - width - viewportPadding));
     const belowTop = rect.bottom + gap;
     const belowSpace = window.innerHeight - belowTop - viewportPadding;
     const aboveSpace = rect.top - viewportPadding - gap;
-    const preferredMaxHeight = Math.min(300, Math.max(180, window.innerHeight - viewportPadding * 2));
+    const preferredMaxHeight = Math.min(menuMaxHeight, Math.max(180, window.innerHeight - viewportPadding * 2));
     const autoUseAbove = belowSpace < 180 && aboveSpace > belowSpace;
     const useAbove = menuPlacement === "top" ? true : menuPlacement === "bottom" ? false : autoUseAbove;
     const availableSpace = Math.max(120, useAbove ? aboveSpace : belowSpace);
@@ -117,7 +133,7 @@ export default function SystemSelect({
         ? { bottom: window.innerHeight - rect.top + gap, left, maxHeight, top: undefined, width }
         : { bottom: undefined, left, maxHeight, top: belowTop, width },
     );
-  }, [menuPlacement]);
+  }, [menuMaxHeight, menuMinWidth, menuPlacement]);
 
   useEffect(() => {
     setMounted(true);
@@ -126,7 +142,7 @@ export default function SystemSelect({
   useLayoutEffect(() => {
     if (!open) return;
     updateMenuPosition();
-    const selectedIndex = Math.max(0, options.findIndex((option) => option.value === currentValue));
+    const selectedIndex = Math.max(0, visibleOptions.findIndex((option) => option.value === currentValue));
     setActiveIndex(selectedIndex);
 
     const handlePointerDown = (event: MouseEvent) => {
@@ -143,7 +159,11 @@ export default function SystemSelect({
       window.removeEventListener("resize", handleReposition);
       window.removeEventListener("scroll", handleReposition, true);
     };
-  }, [currentValue, open, options, updateMenuPosition]);
+  }, [currentValue, open, updateMenuPosition, visibleOptions]);
+
+  useEffect(() => {
+    if (!open) setSearchText("");
+  }, [open]);
 
   const commitValue = (nextValue: string) => {
     if (controlledValue == null) setInternalValue(nextValue);
@@ -155,10 +175,10 @@ export default function SystemSelect({
 
   const moveActive = (direction: 1 | -1) => {
     if (enabledOptions.length === 0) return;
-    const currentOption = options[activeIndex];
+    const currentOption = visibleOptions[activeIndex];
     const enabledIndex = Math.max(0, enabledOptions.findIndex((option) => option.value === currentOption?.value));
     const nextEnabled = enabledOptions[(enabledIndex + direction + enabledOptions.length) % enabledOptions.length];
-    const nextIndex = options.findIndex((option) => option.value === nextEnabled.value);
+    const nextIndex = visibleOptions.findIndex((option) => option.value === nextEnabled.value);
     setActiveIndex(Math.max(0, nextIndex));
   };
 
@@ -180,7 +200,7 @@ export default function SystemSelect({
         setOpen(true);
         return;
       }
-      const option = options[activeIndex];
+      const option = visibleOptions[activeIndex];
       if (option && !option.disabled) commitValue(option.value);
     } else if (event.key === "Escape") {
       setOpen(false);
@@ -192,14 +212,31 @@ export default function SystemSelect({
       id={menuId}
       ref={menuRef}
       className={cn(
-        "system-select-menu fixed z-[1200] overflow-hidden rounded-[10px] border border-[#dce8f8] bg-white p-1.5 shadow-[0_18px_44px_rgba(27,51,88,0.14),0_4px_14px_rgba(27,51,88,0.06)]",
+        "system-select-menu fixed z-[1200] flex flex-col overflow-hidden rounded-[10px] border border-[#dce8f8] bg-white p-1.5 shadow-[0_18px_44px_rgba(27,51,88,0.14),0_4px_14px_rgba(27,51,88,0.06)]",
         menuClassName
       )}
       style={menuStyle}
       role="listbox"
     >
-      <div className="max-h-[inherit] overflow-y-auto pr-1">
-        {options.map((option, index) => {
+      {searchable && (
+        <label className="mb-1 flex h-9 shrink-0 items-center gap-2 rounded-[8px] border border-[#e3eaf5] bg-[#f8fafc] px-2.5 text-[#8a96a8]">
+          <Search className="h-3.5 w-3.5 shrink-0" />
+          <input
+            value={searchText}
+            onChange={(event) => {
+              setSearchText(event.target.value);
+              setActiveIndex(0);
+            }}
+            onKeyDown={(event) => event.stopPropagation()}
+            className="min-w-0 flex-1 bg-transparent text-xs font-semibold text-[#34445a] outline-none placeholder:text-[#98a2b3]"
+            placeholder={searchPlaceholder}
+          />
+        </label>
+      )}
+      <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+        {visibleOptions.length === 0 ? (
+          <div className="flex h-16 items-center justify-center px-3 text-xs font-semibold text-[#98a2b3]">没有匹配项</div>
+        ) : visibleOptions.map((option, index) => {
           const selectedOption = option.value === currentValue;
           const active = index === activeIndex;
           return (
@@ -210,6 +247,7 @@ export default function SystemSelect({
               role="option"
               aria-selected={selectedOption}
               data-active={active ? "true" : undefined}
+              title={option.label}
               onMouseEnter={() => setActiveIndex(index)}
               onClick={() => !option.disabled && commitValue(option.value)}
               className={cn(
@@ -256,7 +294,7 @@ export default function SystemSelect({
         {...props}
       >
         <div className="flex min-h-0 w-full min-w-0 items-center justify-between gap-2 bg-transparent text-left text-inherit leading-none outline-none">
-          <span className={cn("min-w-0 truncate", selected?.label && isStarRatingLabel(selected.label) && "text-[#FBCD08]")}>{selected?.label || ""}</span>
+          <span className={cn("min-w-0 truncate", selected?.label && isStarRatingLabel(selected.label) && "text-[#FBCD08]")}>{selected?.selectedLabel || selected?.label || ""}</span>
           <ChevronDown className={cn("h-4 w-4 shrink-0 text-current opacity-55 transition-transform duration-200", open && "rotate-180")} />
         </div>
         {name && <input type="hidden" name={name} value={currentValue} required={required} />}
