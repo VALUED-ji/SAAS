@@ -186,6 +186,7 @@ export type QuotaTemplate = {
 export type QuotaLibraryItem = {
   id: string;
   code: string;
+  scope: string;
   category: string;
   name: string;
   constructionDescription: string;
@@ -862,6 +863,7 @@ export function loadQuotaLibraryItems() {
         return {
           id: String(item.id || ""),
           code: String(item.code || ""),
+          scope: String(item.scope || ""),
           category: String(item.category || ""),
           name: String(item.name || ""),
           constructionDescription: String(item.constructionDescription || ""),

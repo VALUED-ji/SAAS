@@ -58,7 +58,7 @@ import {
   hasTemplateDraftContent,
   initialTemplates,
   isBuiltinProjectGroup,
-  loadQuotaLibraryItems,
+  loadQuotaLibraryItems as loadCachedQuotaLibraryItems,
   loadTemplateDraftFromStorage,
   loadTemplatesFromStorage,
   makeCombinedAreaPricingTier,
@@ -280,6 +280,9 @@ export default function QuotaTemplatesPage() {
   const [activeSpaceId, setActiveSpaceId] = useState("");
   const [activeQuotaScope, setActiveQuotaScope] = useState<TemplateSpaceQuotaScope>("foundation");
   const [quotaLibraryItems, setQuotaLibraryItems] = useState<QuotaLibraryItem[]>([]);
+  const [quotaLibraryStoreOptions, setQuotaLibraryStoreOptions] = useState<Array<{ id: string; name: string; itemCount: number }>>([]);
+  const [quotaLibraryLoading, setQuotaLibraryLoading] = useState(false);
+  const [quotaLibraryError, setQuotaLibraryError] = useState("");
   const [constructionTemplateOptions, setConstructionTemplateOptions] = useState<ConstructionTemplateOption[]>([]);
   const [templateScopeOptions, setTemplateScopeOptions] = useState<Array<{ id: string; name: string; path: string; type: string }>>([]);
   const [constructionTemplateLoading, setConstructionTemplateLoading] = useState(false);
@@ -289,6 +292,7 @@ export default function QuotaTemplatesPage() {
   const [quotaPickerTarget, setQuotaPickerTarget] = useState<QuotaPickerTarget>(null);
   const [quotaPickerSearch, setQuotaPickerSearch] = useState("");
   const [quotaPickerCategory, setQuotaPickerCategory] = useState("");
+  const [quotaPickerStore, setQuotaPickerStore] = useState("");
   const [pickedQuotaIds, setPickedQuotaIds] = useState<string[]>([]);
   const [showCustomQuotaForm, setShowCustomQuotaForm] = useState(false);
   const [customQuotaDraft, setCustomQuotaDraft] = useState<CustomQuotaDraft>(() => makeCustomQuotaDraft());
@@ -443,9 +447,13 @@ export default function QuotaTemplatesPage() {
     }
   }, []);
 
-  const loadQuotaLibraryOptions = useCallback(async () => {
+  const loadQuotaLibraryOptions = useCallback(async (branchOrgUnitId = "") => {
+    setQuotaLibraryLoading(true);
+    setQuotaLibraryError("");
     try {
-      const response = await fetch("/api/quota/library", { cache: "no-store" });
+      const params = new URLSearchParams();
+      if (branchOrgUnitId) params.set("branchOrgUnitId", branchOrgUnitId);
+      const response = await fetch(`/api/quota/library${params.size ? `?${params.toString()}` : ""}`, { cache: "no-store" });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data?.message || "读取基装定额失败");
       const items = Array.isArray(data?.items)
@@ -457,6 +465,7 @@ export default function QuotaTemplatesPage() {
             return {
               id: String(item.id || ""),
               code: String(item.code || ""),
+              scope: String(item.scope || ""),
               category: String(item.category || ""),
               name: String(item.name || ""),
               constructionDescription: String(item.constructionDescription || ""),
@@ -471,8 +480,21 @@ export default function QuotaTemplatesPage() {
           .filter((item: QuotaLibraryItem | null): item is QuotaLibraryItem => Boolean(item?.id && item.name && item.status !== "disabled"))
         : [];
       setQuotaLibraryItems(items);
-    } catch {
-      setQuotaLibraryItems(loadQuotaLibraryItems());
+      setQuotaLibraryStoreOptions(Array.isArray(data?.storeOptions)
+        ? data.storeOptions
+          .map((store: any) => ({
+            id: String(store?.id || ""),
+            name: String(store?.name || "").trim(),
+            itemCount: Math.max(0, Number(store?.itemCount || 0)),
+          }))
+          .filter((store: { id: string; name: string; itemCount: number }) => store.id && store.name)
+        : []);
+    } catch (error: any) {
+      setQuotaLibraryItems(branchOrgUnitId ? [] : loadCachedQuotaLibraryItems());
+      setQuotaLibraryStoreOptions([]);
+      setQuotaLibraryError(error?.message || "读取基装定额失败");
+    } finally {
+      setQuotaLibraryLoading(false);
     }
   }, []);
 
@@ -503,14 +525,12 @@ export default function QuotaTemplatesPage() {
         if (nextScopeOptions.length === 0) void loadTemplateScopeOptionsFallback();
 	        setTemplates(loadedTemplates);
         setSelectedId(loadedTemplates[0]?.id || "");
-        void loadQuotaLibraryOptions();
         setTemplatesLoaded(true);
       } catch {
         if (cancelled) return;
 	        const fallbackTemplates = localTemplates.filter(hasBranchTemplateScope);
 	        setTemplates(fallbackTemplates);
 	        setSelectedId(fallbackTemplates[0]?.id || "");
-	        void loadQuotaLibraryOptions();
         void loadTemplateScopeOptionsFallback();
 	        setTemplatesLoaded(true);
       }
@@ -586,17 +606,29 @@ export default function QuotaTemplatesPage() {
   const pagination = useDataPagination(filteredTemplates, [search, pricingModeFilter, statusFilter, branchScopeFilter].join("|"));
   const selectedTemplate = visibleTemplates.find((template) => template.id === selectedId) || filteredTemplates[0] || visibleTemplates[0];
   const activeSpace = editingTemplate?.spaces.find((space) => space.id === activeSpaceId) || editingTemplate?.spaces[0] || null;
+  const editingTemplateBranchId = String(editingTemplate?.autoScope?.orgUnitId || editingTemplate?.autoScope?.branchOrgUnitId || "").trim();
+  const editingTemplateBranchName = String(editingTemplate?.autoScope?.orgUnitName || editingTemplate?.autoScope?.branchOrgUnitName || "").trim();
+  const storeFilteredQuotaLibraryItems = useMemo(() => (
+    quotaPickerStore
+      ? quotaLibraryItems.filter((item) => item.scope === quotaPickerStore)
+      : quotaLibraryItems
+  ), [quotaLibraryItems, quotaPickerStore]);
   const quotaCategoryOptions = useMemo(() => {
-    return Array.from(new Set(quotaLibraryItems.map((item) => item.category).filter(Boolean))).sort((a, b) => a.localeCompare(b, "zh-CN"));
-  }, [quotaLibraryItems]);
+    return Array.from(new Set(storeFilteredQuotaLibraryItems.map((item) => item.category).filter(Boolean))).sort((a, b) => a.localeCompare(b, "zh-CN"));
+  }, [storeFilteredQuotaLibraryItems]);
+  useEffect(() => {
+    if (quotaPickerCategory && !quotaCategoryOptions.includes(quotaPickerCategory)) {
+      setQuotaPickerCategory("");
+    }
+  }, [quotaCategoryOptions, quotaPickerCategory]);
   const filteredQuotaLibraryItems = useMemo(() => {
     const keyword = quotaPickerSearch.trim().toLowerCase();
-    return quotaLibraryItems.filter((item) => {
+    return storeFilteredQuotaLibraryItems.filter((item) => {
       const matchesCategory = !quotaPickerCategory || item.category === quotaPickerCategory;
       const matchesKeyword = !keyword || [item.code, item.category, item.name, item.constructionDescription, item.unit, formatAmount(item.laborPrice), formatAmount(item.materialPrice), formatAmount(item.totalPrice)].some((value) => value.toLowerCase().includes(keyword));
       return matchesCategory && matchesKeyword;
     });
-  }, [quotaLibraryItems, quotaPickerCategory, quotaPickerSearch]);
+  }, [quotaPickerCategory, quotaPickerSearch, storeFilteredQuotaLibraryItems]);
   const filteredConstructionTemplateOptions = useMemo(() => {
     const keyword = constructionTemplateSearch.trim().toLowerCase();
     if (!keyword) return constructionTemplateOptions;
@@ -1227,11 +1259,20 @@ export default function QuotaTemplatesPage() {
       resetCustomQuotaDraft();
       return;
     }
+    if (!editingTemplateBranchId) {
+      window.alert("请先选择模板适用的分公司");
+      return;
+    }
+    setQuotaLibraryItems([]);
+    setQuotaLibraryStoreOptions([]);
+    setQuotaLibraryError("");
     setQuotaPickerTarget({ spaceId, quoteScope });
     setQuotaPickerSearch("");
     setQuotaPickerCategory("");
+    setQuotaPickerStore("");
     setPickedQuotaIds([]);
     resetCustomQuotaDraft();
+    void loadQuotaLibraryOptions(editingTemplateBranchId);
   };
 
   const updateSpaceQuota = (spaceId: string, quotaItemId: string, patch: Partial<TemplateSpaceQuota>) => {
@@ -3328,7 +3369,7 @@ export default function QuotaTemplatesPage() {
                           : getProjectGroupAddText(templateProjectGroups, quotaPickerTarget.quoteScope)}
                       </div>
                       <span className="quote-library-target-pill max-w-full truncate">
-                        {activeSpace?.name || "当前空间"} · {getProjectGroupName(templateProjectGroups, quotaPickerTarget.quoteScope)}
+                        {editingTemplateBranchName || "适用分公司"} · {activeSpace?.name || "当前空间"} · {getProjectGroupName(templateProjectGroups, quotaPickerTarget.quoteScope)}
                       </span>
                     </div>
                   </div>
@@ -3337,7 +3378,10 @@ export default function QuotaTemplatesPage() {
                   </button>
                 </div>
 
-                <div className="quota-template-picker-toolbar quote-library-filter-row grid gap-3 border-b border-[#e8eef6] bg-[#f7f9fc] px-5 py-3 md:grid-cols-[minmax(320px,1fr)_220px_auto_auto] md:items-end">
+                <div
+                  className="quota-template-picker-toolbar quote-library-filter-row grid gap-3 border-b border-[#e8eef6] bg-[#f7f9fc] px-5 py-3 md:items-end"
+                  data-has-store-filter={quotaLibraryStoreOptions.length > 1 || undefined}
+                >
                   <label className="quota-template-picker-search quote-library-filter-field relative block">
                     <span>搜索项目</span>
                     <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#9aa8bb]" />
@@ -3349,6 +3393,23 @@ export default function QuotaTemplatesPage() {
                       autoFocus
                     />
                   </label>
+                  {quotaLibraryStoreOptions.length > 1 && (
+                    <label className="quote-library-filter-field block">
+                      <span>所属门店</span>
+                      <SystemSelect
+                        value={quotaPickerStore}
+                        onChange={(event) => setQuotaPickerStore(event.target.value)}
+                        className="quota-template-picker-select quote-library-store-select h-10 rounded-[10px] border border-[#d9e2ef] bg-white px-3 text-sm font-medium text-[#182230] outline-none transition focus:border-[#407AFF] focus:ring-2 focus:ring-[#407AFF]/10"
+                        menuClassName="quote-system-select-menu"
+                        optionClassName="quote-system-select-option"
+                      >
+                        <option value="">全部门店</option>
+                        {quotaLibraryStoreOptions.map((store) => (
+                          <option key={store.id} value={store.name}>{store.name}（{store.itemCount}项）</option>
+                        ))}
+                      </SystemSelect>
+                    </label>
+                  )}
                   <label className="quote-library-filter-field block">
                     <span>项目分类</span>
                     <SystemSelect
@@ -3379,7 +3440,7 @@ export default function QuotaTemplatesPage() {
                     </div>
                   )}
                   <div className="quote-library-filter-note">
-                    <b>{quotaPickerCategory || "全部分类"}</b><span>{filteredQuotaLibraryItems.length} 项</span><span>已选 {pickedQuotaIds.length}</span>
+                    <b>{quotaPickerStore || quotaPickerCategory || "全部项目"}</b><span>{filteredQuotaLibraryItems.length} 项</span><span>已选 {pickedQuotaIds.length}</span>
                   </div>
                 </div>
 
@@ -3465,10 +3526,23 @@ export default function QuotaTemplatesPage() {
                 )}
 
                 <div className="quota-template-picker-body quote-library-body min-h-0 flex-1 bg-white">
-                  {quotaLibraryItems.length === 0 ? (
+                  {quotaLibraryLoading ? (
                     <div className="quote-library-empty-state flex h-full flex-col items-center justify-center px-6 text-center">
-                      <div className="text-sm font-semibold text-[#34445a]">暂无可添加的基础项目</div>
-                      <div className="mt-1 text-xs text-[#9aa8bb]">请先在定额库维护启用状态的基础项目，再回到模板中添加。</div>
+                      <Loader2 className="mb-3 h-5 w-5 animate-spin text-[#407aff]" />
+                      <div className="text-sm font-semibold text-[#34445a]">正在读取{editingTemplateBranchName || "当前分公司"}的基装定额</div>
+                    </div>
+                  ) : quotaLibraryError ? (
+                    <div className="quote-library-empty-state flex h-full flex-col items-center justify-center px-6 text-center">
+                      <div className="text-sm font-semibold text-[#34445a]">基装定额读取失败</div>
+                      <div className="mt-1 text-xs text-[#9aa8bb]">{quotaLibraryError}</div>
+                      <button type="button" onClick={() => void loadQuotaLibraryOptions(editingTemplateBranchId)} className="mt-4 inline-flex h-9 items-center justify-center rounded-[8px] border border-[#cfe0ff] bg-white px-4 text-xs font-semibold text-[#407aff] transition hover:bg-[#edf4ff]">
+                        重新加载
+                      </button>
+                    </div>
+                  ) : quotaLibraryItems.length === 0 ? (
+                    <div className="quote-library-empty-state flex h-full flex-col items-center justify-center px-6 text-center">
+                      <div className="text-sm font-semibold text-[#34445a]">当前分公司暂无可添加的基装定额</div>
+                      <div className="mt-1 text-xs text-[#9aa8bb]">请先为{editingTemplateBranchName || "该分公司"}下的门店维护启用状态的基装定额。</div>
                     </div>
                   ) : visibleQuotaLibraryItems.length === 0 ? (
                     <div className="quote-library-empty-state flex h-full flex-col items-center justify-center px-6 text-center">
@@ -4447,6 +4521,9 @@ export default function QuotaTemplatesPage() {
           border-color: #e8eef6 !important;
           background: #f7f9fc !important;
         }
+        .quota-template-picker-toolbar[data-has-store-filter="true"] {
+          grid-template-columns: minmax(280px, 1fr) 190px 190px auto auto !important;
+        }
         .quota-template-picker .quote-library-filter-field > span {
           display: block;
           margin-bottom: 6px;
@@ -4461,6 +4538,7 @@ export default function QuotaTemplatesPage() {
           transform: none !important;
         }
         .quota-template-picker .quote-library-search-input,
+        .quota-template-picker .quote-library-store-select,
         .quota-template-picker .quote-library-category-select,
         .quota-template-picker .quote-library-select-all,
         .quota-template-picker .quote-library-footer button,
@@ -4468,6 +4546,7 @@ export default function QuotaTemplatesPage() {
           border-radius: 10px !important;
         }
         .quota-template-picker .quote-library-search-input,
+        .quota-template-picker .quote-library-store-select,
         .quota-template-picker .quote-library-category-select,
         .quota-template-picker .quote-library-select-all {
           height: 40px !important;

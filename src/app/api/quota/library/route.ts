@@ -132,6 +132,46 @@ function getManageableStoreNames(db: Db, auth: NonNullable<ReturnType<typeof get
   return new Set(parentStore?.name ? [parentStore.name] : []);
 }
 
+function canManageBranch(
+  orgOptions: OrgOption[],
+  currentOrgUnitId: string,
+  branch: OrgOption,
+) {
+  if (!currentOrgUnitId) return true;
+  const currentOrg = orgOptions.find((option) => option.id === currentOrgUnitId);
+  if (!currentOrg) return false;
+  if (currentOrg.type === "group" || currentOrg.type === "region") {
+    return branch.id === currentOrg.id || branch.ancestorIds.includes(currentOrg.id);
+  }
+  if (currentOrg.type === "company") return branch.id === currentOrg.id;
+  return currentOrg.ancestorIds.includes(branch.id);
+}
+
+function getScopedStores(
+  db: Db,
+  auth: NonNullable<ReturnType<typeof getAuthContext>>,
+  branchOrgUnitId: string,
+) {
+  const orgOptions = getActiveOrgOptions(db, auth.companyId);
+  const manageableStoreNames = getManageableStoreNames(db, auth);
+  const manageableStores = orgOptions.filter((option) => (
+    option.type === "store" && option.name && manageableStoreNames.has(option.name)
+  ));
+  if (!branchOrgUnitId) return { stores: manageableStores, branch: null, error: "" };
+
+  const branch = orgOptions.find((option) => option.id === branchOrgUnitId && option.type === "company");
+  if (!branch || !canManageBranch(orgOptions, cleanText(auth.orgUnitId), branch)) {
+    return { stores: [] as OrgOption[], branch: null, error: "当前账号无权使用该分公司的基装定额" };
+  }
+  return {
+    stores: orgOptions.filter((store) => (
+      store.type === "store" && store.name && store.ancestorIds.includes(branch.id)
+    )),
+    branch,
+    error: "",
+  };
+}
+
 function filterItemsByManageableStore(items: any[], storeNames: Set<string>) {
   if (storeNames.size === 0) return [];
   return items.filter((item) => storeNames.has(cleanText(item?.scope)));
@@ -153,8 +193,28 @@ export async function GET(req: NextRequest) {
   const items = rows
     .map((row) => safeJsonParse(row.payload, null))
     .filter(Boolean);
-  const manageableStoreNames = getManageableStoreNames(db, auth);
-  return NextResponse.json({ items: filterItemsByManageableStore(items, manageableStoreNames) });
+  const branchOrgUnitId = cleanText(
+    req.nextUrl.searchParams.get("branchOrgUnitId")
+      || req.nextUrl.searchParams.get("branch_org_unit_id"),
+  );
+  const scoped = getScopedStores(db, auth, branchOrgUnitId);
+  if (scoped.error) return NextResponse.json({ message: scoped.error }, { status: 403 });
+  const storeNames = new Set(scoped.stores.map((store) => store.name));
+  const scopedItems = filterItemsByManageableStore(items, storeNames);
+  const itemCountByStore = scopedItems.reduce((counts, item) => {
+    const storeName = cleanText(item?.scope);
+    if (storeName) counts.set(storeName, (counts.get(storeName) || 0) + 1);
+    return counts;
+  }, new Map<string, number>());
+  return NextResponse.json({
+    items: scopedItems,
+    branch: scoped.branch ? { id: scoped.branch.id, name: scoped.branch.name } : null,
+    storeOptions: scoped.stores.map((store) => ({
+      id: store.id,
+      name: store.name,
+      itemCount: itemCountByStore.get(store.name) || 0,
+    })),
+  });
 }
 
 export async function POST(req: NextRequest) {
