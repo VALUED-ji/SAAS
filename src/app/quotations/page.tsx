@@ -562,6 +562,15 @@ export default function QuotationsPage() {
   const { data: deletedQuotations, refetch: refetchDeletedQuotations } = useDeletedQuotations(selectedOrgUnitId);
   const isTemporaryQuotationMode = ENABLE_TEMPORARY_QUOTATION && createMode === "temporary";
   const isNewCustomerMode = createMode === "new_customer";
+
+  useEffect(() => {
+    if (!recordCustomerKey || !message) return;
+    const timer = window.setTimeout(() => {
+      setMessage("");
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [message, recordCustomerKey]);
+
   const visibleQuotationOrgOptions = useMemo(() => {
     const rootOrgUnitIds = Array.from(new Set([
       String(user?.org_unit_id || "").trim(),
@@ -1692,9 +1701,9 @@ export default function QuotationsPage() {
         });
       }
       setEditingQuotationType(null);
-      setMessage("已保存报价类型");
+      setMessage("已保存报价名称");
     } catch (err: any) {
-      setMessage(err.message || "保存报价类型失败");
+      setMessage(err.message || "保存报价名称失败");
     } finally {
       setRecordActionId("");
     }
@@ -2249,13 +2258,17 @@ export default function QuotationsPage() {
 	                                </button>
 	                              )}
 	                            </div>
-	                            <span className={`quotation-record-template-tag inline-flex max-w-full -translate-y-1 items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs ${
+	                            <span className={`quotation-record-template-tag inline-flex max-w-full -translate-y-0.5 items-center gap-1.5 rounded-[8px] px-2 py-1 text-xs ${
 	                              quotaTemplateName
-	                                ? "border-[#cfe0ff] bg-[#f3f7ff] text-[#2f66e8]"
-	                                : "border-[#e3e9f2] bg-[#f8fafc] text-[#98a2b3]"
+	                                ? "bg-[#eef5ff] text-[#315fbb]"
+	                                : "bg-[#f3f5f8] text-[#98a2b3]"
 	                            }`} title={quotaTemplateName ? `定额模板：${quotaTemplateName}` : "未记录定额模板"}>
-	                              <FileText className="h-3 w-3 shrink-0" />
-	                              <span className="max-w-[220px] truncate">{quotaTemplateName || "未记录定额模板"}</span>
+	                              <span className={`shrink-0 rounded-[5px] px-1.5 py-0.5 text-[11px] font-semibold leading-4 ${
+	                                quotaTemplateName
+	                                  ? "bg-white/80 text-[#407aff]"
+	                                  : "bg-white text-[#98a2b3]"
+	                              }`}>模板</span>
+	                              <span className="max-w-[200px] truncate font-semibold">{quotaTemplateName || "未记录"}</span>
 	                            </span>
 	                          </div>
 	                          <div className="mt-1 flex max-w-full flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-5 text-[#667085]">
@@ -2411,10 +2424,16 @@ export default function QuotationsPage() {
               </button>
             </div>
 
-            <div className="border-y border-[#e6ebf2] bg-[#f8fafc] px-6 py-5">
-              <p className="mb-3 truncate rounded-[10px] border border-[#e0e7ef] bg-white px-3 py-2 text-xs font-semibold text-[#667085]" title={getBudgetRecordTitle(shareLinkDialog)}>
-                {getBudgetRecordTitle(shareLinkDialog)}
-              </p>
+            <div className="bg-white px-6 pb-5 pt-1">
+              <div className="mb-4 flex min-h-[50px] items-center gap-3 rounded-[12px] border border-[#dce6f2] bg-[#fbfcfe] px-3.5" title={getBudgetRecordTitle(shareLinkDialog)}>
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] bg-white text-[#159a68] ring-1 ring-[#d7eee2]">
+                  <ReceiptText className="h-4 w-4" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <span className="block text-[11px] font-semibold leading-4 text-[#98a2b3]">分享对象</span>
+                  <span className="block truncate text-sm font-semibold leading-5 text-[#344054]">{getBudgetRecordTitle(shareLinkDialog)}</span>
+                </div>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 {quotationShareExpireOptions.map((option) => {
                   const active = shareExpireDays === option.value;
@@ -2446,7 +2465,7 @@ export default function QuotationsPage() {
               </div>
             </div>
 
-            <div className="flex items-center justify-end gap-3 px-6 py-4">
+            <div className="flex items-center justify-end gap-3 bg-white px-6 pb-4 pt-2">
               <button
                 type="button"
                 onClick={() => setShareLinkDialog(null)}
@@ -3320,7 +3339,7 @@ export default function QuotationsPage() {
 	                            maxLength={20}
 	                            onChange={(event) => setQuotationType(event.target.value)}
 	                            className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
-	                            placeholder="选填：报价类型或自定义标题"
+	                            placeholder="选填：如全包一期、局改增项等"
 	                          />
 	                        </label>
 	                        <label className="block text-sm md:col-span-2">

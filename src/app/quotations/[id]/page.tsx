@@ -6,13 +6,17 @@ import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { BookmarkPlus, Calculator, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Eraser, FileText, GripVertical, Home, LayoutGrid, List, Loader2, MapPin, Maximize2, Minimize2, Palette, Pencil, Phone, Plus, RefreshCw, Replace, Ruler, Search, Tags, Trash2, X } from "lucide-react";
 import {
+  bindStableFeeFormula,
   calculateChargeableOtherFeeTotals,
   calculateOtherFeeDetails,
   calculateOtherFeeTotal,
   feeCalcMethodLabels,
+  formatStableFeeFormula,
   getFeeFormulaText,
   getFeeRuleText,
+  getStableFeeReferenceIds,
   getLegacyManagementFeeRate,
+  hasStableFeeReferences,
   normalizeFeeCalcBase,
   normalizeFeeCalcMethod,
   normalizeFeeScopeMode,
@@ -27,7 +31,7 @@ import {
 import { getQuotationRowColor, quotationRowColors } from "@/lib/quotationRowColors";
 import { formatAlphaSequence } from "@/lib/quotationSequence";
 import { calculatePackageQuotePrice, type PackageQuoteConfigInput, type PackagePriceResult } from "@/lib/quotaTemplatePricing";
-import { cn } from "@/lib/utils";
+import { cn, formatDateTime } from "@/lib/utils";
 const QuotationPrintDocument = dynamic(() => import("@/components/QuotationPrintDocument").then((m) => m.QuotationPrintDocument), {
   ssr: false,
   loading: () => <div className="flex min-h-[300px] items-center justify-center text-sm text-surface-400">打印文档加载中...</div>,
@@ -221,6 +225,26 @@ type CopySpaceCategoryDialogState = {
   source: string;
   target: string;
   categories: string[];
+};
+type CrossQuotationCopyTarget = {
+  id: string;
+  customer_id?: string | null;
+  title?: string | null;
+  quotation_type?: string | null;
+  customer_name?: string | null;
+  customer_address?: string | null;
+  customer_service_store_org_unit_name?: string | null;
+  quota_template_name?: string | null;
+  quote_spaces?: string[];
+  status?: string | null;
+  final_amount?: number | null;
+  total_amount?: number | null;
+  updated_at?: string | null;
+  signed_quotation_contract_count?: number;
+};
+type CrossQuotationCopyDialogState = {
+  source: string;
+  itemCount: number;
 };
 type QuotaUpdateDifference = {
   field: string;
@@ -514,6 +538,22 @@ function getCategoryLabel(category: string) {
   return builtInCategoryLabels[getCategoryKey(category)] || category;
 }
 
+function getQuotationStatusLabel(status: unknown) {
+  const value = String(status || "").toUpperCase();
+  if (value === "DRAFT") return "草稿";
+  if (value === "SENT") return "已发送";
+  if (value === "REVISED") return "已修改";
+  if (value === "APPROVED") return "正式";
+  if (value === "EXPIRED") return "已过期";
+  return value || "草稿";
+}
+
+const crossQuotationCustomerTone = {
+  icon: "bg-[#eef4ff] text-[#3567b7]",
+  badge: "bg-[#eef4ff] text-[#315a9d]",
+  hover: "hover:bg-[#f8fafc]",
+};
+
 function getFeeScopeCategoryKey(category: unknown) {
   const name = normalizeCategoryName(category);
   if (isBaseCategory(name)) return "base";
@@ -781,9 +821,18 @@ function remapOtherFeeReferences(beforeItems: QuotationItem[], afterItems: Quota
   if (Object.keys(sequenceRemap).length === 0) return afterItems;
   return afterItems.map((item) => {
     if (!isOtherCategory(item.category) || !item.fee_calc_base) return item;
+    if (hasStableFeeReferences(item.fee_calc_base)) return item;
     const nextFeeCalcBase = replaceFeeSequenceReferences(item.fee_calc_base, sequenceRemap);
     return nextFeeCalcBase === item.fee_calc_base ? item : { ...item, fee_calc_base: nextFeeCalcBase as FeeCalcBase };
   });
+}
+
+function getFeeReferenceDependentNames(items: QuotationItem[], targetIds: Set<string>) {
+  return items
+    .filter((item, index) => isOtherCategory(item.category)
+      && !targetIds.has(getQuotationItemKey(item, index))
+      && getStableFeeReferenceIds(item.fee_calc_base).some((id) => targetIds.has(id)))
+    .map((item) => item.name || "未命名费用");
 }
 
 function focusNextQuoteCell(currentElement: QuoteEditableElement) {
@@ -1356,6 +1405,9 @@ function getFeeCalcMethodPatch(method: FeeCalcMethod, item: QuotationItem): Part
   if (method === "fixed") {
     return { fee_calc_method: "fixed", fee_calc_base: "", fee_rate: 0 };
   }
+  if (method === "area_unit") {
+    return { fee_calc_method: "area_unit", fee_calc_base: "房屋面积", fee_rate: 0, unit_price: toNumber(item.unit_price), quantity: 1 };
+  }
   const feeCalcBase = normalizeFeeCalcBase(item.fee_calc_base) || "直接费";
   if (method === "reference") {
     return { fee_calc_method: "reference", fee_calc_base: feeCalcBase, fee_rate: 0, quantity: 1 };
@@ -1383,7 +1435,7 @@ function guessItemSpace(item: Partial<QuotationItem>) {
 }
 
 function normalizeQuotationItems(items: QuotationItem[], options: { inferMissingSpace?: boolean } = {}) {
-  return items.map((item) => {
+  const normalized = items.map((item) => {
     const isOther = isOtherCategory(item.category);
     const feeRate = toNumber(item.fee_rate);
     const isLegacyManagementFee = isOther && hasManagementFeeItem([item]) && !item.fee_calc_method && getLegacyManagementFeeRate(item) > 0;
@@ -1394,12 +1446,17 @@ function normalizeQuotationItems(items: QuotationItem[], options: { inferMissing
       space: inferItemSpace(item) || (options.inferMissingSpace ? guessItemSpace(item) : ""),
       ...(isOther ? {
         fee_calc_method: feeMethod,
-        fee_calc_base: feeMethod === "fixed" ? "" : normalizeFeeCalcBase(item.fee_calc_base) || "直接费",
+        fee_calc_base: feeMethod === "fixed" ? "" : feeMethod === "area_unit" ? "房屋面积" : normalizeFeeCalcBase(item.fee_calc_base) || "直接费",
         fee_rate: feeMethod === "percent" ? (isLegacyManagementFee ? getLegacyManagementFeeRate(item) : feeRate) : 0,
         fee_scope_mode: normalizeFeeScopeMode(item.fee_scope_mode),
         fee_scope_space_names: parseFeeScopeValues(item.fee_scope_space_names),
       } : {}),
     };
+  });
+  const otherItems = normalized.filter((item) => isOtherCategory(item.category));
+  return normalized.map((item) => !isOtherCategory(item.category) || normalizeFeeCalcMethod(item.fee_calc_method) === "fixed" || normalizeFeeCalcMethod(item.fee_calc_method) === "area_unit" ? item : {
+    ...item,
+    fee_calc_base: bindStableFeeFormula(item.fee_calc_base, otherItems),
   });
 }
 
@@ -1504,7 +1561,7 @@ function cloneItemForSpace(item: QuotationItem, space: string): QuotationItem {
   return { ...copy, id: itemId, client_key: itemId, space };
 }
 
-function buildFeeFormulaContext(items: QuotationItem[], categories: string[] = []): FeeFormulaContext {
+function buildFeeFormulaContext(items: QuotationItem[], categories: string[] = [], houseArea = 0): FeeFormulaContext {
   const orderedCategories = orderQuoteCategories([...categories, ...items.map((item) => item.category)]);
   const directItems = items
     .filter((item) => isDirectItemCategory(item.category))
@@ -1538,6 +1595,7 @@ function buildFeeFormulaContext(items: QuotationItem[], categories: string[] = [
 
   const customCategoryAmount = Object.values(categoryAmounts).reduce((sum, amount) => sum + toNumber(amount), 0);
   return {
+    houseArea: toNumber(houseArea),
     mainMaterialAmount,
     directItemAmount: mainMaterialAmount + customCategoryAmount,
     laborAmount,
@@ -1560,11 +1618,11 @@ function getOtherFeeRuleDisplay(item: QuotationItem, total: number, context?: Fe
   return remark ? `${remark}；${rule}` : rule;
 }
 
-function calculate(items: QuotationItem[], settings: QuotationDetail["settings"]) {
-  const rawTotals = calculateRawTotals(items, settings);
+function calculate(items: QuotationItem[], settings: QuotationDetail["settings"], houseArea = 0) {
+  const rawTotals = calculateRawTotals(items, settings, houseArea);
   const chargeableAmount = rawTotals.directAmount;
   const discountRules = getDiscountRules(settings);
-  const ruleDiscount = discountRules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, rawTotals)), 0);
+  const ruleDiscount = discountRules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, rawTotals, houseArea)), 0);
   const discount = Math.min(chargeableAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : toNumber(settings?.discount)));
   const taxAmount = Math.max(0, chargeableAmount - discount) * toNumber(settings?.taxRate) / 100;
   const finalAmount = Math.max(0, chargeableAmount + taxAmount - discount);
@@ -1640,9 +1698,9 @@ function getDiscountableItems(items: QuotationItem[], settings: QuotationDetail[
   return items.filter((item) => !isExcludedFromDiscount(item, settings));
 }
 
-function getDiscountScopeOptions(items: QuotationItem[], settings: QuotationDetail["settings"], totals: { otherAmount: number }): DiscountScopeOption[] {
+function getDiscountScopeOptions(items: QuotationItem[], settings: QuotationDetail["settings"], totals: { otherAmount: number }, houseArea = 0): DiscountScopeOption[] {
   const discountableItems = getDiscountableItems(items, settings);
-  const feeContext = buildFeeFormulaContext(discountableItems, settings?.quoteCategories);
+  const feeContext = buildFeeFormulaContext(discountableItems, settings?.quoteCategories, houseArea);
   const categoryAmounts = feeContext.categoryAmounts || {};
   const customCategoryOptions = Object.entries(categoryAmounts)
     .map(([label, amount]) => ({
@@ -1752,20 +1810,20 @@ function getDiscountRuleValue(rule: DiscountRule) {
   return rule.scope || "total";
 }
 
-function getDiscountRuleScope(rule: DiscountRule, items: QuotationItem[], settings: QuotationDetail["settings"], totals: ReturnType<typeof calculateRawTotals>) {
+function getDiscountRuleScope(rule: DiscountRule, items: QuotationItem[], settings: QuotationDetail["settings"], totals: ReturnType<typeof calculateRawTotals>, houseArea = 0) {
   const options = rule.type === "space"
     ? getDiscountSpaceOptions(items, settings)
     : rule.type === "work_type"
       ? getDiscountWorkTypeOptions(items, settings)
-      : getDiscountScopeOptions(items, settings, totals);
+      : getDiscountScopeOptions(items, settings, totals, houseArea);
   const value = getDiscountRuleValue(rule);
   return options.find((option) => option.value === value)
     || options.find((option) => option.value === "total")
     || options[0];
 }
 
-function getDiscountRuleAmount(rule: DiscountRule, items: QuotationItem[], settings: QuotationDetail["settings"], totals: ReturnType<typeof calculateRawTotals>) {
-  const scope = getDiscountRuleScope(rule, items, settings, totals);
+function getDiscountRuleAmount(rule: DiscountRule, items: QuotationItem[], settings: QuotationDetail["settings"], totals: ReturnType<typeof calculateRawTotals>, houseArea = 0) {
+  const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
   const scopeAmount = Math.max(0, toNumber(scope?.amount));
   const excludedAmount = Math.min(scopeAmount, Math.max(0, toNumber(settings?.excludeSpecificDiscountAmount)));
   const baseAmount = Math.max(0, scopeAmount - excludedAmount);
@@ -1774,13 +1832,13 @@ function getDiscountRuleAmount(rule: DiscountRule, items: QuotationItem[], setti
   return roundMoney(Math.min(Math.max(0, toNumber(rule.discount)), baseAmount));
 }
 
-function calculateRawTotals(items: QuotationItem[], settings: QuotationDetail["settings"]) {
+function calculateRawTotals(items: QuotationItem[], settings: QuotationDetail["settings"], houseArea = 0) {
   const baseAmount = items.filter((item) => isBaseCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const materialAmount = items.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const customCategoryAmount = items.filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const directBaseAmount = materialAmount + customCategoryAmount;
   const otherItems = items.filter((item) => isOtherCategory(item.category));
-  const feeFormulaContext = buildFeeFormulaContext(items, settings?.quoteCategories);
+  const feeFormulaContext = buildFeeFormulaContext(items, settings?.quoteCategories, houseArea);
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, directBaseAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
   const totalDirectAmount = baseAmount + directBaseAmount;
   const managementFee = 0;
@@ -1878,6 +1936,15 @@ export default function QuotationDetailPage() {
   const [spaceMenu, setSpaceMenu] = useState<{ space: string; x: number; y: number } | null>(null);
   const [spaceCopyMenu, setSpaceCopyMenu] = useState<{ source: string; x: number; y: number } | null>(null);
   const [copySpaceCategoryDialog, setCopySpaceCategoryDialog] = useState<CopySpaceCategoryDialogState | null>(null);
+  const [crossQuotationCopyDialog, setCrossQuotationCopyDialog] = useState<CrossQuotationCopyDialogState | null>(null);
+  const [crossQuotationCopyTargets, setCrossQuotationCopyTargets] = useState<CrossQuotationCopyTarget[]>([]);
+  const [crossQuotationCopySearch, setCrossQuotationCopySearch] = useState("");
+  const [crossQuotationCopyTargetId, setCrossQuotationCopyTargetId] = useState("");
+  const [crossQuotationCopyMode, setCrossQuotationCopyMode] = useState<"append" | "new_space" | null>(null);
+  const [crossQuotationCopyLoading, setCrossQuotationCopyLoading] = useState(false);
+  const [crossQuotationCopySubmitting, setCrossQuotationCopySubmitting] = useState(false);
+  const [expandedCrossQuotationCustomerKeys, setExpandedCrossQuotationCustomerKeys] = useState<string[]>([]);
+  const [collapsedCrossQuotationCustomerKeys, setCollapsedCrossQuotationCustomerKeys] = useState<string[]>([]);
   const [rowMenu, setRowMenu] = useState<{ index: number; x: number; y: number } | null>(null);
   const [rowCopyMenu, setRowCopyMenu] = useState<{ index: number; x: number; y: number } | null>(null);
   const [selectedQuoteItemKeys, setSelectedQuoteItemKeys] = useState<string[]>([]);
@@ -2143,12 +2210,13 @@ export default function QuotationDetailPage() {
     };
   }, []);
 
-  const totals = useMemo(() => calculate(items, settings), [items, settings]);
+  const quotationHouseArea = useMemo(() => toNumber(data?.customer_area_size ?? data?.project_area), [data?.customer_area_size, data?.project_area]);
+  const totals = useMemo(() => calculate(items, settings, quotationHouseArea), [items, quotationHouseArea, settings]);
   const discountSettings = discountPanelOpen && discountDraftSettings ? discountDraftSettings : settings;
-  const discountPreviewTotals = useMemo(() => calculate(items, discountSettings), [items, discountSettings]);
-  const undiscountedTotals = useMemo(() => calculateRawTotals(items, { ...discountSettings, discount: 0, discountRules: [] }), [items, discountSettings]);
+  const discountPreviewTotals = useMemo(() => calculate(items, discountSettings, quotationHouseArea), [items, discountSettings, quotationHouseArea]);
+  const undiscountedTotals = useMemo(() => calculateRawTotals(items, { ...discountSettings, discount: 0, discountRules: [] }, quotationHouseArea), [items, discountSettings, quotationHouseArea]);
   const discountType = discountSettings?.discountType === "space" || discountSettings?.discountType === "work_type" ? discountSettings.discountType : "fee";
-  const discountScopeOptions = useMemo(() => getDiscountScopeOptions(items, discountSettings, undiscountedTotals), [items, discountSettings, undiscountedTotals]);
+  const discountScopeOptions = useMemo(() => getDiscountScopeOptions(items, discountSettings, undiscountedTotals, quotationHouseArea), [items, discountSettings, undiscountedTotals, quotationHouseArea]);
   const discountSpaceOptions = useMemo(() => getDiscountSpaceOptions(items, discountSettings), [items, discountSettings]);
   const discountWorkTypeOptions = useMemo(() => getDiscountWorkTypeOptions(items, discountSettings), [items, discountSettings]);
   const activeDiscountOptions = useMemo(() => {
@@ -2174,7 +2242,7 @@ export default function QuotationDetailPage() {
   const excludeSpecificDiscountAmount = Math.min(discountScopeBaseAmount, Math.max(0, toNumber(discountSettings?.excludeSpecificDiscountAmount)));
   const discountBaseAmount = Math.max(0, discountScopeBaseAmount - excludeSpecificDiscountAmount);
   const currentRuleCalculatedDiscount = activeDiscountRule
-    ? getDiscountRuleAmount(activeDiscountRule, items, discountSettings, undiscountedTotals)
+    ? getDiscountRuleAmount(activeDiscountRule, items, discountSettings, undiscountedTotals, quotationHouseArea)
     : discountMode === "rate"
       ? roundMoney(discountBaseAmount * (1 - discountRate))
       : Math.min(currentRuleDiscountAmount, discountBaseAmount);
@@ -2191,14 +2259,14 @@ export default function QuotationDetailPage() {
     setDiscountDraftSettings((current) => updater(current || settings || {}));
   }, [settings]);
   const recomputeDiscountSettings = useCallback((nextSettings: QuotationDetail["settings"]) => {
-    const rawTotals = calculateRawTotals(items, { ...nextSettings, discount: 0 });
+    const rawTotals = calculateRawTotals(items, { ...nextSettings, discount: 0 }, quotationHouseArea);
     const rules = getDiscountRules(nextSettings);
-    const nextDiscount = rules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, nextSettings, rawTotals)), 0);
+    const nextDiscount = rules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, nextSettings, rawTotals, quotationHouseArea)), 0);
     return {
       ...nextSettings,
       discount: Math.min(rawTotals.directAmount, Math.max(0, nextDiscount)),
     };
-  }, [items]);
+  }, [items, quotationHouseArea]);
   const upsertDiscountRule = useCallback((patch: Partial<DiscountRule>) => {
     updateDiscountDraftSettings((current) => {
       const currentSettings = current || {};
@@ -2207,7 +2275,7 @@ export default function QuotationDetailPage() {
         ? getDiscountSpaceOptions(items, currentSettings)
         : type === "work_type"
           ? getDiscountWorkTypeOptions(items, currentSettings)
-          : getDiscountScopeOptions(items, currentSettings, calculateRawTotals(items, { ...currentSettings, discount: 0, discountRules: [] }));
+          : getDiscountScopeOptions(items, currentSettings, calculateRawTotals(items, { ...currentSettings, discount: 0, discountRules: [] }, quotationHouseArea), quotationHouseArea);
       const value = type === "space"
         ? (currentSettings.discountSpace ? `space:${currentSettings.discountSpace}` : options[0]?.value || "")
         : type === "work_type"
@@ -2278,8 +2346,8 @@ export default function QuotationDetailPage() {
   const getDiscountOptionsForType = useCallback((type: "fee" | "space" | "work_type", nextSettings: QuotationDetail["settings"] = discountSettings) => {
     if (type === "space") return getDiscountSpaceOptions(items, nextSettings);
     if (type === "work_type") return getDiscountWorkTypeOptions(items, nextSettings);
-    return getDiscountScopeOptions(items, nextSettings, undiscountedTotals);
-  }, [discountSettings, items, undiscountedTotals]);
+    return getDiscountScopeOptions(items, nextSettings, undiscountedTotals, quotationHouseArea);
+  }, [discountSettings, items, quotationHouseArea, undiscountedTotals]);
 
   const getDiscountValueForType = useCallback((type: "fee" | "space" | "work_type", nextSettings: QuotationDetail["settings"] = discountSettings) => {
     if (type === "space") return nextSettings?.discountSpace ? `space:${nextSettings.discountSpace}` : "";
@@ -2503,8 +2571,8 @@ export default function QuotationDetailPage() {
     }
   }, [activeCategory, getFirstProjectCategoryForSpace]);
   const feeFormulaContext = useMemo(
-    () => buildFeeFormulaContext(items, quoteCategories),
-    [items, quoteCategories],
+    () => buildFeeFormulaContext(items, quoteCategories, quotationHouseArea),
+    [items, quotationHouseArea, quoteCategories],
   );
   const activeSpaces = useMemo(() => getSpacesForCategory(items, activeCategory, customSpaces), [activeCategory, customSpaces, items]);
   const feeScopeOptions = useMemo(() => getFeeScopeOptions(items, customSpaces, quoteCategories), [customSpaces, items, quoteCategories]);
@@ -3108,6 +3176,11 @@ export default function QuotationDetailPage() {
   const removeItem = (index: number) => {
     if (isReadonly) return;
     const key = items[index] ? getQuotationItemKey(items[index], index) : "";
+    const referencedBy = key ? getFeeReferenceDependentNames(items, new Set([key])) : [];
+    if (referencedBy.length > 0) {
+      window.alert(`该费用正在被“${referencedBy.join("、")}”的公式引用，请先修改引用公式。`);
+      return;
+    }
     setItems((current) => current.filter((_, i) => i !== index));
     if (key) setSelectedQuoteItemKeys((current) => current.filter((item) => item !== key));
   };
@@ -3426,6 +3499,11 @@ export default function QuotationDetailPage() {
     if (isReadonly || selectedActiveItemKeys.length === 0) return;
     const keysToDelete = new Set(selectedActiveItemKeys);
     const count = keysToDelete.size;
+    const referencedBy = getFeeReferenceDependentNames(items, keysToDelete);
+    if (referencedBy.length > 0) {
+      window.alert(`所选费用正在被“${referencedBy.join("、")}”的公式引用，请先修改引用公式。`);
+      return;
+    }
     showConfirm({
       title: "批量删除项目",
       message: `确定删除当前列表中已勾选的 ${count} 条报价项目吗？删除后系统会自动保存。`,
@@ -3436,7 +3514,7 @@ export default function QuotationDetailPage() {
         setSelectedQuoteItemKeys((current) => current.filter((key) => !keysToDelete.has(key)));
       },
     });
-  }, [isReadonly, selectedActiveItemKeys]);
+  }, [isReadonly, items, selectedActiveItemKeys]);
 
   const openProjectInfoEditor = () => {
     if (!data || isReadonly) return;
@@ -3836,6 +3914,94 @@ export default function QuotationDetailPage() {
     setCopySpaceCategoryDialog(null);
   };
 
+  const loadCrossQuotationCopyTargets = async () => {
+    setCrossQuotationCopyLoading(true);
+    try {
+      const res = await fetch("/api/quotations", { headers: authHeaders() });
+      const payload = await res.json().catch(() => []);
+      if (!res.ok) throw new Error(payload?.message || "目标报价加载失败");
+      const list = Array.isArray(payload) ? payload as CrossQuotationCopyTarget[] : [];
+      setCrossQuotationCopyTargets(list.filter((item) => {
+        const itemId = String(item.id || "").trim();
+        const itemStatus = String(item.status || "").toUpperCase();
+        if (!itemId || itemId === quotationId) return false;
+        if (itemStatus === "APPROVED") return false;
+        if (Number(item.signed_quotation_contract_count || 0) > 0) return false;
+        return true;
+      }));
+    } catch (error: any) {
+      setCrossQuotationCopyTargets([]);
+      showAlert("加载失败", error?.message || "目标报价加载失败，请稍后再试。", "danger");
+    } finally {
+      setCrossQuotationCopyLoading(false);
+    }
+  };
+
+  const openCrossQuotationCopyDialog = (source: string) => {
+    if (isReadonly) return;
+    const sourceItems = items.filter((item) => isDirectItemCategory(item.category) && inferItemSpace(item) === source);
+    setSpaceMenu(null);
+    setSpaceCopyMenu(null);
+    if (!sourceItems.length) {
+      showAlert("暂无可复制项目", `「${source}」下暂无可复制项目。`);
+      return;
+    }
+    setCrossQuotationCopyDialog({ source, itemCount: sourceItems.length });
+    setCrossQuotationCopySearch("");
+    setCrossQuotationCopyTargetId("");
+    setCrossQuotationCopyMode(null);
+    setExpandedCrossQuotationCustomerKeys([]);
+    setCollapsedCrossQuotationCustomerKeys([]);
+    void loadCrossQuotationCopyTargets();
+  };
+
+  const submitCrossQuotationCopy = async () => {
+    if (!crossQuotationCopyDialog || crossQuotationCopySubmitting) return;
+    if (!crossQuotationCopyTargetId) {
+      showAlert("请选择目标报价", "请先选择要复制到哪一份报价。");
+      return;
+    }
+    setCrossQuotationCopySubmitting(true);
+    try {
+      await waitForLatestAutoSave();
+      const target = crossQuotationCopyTargets.find((item) => String(item.id || "") === crossQuotationCopyTargetId);
+      const targetHasSameSpace = target?.quote_spaces?.some((space) => String(space || "").trim() === crossQuotationCopyDialog.source);
+      if (targetHasSameSpace && !crossQuotationCopyMode) {
+        showAlert("请选择复制方式", "目标报价已有同名空间，请选择追加到同名空间或新增独立空间。");
+        return;
+      }
+      const res = await fetch(`/api/quotations/${quotationId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          action: "copySpaceCategoryToQuotation",
+          target_quotation_id: crossQuotationCopyTargetId,
+          source_space: crossQuotationCopyDialog.source,
+          mode: targetHasSameSpace ? crossQuotationCopyMode : "append",
+          items,
+        }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(payload?.message || "复制失败");
+      setCrossQuotationCopyDialog(null);
+      setCrossQuotationCopyTargetId("");
+      showAlert(
+        "复制成功",
+        `已将「${crossQuotationCopyDialog.source}」复制到目标报价${payload?.targetSpace && payload.targetSpace !== crossQuotationCopyDialog.source ? `，新增为「${payload.targetSpace}」` : ""}，共 ${Number(payload?.copiedCount || 0)} 项。`,
+        "info",
+      );
+    } catch (error: any) {
+      showAlert("复制失败", error?.message || "复制失败，请稍后再试。", "danger");
+    } finally {
+      setCrossQuotationCopySubmitting(false);
+    }
+  };
+
+  const confirmCrossQuotationCopy = () => {
+    if (!crossQuotationCopyDialog) return;
+    void submitCrossQuotationCopy();
+  };
+
   const clearSpaceCategoryItems = (space: string) => {
     if (isReadonly) return;
     const count = items.filter((item) => !isOtherCategory(item.category) && inferItemSpace(item) === space).length;
@@ -4214,6 +4380,52 @@ export default function QuotationDetailPage() {
   const activeQuotaUpdateSpaceLabel = quotaUpdateSpaceFilter === "all" ? "全部空间" : quotaUpdateSpaceFilter;
   const quotaUpdateDifferenceCount = quotaUpdateNotices.reduce((total, notice) => total + notice.differences.length, 0);
   const shouldShowBudgetCompilationApplyNotice = !isReadonly && Boolean(budgetCompilationUpdateNotice) && !budgetCompilationNoticeDismissed;
+  const filteredCrossQuotationCopyTargets = crossQuotationCopyTargets.filter((target) => {
+    const keyword = crossQuotationCopySearch.trim().toLowerCase();
+    if (!keyword) return true;
+    return [
+      target.title,
+      target.quotation_type,
+      target.customer_name,
+      target.customer_address,
+      target.customer_service_store_org_unit_name,
+      target.quota_template_name,
+    ].some((value) => String(value || "").toLowerCase().includes(keyword));
+  });
+  const selectedCrossQuotationCopyTarget = crossQuotationCopyTargets.find((target) => String(target.id || "") === crossQuotationCopyTargetId) || null;
+  const groupedCrossQuotationCopyTargets = (() => {
+    const groupMap = new Map<string, {
+      key: string;
+      customerName: string;
+      customerMeta: string;
+      storeName: string;
+      targets: CrossQuotationCopyTarget[];
+    }>();
+    filteredCrossQuotationCopyTargets.forEach((target) => {
+      const customerName = String(target.customer_name || target.customer_address || "未命名客户").trim();
+      const customerMeta = String(target.customer_address || "").trim();
+      const storeName = String(target.customer_service_store_org_unit_name || "").trim();
+      const key = String(target.customer_id || "").trim()
+        || `${customerName}-${customerMeta || storeName || "unknown"}`;
+      if (!groupMap.has(key)) {
+        groupMap.set(key, { key, customerName, customerMeta, storeName, targets: [] });
+      }
+      groupMap.get(key)?.targets.push(target);
+    });
+    return Array.from(groupMap.values());
+  })();
+  const searchedCrossQuotationCopy = crossQuotationCopySearch.trim().length > 0;
+  const selectedCrossQuotationTargetHasSameSpace = Boolean(
+    crossQuotationCopyDialog
+      && selectedCrossQuotationCopyTarget?.quote_spaces?.some((space) => String(space || "").trim() === crossQuotationCopyDialog.source),
+  );
+  const needsCrossQuotationCopyMode = selectedCrossQuotationTargetHasSameSpace && !crossQuotationCopyMode;
+  const canSubmitCrossQuotationCopy = Boolean(
+    crossQuotationCopyTargetId
+      && !crossQuotationCopySubmitting
+      && !crossQuotationCopyLoading
+      && (!selectedCrossQuotationTargetHasSameSpace || crossQuotationCopyMode),
+  );
 
   return (
     <div className="quotation-detail-ui quote-workbench-shell -m-5 min-h-[calc(100vh-72px)] w-[calc(100%+2.5rem)] max-w-none bg-[#f4f7fb] px-4 pb-4 pt-2 text-[#162033] lg:-m-7 lg:w-[calc(100%+3.5rem)] lg:px-5 lg:pb-5 lg:pt-3" onClick={handlePageClick}>
@@ -4304,6 +4516,294 @@ export default function QuotationDetailPage() {
               >
                 确认复制
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {crossQuotationCopyDialog && (
+        <div
+          className="fixed inset-0 z-[10000] flex items-center justify-center bg-[#0b1220]/35 px-4 py-6 backdrop-blur-md no-print"
+          onClick={() => {
+            if (!crossQuotationCopySubmitting) setCrossQuotationCopyDialog(null);
+          }}
+        >
+          <div
+            className="w-full max-w-[980px] overflow-hidden rounded-[14px] bg-white p-6"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="复制空间类别到其他报价"
+          >
+            <div className="flex items-start justify-between gap-4 bg-white">
+              <div className="min-w-0">
+                <div className="text-[15px] font-semibold leading-6 text-[#172033]">复制空间/类别到其他报价</div>
+                <div className="mt-1 text-[12px] font-medium leading-5 text-[#667085]">
+                  将「{crossQuotationCopyDialog.source}」下的 {crossQuotationCopyDialog.itemCount} 个项目复制到目标报价，不复制综合费用和客户资料。
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCrossQuotationCopyDialog(null)}
+                disabled={crossQuotationCopySubmitting}
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[#7b8797] transition hover:bg-[#f3f6fa] hover:text-[#172033] disabled:cursor-not-allowed disabled:opacity-60"
+                aria-label="关闭跨报价复制"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="-mx-6 mt-4 border-t border-[#d8e1ee]" />
+
+            <div className="mt-4 bg-white">
+              <div>
+                <label className="relative block">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#9aa8bb]" />
+                  <input
+                    value={crossQuotationCopySearch}
+                    onChange={(event) => {
+                      setCrossQuotationCopySearch(event.target.value);
+                      setCollapsedCrossQuotationCustomerKeys([]);
+                    }}
+                    className="h-10 w-full rounded-[10px] border border-[#d8e1ee] bg-white pl-9 pr-3 text-[12px] font-medium text-[#172033] outline-none transition placeholder:text-[#9aa8bb] focus:border-[#159863] focus:ring-2 focus:ring-[#dff6ea]"
+                    placeholder="搜索客户、报价、门店、模板"
+                  />
+                </label>
+              </div>
+
+              <div className="mt-3 min-h-[122px] rounded-[10px] border border-[#e6edf5] bg-[#f8fafc] p-3">
+                <div className="flex min-h-[96px] flex-col gap-3">
+                  <div className="flex min-w-0 items-start justify-between gap-3">
+                    <div className="min-w-0">
+                    {selectedCrossQuotationCopyTarget ? (
+                      selectedCrossQuotationTargetHasSameSpace ? (
+                        <>
+                          <div className="flex items-center gap-2 text-[12px] font-semibold leading-5 text-[#172033]">
+                            <span>目标报价已有「{crossQuotationCopyDialog.source}」</span>
+                            <span className="inline-flex h-5 items-center rounded-full bg-[#eef4ff] px-2 text-[12px] font-semibold text-[#315a9d]">必选</span>
+                          </div>
+                          <div className="mt-0.5 text-[12px] font-medium leading-5 text-[#667085]">请选择复制后的放置方式，避免把项目放错位置。</div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="text-[12px] font-semibold leading-5 text-[#172033]">目标报价暂无同名空间</div>
+                          <div className="mt-0.5 text-[12px] font-medium leading-5 text-[#667085]">确认后将新增「{crossQuotationCopyDialog.source}」并复制当前项目。</div>
+                        </>
+                      )
+                    ) : (
+                      <>
+                        <div className="text-[12px] font-semibold leading-5 text-[#172033]">复制方式</div>
+                        <div className="mt-0.5 text-[12px] font-medium leading-5 text-[#667085]">选择目标报价后，如存在同名空间，可选择追加或新增独立空间。</div>
+                      </>
+                    )}
+                    </div>
+                    {needsCrossQuotationCopyMode ? (
+                      <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-[12px] font-semibold text-[#667085] ring-1 ring-[#d8e1ee]">
+                        请选择一种方式
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className={`grid w-full grid-cols-2 gap-2 ${selectedCrossQuotationTargetHasSameSpace ? "" : "opacity-60"}`}>
+                    {[
+                      { value: "append" as const, label: "合并到现有空间", description: `项目加入目标报价的「${crossQuotationCopyDialog.source}」，不新增空间` },
+                      { value: "new_space" as const, label: "创建新空间副本", description: `新增一个「${crossQuotationCopyDialog.source}」副本，原空间不变` },
+                    ].map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => {
+                          if (selectedCrossQuotationTargetHasSameSpace) setCrossQuotationCopyMode(option.value);
+                        }}
+                        disabled={!selectedCrossQuotationTargetHasSameSpace}
+                        className={`inline-flex min-h-[58px] items-center gap-2 rounded-[10px] border px-3 py-2.5 text-left transition ${
+                          selectedCrossQuotationTargetHasSameSpace && crossQuotationCopyMode === option.value
+                            ? "border-[#159863] bg-[#eefaf4] text-[#0f6b49]"
+                            : selectedCrossQuotationTargetHasSameSpace
+                              ? "border-[#d8e1ee] bg-white text-[#344054] hover:border-[#b8c7da] hover:bg-[#fbfcfe] hover:text-[#172033]"
+                              : "border-[#d8e1ee] bg-white text-[#667085] hover:bg-[#f4f7fb] hover:text-[#172033] disabled:hover:bg-white disabled:hover:text-[#667085]"
+                        }`}
+                      >
+                        <span className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                          selectedCrossQuotationTargetHasSameSpace && crossQuotationCopyMode === option.value
+                            ? "border-[#159863] bg-white"
+                            : "border-[#b8c5d6] bg-white"
+                        }`}>
+                          {selectedCrossQuotationTargetHasSameSpace && crossQuotationCopyMode === option.value ? (
+                            <span className="h-2 w-2 rounded-full bg-[#159863]" />
+                          ) : null}
+                        </span>
+                        <span className="min-w-0 self-center">
+                          <span className="block text-[12px] font-semibold leading-5">{option.label}</span>
+                          <span className={`mt-0.5 block text-[12px] font-medium leading-4 ${
+                            selectedCrossQuotationTargetHasSameSpace && crossQuotationCopyMode === option.value
+                              ? "text-[#3f7d65]"
+                              : "text-[#667085]"
+                          }`}>
+                            {option.description}
+                          </span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 overflow-hidden bg-white">
+                <div className="max-h-[min(500px,calc(100dvh-260px))] overflow-y-auto bg-white [scrollbar-gutter:stable]">
+                  {crossQuotationCopyLoading ? (
+                    <div className="flex h-28 items-center justify-center text-[12px] font-medium text-[#667085]">
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      加载目标报价...
+                    </div>
+                  ) : groupedCrossQuotationCopyTargets.length === 0 ? (
+                    <div className="flex h-28 items-center justify-center text-[12px] font-medium text-[#98a2b3]">
+                      暂无可复制的目标报价
+                    </div>
+                  ) : (
+                    <table className="w-full table-fixed border-collapse">
+                      <colgroup>
+                        <col />
+                        <col className="w-[104px]" />
+                        <col className="w-[128px]" />
+                        <col className="w-[138px]" />
+                      </colgroup>
+                      <thead className="sticky top-0 z-10 bg-white">
+                        <tr className="border-b border-[#eef2f6] text-[12px] font-semibold text-[#667085]">
+                          <th className="px-1 py-2.5 text-left">客户 / 报价</th>
+                          <th className="px-1 py-2.5 text-center">份数</th>
+                          <th className="px-1 py-2.5 text-center">金额</th>
+                          <th className="px-1 py-2.5 text-center">更新时间</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {groupedCrossQuotationCopyTargets.map((group) => {
+                          const groupSelected = group.targets.some((target) => String(target.id || "") === crossQuotationCopyTargetId);
+                          const manuallyCollapsed = collapsedCrossQuotationCustomerKeys.includes(group.key);
+                          const expanded = groupSelected || (!manuallyCollapsed && (searchedCrossQuotationCopy || expandedCrossQuotationCustomerKeys.includes(group.key)));
+                          return (
+                            <React.Fragment key={group.key}>
+                              <tr className={`border-b border-[#eef2f6] transition ${groupSelected ? "text-[#159863]" : crossQuotationCustomerTone.hover}`}>
+                                <td className="h-[58px] px-1 py-2.5 align-middle">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (expanded) {
+                                        setExpandedCrossQuotationCustomerKeys((current) => current.filter((key) => key !== group.key));
+                                        setCollapsedCrossQuotationCustomerKeys((current) => (
+                                          current.includes(group.key) ? current : [...current, group.key]
+                                        ));
+                                      } else {
+                                        setCollapsedCrossQuotationCustomerKeys((current) => current.filter((key) => key !== group.key));
+                                        setExpandedCrossQuotationCustomerKeys((current) => (
+                                          current.includes(group.key) ? current : [...current, group.key]
+                                        ));
+                                      }
+                                    }}
+                                    className="flex min-w-0 items-center gap-2 text-left"
+                                  >
+                                    <span className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] border transition ${
+                                      expanded
+                                        ? "border-[#b9d2f4] bg-[#eef6ff] text-[#2563aa]"
+                                        : "border-[#d8e1ee] bg-white text-[#7b8797] hover:border-[#b9d2f4] hover:bg-[#f8fbff] hover:text-[#2563aa]"
+                                    }`}>
+                                      <ChevronRight className={`h-3.5 w-3.5 transition-transform duration-150 ${expanded ? "rotate-90" : ""}`} strokeWidth={2} />
+                                    </span>
+                                    <span className="min-w-0">
+                                      <span className="block truncate text-[12px] font-semibold text-[#172033]">{group.customerName}</span>
+                                      <span className="mt-0.5 block truncate text-[12px] font-medium text-[#7b8797]">
+                                        {[group.storeName, group.customerMeta].filter(Boolean).join(" · ") || "暂无客户地址"}
+                                      </span>
+                                    </span>
+                                  </button>
+                                </td>
+                                <td className="h-[58px] px-1 py-2.5 text-center align-middle">
+                                  <span className={`inline-flex h-6 w-[72px] items-center justify-center rounded-[6px] px-2 text-[12px] font-semibold ${crossQuotationCustomerTone.badge}`}>
+                                    {group.targets.length} 份报价
+                                  </span>
+                                </td>
+                                <td className="h-[58px] px-1 py-2.5 text-center align-middle" />
+                                <td className="h-[58px] px-1 py-2.5 text-center align-middle text-[12px] font-medium text-[#98a2b3]">
+                                  {formatDateTime(group.targets[0]?.updated_at)}
+                                </td>
+                              </tr>
+                              {expanded && group.targets.map((target) => {
+                                const checked = String(target.id || "") === crossQuotationCopyTargetId;
+                                const titleText = String(target.quotation_type || target.title || "未命名报价").trim();
+                                const templateText = String(target.quota_template_name || "").trim();
+                                return (
+                                  <tr key={target.id} className={`border-b border-[#f1f4f8] transition last:border-b-0 ${checked ? "bg-[#eefaf4]" : "bg-white hover:bg-[#f8fafc]"}`}>
+                                    <td className="h-[58px] py-2.5 pl-9 pr-1 align-middle">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setCrossQuotationCopyTargetId(target.id);
+                                          const targetHasSameSpace = target.quote_spaces?.some((space) => String(space || "").trim() === crossQuotationCopyDialog.source);
+                                          setCrossQuotationCopyMode(targetHasSameSpace ? null : "append");
+                                        }}
+                                        className="flex min-w-0 items-center gap-2 text-left"
+                                      >
+                                        <span className={`inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border transition ${
+                                          checked ? "border-[#159863] bg-white ring-4 ring-[#dff6ea]" : "border-[#c9d4e2] bg-white"
+                                        }`}>
+                                          <span className={`h-2 w-2 rounded-full transition ${checked ? "bg-[#159863]" : "bg-transparent"}`} />
+                                        </span>
+                                        <span className="min-w-0">
+                                          <span className="flex min-w-0 items-center gap-2">
+                                            <span className="truncate text-[12px] font-semibold text-[#172033]">{titleText}</span>
+                                            <span className="shrink-0 rounded-[6px] bg-[#f2f4f7] px-2 py-0.5 text-[12px] font-semibold text-[#667085]">
+                                              {getQuotationStatusLabel(target.status)}
+                                            </span>
+                                          </span>
+                                          <span className="mt-0.5 block truncate text-[12px] font-medium text-[#667085]">
+                                            {templateText || "未绑定报价模板"}
+                                          </span>
+                                        </span>
+                                      </button>
+                                    </td>
+                                    <td className="h-[58px] px-1 py-2.5 text-center align-middle" />
+                                    <td className="h-[58px] px-1 py-2.5 text-center align-middle text-[12px] font-semibold tabular-nums text-[#172033]">
+                                      {formatQuoteAmount(Number(target.final_amount ?? target.total_amount ?? 0))}
+                                    </td>
+                                    <td className="h-[58px] px-1 py-2.5 text-center align-middle text-[12px] font-medium text-[#667085]">
+                                      {formatDateTime(target.updated_at)}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </React.Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="-mx-6 mt-4 border-t border-[#d8e1ee]" />
+
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 bg-white">
+              <div className={`min-w-0 text-[12px] font-medium ${needsCrossQuotationCopyMode ? "text-[#a15c07]" : "text-[#667085]"}`}>
+                {needsCrossQuotationCopyMode
+                  ? "请选择复制方式后确认"
+                  : selectedCrossQuotationCopyTarget ? `已选择：${selectedCrossQuotationCopyTarget.customer_name || selectedCrossQuotationCopyTarget.title || "目标报价"}` : "请选择目标报价"}
+              </div>
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setCrossQuotationCopyDialog(null)}
+                  disabled={crossQuotationCopySubmitting}
+                  className="inline-flex h-10 min-w-[74px] items-center justify-center rounded-[10px] border border-[#d9e2ef] bg-white px-4 text-[12px] font-semibold text-[#52647b] transition hover:bg-[#f7f9fd] hover:text-[#172033] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmCrossQuotationCopy}
+                  disabled={!canSubmitCrossQuotationCopy}
+                  className="inline-flex h-10 min-w-[116px] items-center justify-center rounded-[10px] border border-[#159863] bg-[#159863] px-5 text-[12px] font-semibold text-white transition hover:border-[#0f8155] hover:bg-[#0f8155] disabled:cursor-not-allowed disabled:border-[#c7d3e3] disabled:bg-[#c7d3e3]"
+                >
+                  {crossQuotationCopySubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Copy className="mr-2 h-4 w-4" />}
+                  {needsCrossQuotationCopyMode ? "先选复制方式" : "确认复制"}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -4682,8 +5182,8 @@ export default function QuotationDetailPage() {
             setProjectInfoOpen(false);
           }
         }}>
-          <div className="quote-project-info-modal w-full max-w-[820px] overflow-hidden rounded-xl border border-surface-200 bg-white shadow-[0_24px_70px_rgba(15,23,42,0.22)]">
-            <div className="flex items-start justify-between gap-4 border-b border-surface-100 px-5 py-3.5">
+          <div className="quote-project-info-modal w-full max-w-[820px] overflow-hidden rounded-xl border border-surface-200 bg-white p-5 shadow-[0_24px_70px_rgba(15,23,42,0.22)]">
+            <div className="quote-project-info-header flex items-start justify-between gap-4 border-b border-surface-100 pb-3.5">
               <div>
                 <div className="text-sm font-semibold text-[#182230]">编辑报价资料</div>
                 <p className="mt-1 text-xs text-surface-500">修改本次报价使用的客户、地址、房号和装修信息</p>
@@ -4773,23 +5273,23 @@ export default function QuotationDetailPage() {
 	                  <span>装修类型</span>
 	                  <input list="quote-project-decoration-types" value={projectInfoForm.decorationType} onChange={(event) => setProjectInfoForm((current) => ({ ...current, decorationType: event.target.value }))} placeholder="如：全包/半包" />
 	                </label>
-	                <label className="quote-project-info-field">
-	                  <span>报价类型</span>
-	                  <input maxLength={20} value={projectInfoForm.quotationType} onChange={(event) => setProjectInfoForm((current) => ({ ...current, quotationType: event.target.value }))} placeholder="如：全包、半包、全案、局改等" />
+	                <label className="quote-project-info-field quote-project-info-span-2">
+	                  <span>报价名称</span>
+	                  <input maxLength={20} value={projectInfoForm.quotationType} onChange={(event) => setProjectInfoForm((current) => ({ ...current, quotationType: event.target.value }))} placeholder="如：全包一期、局改增项等" />
 	                </label>
                 <datalist id="quote-project-decoration-types">
                   {quoteDecorationTypeOptions.map((option) => <option key={option} value={option} />)}
                 </datalist>
               </div>
             </div>
-            <div className="flex items-center justify-end gap-2 border-t border-surface-100 bg-surface-50 px-5 py-4">
+            <div className="quote-project-info-footer flex items-center justify-end gap-2 bg-white pt-4">
               <button type="button" onClick={() => {
                 setProjectInfoMapPickerOpen(false);
                 setProjectInfoOpen(false);
               }} disabled={projectInfoSaving} className="inline-flex h-9 items-center justify-center rounded-lg border border-surface-200 bg-white px-4 text-xs font-semibold text-surface-600 transition hover:bg-surface-100 disabled:opacity-50">
                 取消
               </button>
-              <button type="button" onClick={submitProjectInfo} disabled={projectInfoSaving} className="inline-flex h-9 min-w-[104px] items-center justify-center rounded-lg bg-primary-600 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-primary-700 disabled:opacity-60">
+              <button type="button" onClick={submitProjectInfo} disabled={projectInfoSaving} className="inline-flex h-9 min-w-[104px] items-center justify-center rounded-lg bg-primary-600 px-4 text-xs font-semibold text-white shadow-none transition hover:bg-primary-700 disabled:opacity-60">
                 {projectInfoSaving ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
                 保存资料
               </button>
@@ -4805,11 +5305,11 @@ export default function QuotationDetailPage() {
 	          }}
         >
           <div
-            className="quote-discount-modal flex max-h-[calc(100dvh-72px)] w-full max-w-[960px] flex-col overflow-hidden rounded-[18px] border border-[#dfe7f1] bg-white shadow-[0_28px_78px_rgba(15,23,42,0.24)]"
+            className="quote-discount-modal max-h-[calc(100dvh-72px)] w-full max-w-[960px] overflow-y-auto rounded-[18px] border border-[#dfe7f1] bg-white p-5 shadow-[0_28px_78px_rgba(15,23,42,0.24)]"
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[#e7edf5] bg-white px-6 py-3.5">
+            <div className="quote-discount-modal-header flex items-start justify-between gap-4 border-b border-[#e7edf5] bg-white pb-4">
               <div className="flex min-w-0 items-start gap-3">
                 <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[11px] border border-[#bfe8d3] bg-[#f1fbf6] text-[#159863]">
                   <Tags className="h-[18px] w-[18px]" />
@@ -4828,7 +5328,7 @@ export default function QuotationDetailPage() {
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="quote-discount-modal-body min-h-0 flex-1 space-y-3 overflow-y-auto bg-[#f5f8fb] p-3.5">
+            <div className="quote-discount-modal-body space-y-3 bg-white pt-3">
               <div className="quote-discount-step">
                 <div className="quote-discount-step-title mb-2">
                   <span className="quote-discount-step-badge"><Tags className="h-3.5 w-3.5" /></span>
@@ -5041,7 +5541,7 @@ export default function QuotationDetailPage() {
                   <div className="quote-discount-rule-list">
                     {discountRules.map((rule) => {
                       const scope = getDiscountRuleScope(rule, items, discountSettings, undiscountedTotals);
-                      const amount = getDiscountRuleAmount(rule, items, discountSettings, undiscountedTotals);
+                      const amount = getDiscountRuleAmount(rule, items, discountSettings, undiscountedTotals, quotationHouseArea);
                       return (
                         <div key={rule.id} className="quote-discount-rule-row">
                           <span className="quote-discount-rule-row-name">{scope?.label || "优惠对象"}</span>
@@ -5078,11 +5578,11 @@ export default function QuotationDetailPage() {
                 </div>
               </div>
             </div>
-            <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[#e7edf5] bg-white px-6 py-3">
+            <div className="quote-discount-modal-footer mt-3 flex items-center justify-end gap-2 bg-white">
               <button
                 type="button"
 	                onClick={confirmDiscountPanel}
-                className="inline-flex h-10 min-w-[92px] items-center justify-center gap-1.5 rounded-[10px] bg-[#159863] px-5 text-xs font-bold text-white shadow-[0_8px_18px_rgba(21,152,99,0.22)] transition hover:bg-[#0f8155]"
+                className="inline-flex h-10 min-w-[92px] items-center justify-center gap-1.5 rounded-[10px] bg-[#159863] px-5 text-xs font-bold text-white shadow-none transition hover:bg-[#0f8155]"
               >
                 {isReadonly ? <X className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}
 	                {isReadonly ? "关闭" : "确认"}
@@ -5563,9 +6063,9 @@ export default function QuotationDetailPage() {
 
         {spaceMenu && (
           <div
-            className="quote-floating-menu fixed z-[9997] w-72 rounded-lg border border-surface-200 bg-white p-1 shadow-[0_18px_38px_rgba(31,41,53,0.16)]"
+            className="quote-floating-menu fixed z-[9997] w-80 rounded-lg border border-surface-200 bg-white p-1 shadow-[0_18px_38px_rgba(31,41,53,0.16)]"
             style={{
-              left: typeof window === "undefined" ? spaceMenu.x : Math.max(8, Math.min(spaceMenu.x, window.innerWidth - 296)),
+              left: typeof window === "undefined" ? spaceMenu.x : Math.max(8, Math.min(spaceMenu.x, window.innerWidth - 328)),
               top: spaceMenu.y,
             }}
             onClick={(event) => event.stopPropagation()}
@@ -5576,7 +6076,11 @@ export default function QuotationDetailPage() {
             </button>
             <button onClick={(event) => openCopySpaceMenu(event, spaceMenu.space)} className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
               <Copy className="h-4 w-4" />
-              复制本空间项目到其他空间/类别
+              复制到本报价其他空间/类别
+            </button>
+            <button onClick={() => openCrossQuotationCopyDialog(spaceMenu.space)} className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
+              <FileText className="h-4 w-4" />
+              复制到其他报价（跨报价）
             </button>
             <button onClick={() => renameSpace(spaceMenu.space)} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
               <Pencil className="h-4 w-4" />
@@ -6071,10 +6575,29 @@ export default function QuotationDetailPage() {
         .quotation-detail-ui .quote-discount-fields {
           border: 1px solid var(--quote-line-soft);
           border-radius: 10px !important;
-          background: var(--quote-panel-soft) !important;
+          background: #ffffff !important;
         }
         .quotation-detail-ui .quote-discount-fields {
           padding: 10px !important;
+        }
+        .quotation-detail-ui .quote-discount-modal-body {
+          background: #ffffff !important;
+        }
+        .quotation-detail-ui .quote-discount-modal {
+          background: #ffffff !important;
+        }
+        .quotation-detail-ui .quote-discount-modal-header,
+        .quotation-detail-ui .quote-discount-modal-body,
+        .quotation-detail-ui .quote-discount-modal-footer {
+          border: 0 !important;
+          background: #ffffff !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui .quote-discount-modal-header {
+          border-bottom: 1px solid #e7edf5 !important;
+        }
+        .quotation-detail-ui .quote-discount-modal-body {
+          padding-top: 12px !important;
         }
         .quotation-detail-ui .quote-discount-scope-panel {
           background: #ffffff !important;
@@ -6083,11 +6606,11 @@ export default function QuotationDetailPage() {
         .quotation-detail-ui .quote-discount-step {
           min-width: 0;
           overflow: visible;
-          border: 1px solid #e2e8f0;
-          border-radius: 12px;
-          background: rgba(255, 255, 255, 0.78);
-          padding: 9px 10px;
-          box-shadow: 0 6px 16px rgba(15, 23, 42, 0.03);
+          border: 0;
+          border-radius: 0;
+          background: #ffffff;
+          padding: 0;
+          box-shadow: none;
         }
         .quotation-detail-ui .quote-discount-step-title {
           display: inline-flex;
@@ -6306,7 +6829,7 @@ export default function QuotationDetailPage() {
         .quotation-detail-ui .quote-discount-type-grid,
 		        .quotation-detail-ui .quote-discount-mode-grid {
 		          border: 1px solid #dfe7f1 !important;
-		          box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72), 0 10px 24px rgba(15, 23, 42, 0.035) !important;
+		          box-shadow: none !important;
 	        }
         .quotation-detail-ui .quote-discount-type-button,
 	        .quotation-detail-ui .quote-discount-mode-button {
@@ -6377,7 +6900,7 @@ export default function QuotationDetailPage() {
           border-radius: 10px;
           background: #ffffff;
           padding: 8px 12px;
-          box-shadow: 0 6px 14px rgba(15, 23, 42, 0.03);
+          box-shadow: none;
         }
         .quotation-detail-ui .quote-discount-result-card-warn {
           border-color: #fed7aa;
@@ -6509,18 +7032,17 @@ export default function QuotationDetailPage() {
           border-color: var(--quote-primary) !important;
           background: #f7fbff !important;
           box-shadow: none !important;
-          transform: translateX(10px) !important;
         }
         .quotation-detail-ui .quote-space-tab-drop-target::before {
           content: "" !important;
           position: absolute !important;
-          left: -9px !important;
-          top: 3px !important;
-          bottom: 3px !important;
-          width: 3px !important;
+          left: -7px !important;
+          top: 5px !important;
+          bottom: 5px !important;
+          width: 4px !important;
           border-radius: 999px !important;
           background: var(--quote-primary) !important;
-          box-shadow: 0 0 0 4px rgba(64, 122, 255, 0.12) !important;
+          box-shadow: 0 0 0 3px rgba(64, 122, 255, 0.14) !important;
           animation: quote-space-drop-caret 900ms ease-in-out infinite !important;
         }
         @keyframes quote-space-drop-caret {
@@ -9922,6 +10444,19 @@ export default function QuotationDetailPage() {
           max-height: min(90vh, 720px);
           display: flex;
           flex-direction: column;
+          background: #ffffff !important;
+        }
+        .quotation-detail-ui .quote-project-info-header,
+        .quotation-detail-ui .quote-project-info-body,
+        .quotation-detail-ui .quote-project-info-footer {
+          background: #ffffff !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui .quote-project-info-header {
+          border-bottom: 1px solid #e7edf5 !important;
+        }
+        .quotation-detail-ui .quote-project-info-footer {
+          border-top: 0 !important;
         }
         .quote-project-info-map-layer > .fixed {
           z-index: 11001 !important;
@@ -9929,18 +10464,18 @@ export default function QuotationDetailPage() {
         .quotation-detail-ui .quote-project-info-body {
           min-height: 0;
           overflow-y: auto;
-          padding: 18px 20px 20px;
-          background: #f8fafc;
+          padding: 14px 0 0;
+          background: #ffffff;
         }
         .quotation-detail-ui .quote-project-info-form-grid {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 12px 16px;
-          border-radius: 12px;
-          border: 1px solid #dde6f2;
+          border-radius: 0;
+          border: 0;
           background: #ffffff;
-          padding: 16px;
-          box-shadow: 0 1px 2px rgba(16, 24, 40, 0.035);
+          padding: 0;
+          box-shadow: none;
         }
         .quotation-detail-ui .quote-project-info-span-2 {
           grid-column: 1 / -1;
@@ -12334,16 +12869,22 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
   readOnly?: boolean;
   onItemPointerDown: (event: ReactPointerEvent<HTMLButtonElement>, index: number) => void;
 }) {
+  const [feeFormulaDrafts, setFeeFormulaDrafts] = useState<Record<string, string>>({});
+  const otherFeeItems = useMemo(() => otherFeeRows.map(({ item }) => item), [otherFeeRows]);
+  const validationOtherFeeItems = useMemo(() => otherFeeRows.map(({ item, index }) => {
+    const itemKey = getQuotationItemKey(item, index);
+    return feeFormulaDrafts[itemKey] !== undefined ? { ...item, fee_calc_base: feeFormulaDrafts[itemKey] } : item;
+  }), [feeFormulaDrafts, otherFeeRows]);
   const otherFeeRowMeta = useMemo(() => {
     const meta = new Map<number, { sequence: string; total: number; error: string }>();
-    const otherFeeDetails = calculateOtherFeeDetails(otherFeeRows.map(({ item }) => item), baseAmount, materialAmount, feeFormulaContext);
+    const otherFeeDetails = calculateOtherFeeDetails(validationOtherFeeItems, baseAmount, materialAmount, feeFormulaContext);
     otherFeeRows.forEach(({ index }, rowIndex) => {
       const sequence = formatAlphaSequence(rowIndex);
       const detail = otherFeeDetails[rowIndex] || { total: 0, error: "" };
       meta.set(index, { sequence, total: detail.total, error: detail.error });
     });
     return meta;
-  }, [baseAmount, feeFormulaContext, materialAmount, otherFeeRows]);
+  }, [baseAmount, feeFormulaContext, materialAmount, otherFeeRows, validationOtherFeeItems]);
   const visibleSubtotal = useMemo(
     () => isOtherFees
       ? items.reduce((sum, { index }) => sum + (otherFeeRowMeta.get(index)?.total || 0), 0)
@@ -12367,6 +12908,21 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
     if (names.has(name)) names.delete(name);
     else names.add(name);
     onChange(index, { fee_scope_space_names: Array.from(names) });
+  };
+  const startEditingFeeFormula = (key: string, value: string) => {
+    setFeeFormulaDrafts((current) => ({ ...current, [key]: value }));
+  };
+  const changeFeeFormulaDraft = (key: string, value: string) => {
+    setFeeFormulaDrafts((current) => ({ ...current, [key]: value }));
+  };
+  const commitFeeFormulaDraft = (key: string, index: number) => {
+    setFeeFormulaDrafts((current) => {
+      if (!(key in current)) return current;
+      onChange(index, { fee_calc_base: bindStableFeeFormula(current[key], otherFeeItems) as FeeCalcBase });
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
   };
 
   return (
@@ -12392,7 +12948,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                     <FeeFormulaHelp />
                   </span>
                 </th>
-                <th className="h-11 w-24 border border-surface-200 py-0 text-center">金额/比例</th>
+                <th className="h-11 w-32 border border-surface-200 py-0 text-center">金额/比例</th>
                 <th className="h-11 w-44 border border-surface-200 py-0 text-center">计费范围</th>
                 <th className="h-11 w-44 border border-surface-200 py-0 text-center">公式</th>
               </>
@@ -12422,6 +12978,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
             const feeMeta = otherFeeRowMeta.get(index);
             const feeTotal = isOtherFees ? feeMeta?.total || 0 : getItemTotal(item, baseAmount, materialAmount, feeFormulaContext);
             const feeBaseError = isOtherFees ? feeMeta?.error || "" : "";
+            const displayItem = feeFormulaDrafts[itemKey] !== undefined ? { ...item, fee_calc_base: feeFormulaDrafts[itemKey] } : item;
             return (
               <tr
                 key={itemKey}
@@ -12484,28 +13041,33 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
 	                    <td className="border border-surface-200 py-0" style={cellStyle}>
 	                      <div className="flex min-h-[34px] items-center">
 	                        <input
-	                          value={feeMethod === "fixed" ? "" : String(item.fee_calc_base ?? "")}
-	                          onChange={(event) => onChange(index, { fee_calc_base: event.target.value as FeeCalcBase })}
-	                          disabled={readOnly || feeMethod === "fixed"}
+	                          value={feeMethod === "fixed" ? "" : feeMethod === "area_unit" ? "房屋面积" : feeFormulaDrafts[itemKey] ?? formatStableFeeFormula(item.fee_calc_base, otherFeeItems)}
+	                          onFocus={() => startEditingFeeFormula(itemKey, formatStableFeeFormula(item.fee_calc_base, otherFeeItems))}
+	                          onChange={(event) => changeFeeFormulaDraft(itemKey, event.target.value)}
+	                          onBlur={() => commitFeeFormulaDraft(itemKey, index)}
+	                          disabled={readOnly || feeMethod === "fixed" || feeMethod === "area_unit"}
 	                          onKeyDown={handleQuoteCellKeyDown}
 	                          aria-invalid={!!feeBaseError}
 	                          className={`quote-cell-editable quote-cell-input min-w-0 flex-1 text-center disabled:text-surface-300 ${feeBaseError ? "bg-red-50 text-red-700 ring-1 ring-inset ring-red-400" : ""}`}
-	                          placeholder={feeMethod === "fixed" ? "" : "如 直接费 或 A+B"}
-	                          title={feeBaseError || (feeMethod === "fixed" ? "" : "可输入 直接费、基装、产品、A+B、(直接费+A) 等")}
+	                          placeholder={feeMethod === "fixed" ? "" : feeMethod === "area_unit" ? "房屋面积" : "如 直接费 或 A+B"}
+	                          title={feeBaseError || (feeMethod === "fixed" ? "" : feeMethod === "area_unit" ? "按当前报价房屋面积计算" : "可输入 直接费、基装、产品、A+B、(直接费+A) 等")}
 	                        />
 	                      </div>
                         {feeBaseError && <div className="px-3 pb-1 text-xs font-medium text-red-600">{feeBaseError}</div>}
 	                    </td>
                     <td className="border border-surface-200 py-0" style={cellStyle}>
-                      <QuoteNumberInput
-                        value={feeMethod === "percent" ? item.fee_rate || 0 : item.unit_price}
-                        onChange={(value) => {
-                          onChange(index, feeMethod === "percent" ? { fee_rate: value, quantity: 1 } : { unit_price: value, quantity: 1 });
-                        }}
-	                        disabled={readOnly || feeMethod === "reference"}
-	                        emptyWhenDisabled={feeMethod === "reference"}
-	                        className="w-24 text-center font-semibold text-red-600"
-	                      />
+                      <div className="flex min-h-[34px] items-center justify-center gap-1">
+                        <QuoteNumberInput
+                          value={feeMethod === "percent" ? item.fee_rate || 0 : item.unit_price}
+                          onChange={(value) => {
+                            onChange(index, feeMethod === "percent" ? { fee_rate: value, quantity: 1 } : { unit_price: value, quantity: 1 });
+                          }}
+                          disabled={readOnly || feeMethod === "reference"}
+                          emptyWhenDisabled={feeMethod === "reference"}
+                          className="w-20 text-center font-semibold text-red-600"
+                        />
+                        <span className="min-w-10 whitespace-nowrap text-left text-xs font-medium text-surface-500">{feeMethod === "percent" ? "%" : feeMethod === "fixed" ? "元" : feeMethod === "area_unit" ? "元/㎡" : ""}</span>
+                      </div>
                     </td>
 	                    <td className="border border-surface-200 px-2 py-1" style={cellStyle}>
 	                      <FeeScopeSelector
@@ -12520,7 +13082,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
 	                        onToggleName={(name) => toggleFeeScopeName(index, item, name)}
 	                      />
 	                    </td>
-                    <td className={`border border-surface-200 py-1 text-center text-xs font-medium ${feeBaseError ? "text-red-600" : "text-surface-500"}`} style={cellStyle}>{feeBaseError ? "无法计算" : getFeeFormulaText(item)}</td>
+                    <td className={`border border-surface-200 py-1 text-center text-xs font-medium ${feeBaseError ? "text-red-600" : "text-surface-500"}`} style={cellStyle}>{feeBaseError ? "无法计算" : getFeeFormulaText(displayItem, otherFeeItems)}</td>
                   </>
                 ) : (
                   <>

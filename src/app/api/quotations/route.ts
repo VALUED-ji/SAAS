@@ -11,6 +11,7 @@ import {
   normalizeFeeCalcMethod,
   normalizeFeeScopeMode,
   parseFeeScopeValues,
+  remapStableFeeFormulaIds,
   toMoney,
   type FeeFormulaContext,
 } from "@/lib/quotationFeeFormulas";
@@ -313,7 +314,7 @@ function getFeeScopeCategoryLabel(category: unknown) {
   return key;
 }
 
-function buildFeeFormulaContext(items: any[], categories: string[] = []): FeeFormulaContext {
+function buildFeeFormulaContext(items: any[], categories: string[] = [], houseArea = 0): FeeFormulaContext {
   const orderedCategories = orderQuoteCategories([...categories, ...items.map((item) => String(item.category || "").trim())]);
   const mainMaterialAmount = items
     .filter((item) => isMainMaterialCategory(item.category))
@@ -336,6 +337,7 @@ function buildFeeFormulaContext(items: any[], categories: string[] = []): FeeFor
 
   const customCategoryAmount = Object.values(categoryAmounts).reduce((sum, amount) => sum + Number(amount || 0), 0);
   return {
+    houseArea: safeNonNegativeNumber(houseArea),
     mainMaterialAmount,
     directItemAmount: mainMaterialAmount + customCategoryAmount,
     laborAmount,
@@ -354,13 +356,13 @@ function buildFeeFormulaContext(items: any[], categories: string[] = []): FeeFor
   };
 }
 
-function calculate(items: any[], settings: any) {
+function calculate(items: any[], settings: any, houseArea = 0) {
   const baseAmount = items.filter((item) => isBaseCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const materialAmount = items.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const customCategoryAmount = items.filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const directBaseAmount = materialAmount + customCategoryAmount;
   const otherItems = items.filter((item) => isOtherCategory(item.category));
-  const feeFormulaContext = buildFeeFormulaContext(items, settings.quoteCategories);
+  const feeFormulaContext = buildFeeFormulaContext(items, settings.quoteCategories, houseArea);
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, directBaseAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
   const directAmount = baseAmount + directBaseAmount + otherAmount;
   const taxRate = Number(settings.taxRate || 0);
@@ -382,7 +384,7 @@ function parseQuotationSettings(value: unknown) {
   }
 }
 
-function calculateQuotationRecordCostSummary(items: any[], settingsValue: unknown) {
+function calculateQuotationRecordCostSummary(items: any[], settingsValue: unknown, houseArea = 0) {
   const settings = parseQuotationSettings(settingsValue);
   const quoteCategories = Array.isArray(settings.quoteCategories)
     ? settings.quoteCategories.map((category: unknown) => String(category || "").trim()).filter(Boolean)
@@ -392,7 +394,7 @@ function calculateQuotationRecordCostSummary(items: any[], settingsValue: unknow
   const customDirectAmount = items.filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const directBaseAmount = mainMaterialAmount + customDirectAmount;
   const otherItems = items.filter((item) => isOtherCategory(item.category));
-  const feeFormulaContext = buildFeeFormulaContext(items, quoteCategories);
+  const feeFormulaContext = buildFeeFormulaContext(items, quoteCategories, houseArea);
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, directBaseAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
   return {
     base_amount: toMoney(baseAmount),
@@ -463,6 +465,7 @@ function buildTemplateQuotationItems(template: any) {
       const method = normalizeFeeCalcMethod(fee?.fee_calc_method);
       const fixedAmount = safeNonNegativeNumber(fee?.unit_price);
       rows.push({
+        template_fee_id: String(fee?.id || "").trim(),
         category: "other",
         space: null,
         name,
@@ -472,13 +475,13 @@ function buildTemplateQuotationItems(template: any) {
         unit: "项",
         quantity: 1,
         unit_price: method === "percent" || method === "reference" ? 0 : fixedAmount,
-        total_price: method === "percent" || method === "reference" ? 0 : fixedAmount,
+        total_price: method === "percent" || method === "reference" || method === "area_unit" ? 0 : fixedAmount,
         material_cost: 0,
         labor_cost: 0,
         profit_margin: 0,
         row_color: null,
         fee_calc_method: method,
-        fee_calc_base: method === "fixed" ? null : normalizeFeeCalcBase(fee?.fee_calc_base) || "直接费",
+        fee_calc_base: method === "fixed" ? null : method === "area_unit" ? "房屋面积" : normalizeFeeCalcBase(fee?.fee_calc_base) || "直接费",
         fee_rate: method === "percent" ? safeNonNegativeNumber(fee?.fee_rate) : null,
         fee_scope_mode: normalizeFeeScopeMode(fee?.fee_scope_mode),
         fee_scope_space_ids: parseFeeScopeValues(fee?.fee_scope_space_ids),
@@ -540,12 +543,12 @@ function buildPackagePricingQuotationItem(template: any, area: number, sortOrder
   };
 }
 
-function applyOtherFeeTotals(items: any[], settings: any) {
+function applyOtherFeeTotals(items: any[], settings: any, houseArea = 0) {
   const baseAmount = items.filter((item) => isBaseCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const materialAmount = items.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const customCategoryAmount = items.filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const directBaseAmount = materialAmount + customCategoryAmount;
-  const feeFormulaContext = buildFeeFormulaContext(items, settings.quoteCategories);
+  const feeFormulaContext = buildFeeFormulaContext(items, settings.quoteCategories, houseArea);
   const otherTotals = calculateOtherFeeTotals(items.filter((item) => isOtherCategory(item.category)), baseAmount, directBaseAmount, feeFormulaContext);
   let otherIndex = 0;
   return items.map((item) => {
@@ -774,12 +777,18 @@ export async function GET(req: NextRequest) {
 
   const normalizedList = list.map((quotation) => {
     const settings = settingsByQuotation.get(String(quotation.id || "")) || {};
+    const currentItems = itemsByQuotation.get(String(quotation.id || "")) || [];
     const quotaTemplateId = String(settings.quotaTemplateId || "").trim();
     const quotaTemplateName = String(settings.quotaTemplateName || templateNameById.get(quotaTemplateId) || "").trim();
+    const quoteSpaces = uniqueValues([
+      ...(Array.isArray(settings.quoteSpaces) ? settings.quoteSpaces : []),
+      ...currentItems.filter((item) => !isOtherCategory(item.category)).map((item) => String(item.space || "").trim()),
+    ]);
     return {
 	      ...quotation,
 	      quota_template_id: quotaTemplateId,
 	      quota_template_name: quotaTemplateName,
+	      quote_spaces: quoteSpaces,
 	      quotation_type: getQuotationType(quotation, settings),
 	      designer_name: designerByCustomer.get(String(quotation.customer_id || "")) || "",
       customer_created_from_quotation: quotationCreatedCustomerIds.has(String(quotation.customer_id || "")) ? 1 : 0,
@@ -791,8 +800,8 @@ export async function GET(req: NextRequest) {
       latest_change_user_name: latestChangeByQuotation.get(String(quotation.id || ""))?.user_name || null,
       latest_change_summary: latestChangeByQuotation.get(String(quotation.id || ""))?.summary || null,
       latest_change_count: latestChangeByQuotation.get(String(quotation.id || ""))?.change_count || 0,
-      item_count: itemsByQuotation.get(String(quotation.id || ""))?.length || 0,
-      ...calculateQuotationRecordCostSummary(itemsByQuotation.get(String(quotation.id || "")) || [], quotation.settings),
+      item_count: currentItems.length,
+      ...calculateQuotationRecordCostSummary(currentItems, quotation.settings, quotation.customer_area_size ?? quotation.project_area),
     };
   });
   return NextResponse.json(normalizedList);
@@ -919,6 +928,18 @@ export async function POST(req: NextRequest) {
         ...templateItems.map((item, index) => ({ ...item, sort_order: index + 2 })),
       ]
       : templateItems;
+    const templateFeeIdToQuotationItemId = new Map<string, string>();
+    const identifiedTemplateItems = pricedTemplateItems.map((item) => {
+      const id = makeId("QITEM");
+      const templateFeeId = String((item as any).template_fee_id || "").trim();
+      if (templateFeeId) templateFeeIdToQuotationItemId.set(templateFeeId, id);
+      return { ...item, id };
+    });
+    identifiedTemplateItems.forEach((item) => {
+      if (isOtherCategory(item.category) && item.fee_calc_base) {
+        item.fee_calc_base = remapStableFeeFormulaIds(item.fee_calc_base, templateFeeIdToQuotationItemId);
+      }
+    });
     const templateSpaces = getTemplateSpaceNames(body.template);
 	    const templateCategories = orderQuoteCategories(pricedTemplateItems.map((item) => String(item.category || "").trim()));
 	    const templateAppendixNote = String(body.template?.appendixNote || body.template?.quotationNote || "").trim();
@@ -974,8 +995,8 @@ export async function POST(req: NextRequest) {
       } : undefined,
       signatureLabels: normalizeQuotationSignatureLabels(branchPrintSettings.quotationSignatureLabels),
     };
-    const normalizedTemplateItems = applyOtherFeeTotals(pricedTemplateItems, settings);
-    const totals = calculate(normalizedTemplateItems, settings);
+    const normalizedTemplateItems = applyOtherFeeTotals(identifiedTemplateItems, settings, templatePricingArea);
+    const totals = calculate(normalizedTemplateItems, settings, templatePricingArea);
     const tx = (db as any).transaction(() => {
       db.prepare(`
 	        INSERT INTO quotations (
@@ -1017,7 +1038,7 @@ export async function POST(req: NextRequest) {
         `);
         normalizedTemplateItems.forEach((item) => {
           insertItem.run(
-            makeId("QITEM"),
+            item.id,
             quotationId,
             item.category,
             item.space || null,

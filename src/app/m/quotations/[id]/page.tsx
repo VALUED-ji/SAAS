@@ -4,6 +4,7 @@ import { api } from "@/lib/api";
 import {
   calculateOtherFeeDetails,
   feeCalcMethodLabels,
+  formatStableFeeFormula,
   getFeeBaseLabel,
   getFeeFormulaText,
   normalizeFeeCalcMethod,
@@ -37,6 +38,7 @@ type QuotationDetail = {
   project_name?: string | null;
   project_address?: string | null;
   project_area?: number | null;
+  customer_area_size?: number | null;
   creator_name?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
@@ -157,7 +159,7 @@ function orderedCategories(items: QuotationItem[], configured: string[] = []) {
   return [...builtIn, ...(values.some((value) => getCategoryKey(value) === "other") ? ["other"] : [])];
 }
 
-function buildFeeContext(items: QuotationItem[], categories: string[]): FeeFormulaContext {
+function buildFeeContext(items: QuotationItem[], categories: string[], houseArea = 0): FeeFormulaContext {
   const mainMaterialAmount = items.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => sum + directItemTotal(item), 0);
   const categoryAmounts: Record<string, number> = {};
   categories.filter((category) => getCategoryKey(category) === "custom_cabinet").forEach((category) => { categoryAmounts[categoryLabel(category)] = 0; });
@@ -167,6 +169,7 @@ function buildFeeContext(items: QuotationItem[], categories: string[]): FeeFormu
     categoryAmounts[label] = toMoney(toNumber(categoryAmounts[label]) + directItemTotal(item));
   });
   return {
+    houseArea,
     mainMaterialAmount,
     directItemAmount: mainMaterialAmount + Object.values(categoryAmounts).reduce((sum, amount) => sum + amount, 0),
     laborAmount: items.reduce((sum, item) => sum + baseLaborSubtotal(item), 0),
@@ -232,7 +235,8 @@ export default function MobileQuotationDetailPage() {
 
   const baseAmount = toNumber(data?.totals?.baseAmount);
   const materialAmount = toNumber(data?.totals?.materialAmount);
-  const feeContext = useMemo(() => buildFeeContext(items, categories), [categories, items]);
+  const houseArea = toNumber(data?.customer_area_size ?? data?.project_area);
+  const feeContext = useMemo(() => buildFeeContext(items, categories, houseArea), [categories, houseArea, items]);
   const feeDetails = useMemo(() => calculateOtherFeeDetails(activeItems, baseAmount, materialAmount, feeContext), [activeItems, baseAmount, feeContext, materialAmount]);
   const status = String(data?.status || "DRAFT").toUpperCase();
   const statusLabel = status === "APPROVED" ? "正式报价" : status === "REJECTED" ? "已驳回" : "报价草稿";
@@ -263,7 +267,7 @@ export default function MobileQuotationDetailPage() {
           <div className={styles.sectionHeading}><div><Layers3 /><span><b>{categoryLabel(activeCategory)}明细</b><small>仅查看</small></span></div><strong>¥{formatMoney(isOtherCategory(activeCategory) ? data.totals?.otherAmount : activeItems.reduce((sum, item) => sum + directItemTotal(item), 0))}</strong></div>
           {isOtherCategory(activeCategory) ? <div className={styles.feeList}>{activeItems.map((item, index) => {
             const method = normalizeFeeCalcMethod(item.fee_calc_method);
-            const formula = getFeeFormulaText(item) || (method === "reference" ? getFeeBaseLabel(item.fee_calc_base) : "固定金额");
+            const formula = getFeeFormulaText(item, activeItems) || (method === "reference" ? getFeeBaseLabel(formatStableFeeFormula(item.fee_calc_base, activeItems)) : "固定金额");
             return <article className={styles.feeRow} key={item.id || `${item.name}-${index}`}><div><span>{String.fromCharCode(65 + index)}</span><b>{item.name || "未命名费用"}</b><small>{feeCalcMethodLabels[method]} · {formula}</small></div><strong>¥{formatMoney(feeDetails[index]?.total)}</strong></article>;
           })}</div> : <div className={styles.spaceList}>{spaceGroups.map(([space, rows]) => {
             const expanded = expandedSpaces.has(space);

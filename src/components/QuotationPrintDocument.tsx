@@ -75,6 +75,7 @@ export type PrintableQuotationDetail = {
   project_name?: string | null;
   project_address?: string | null;
   project_area?: number | null;
+  customer_area_size?: number | null;
   customer_name?: string | null;
   customer_phone?: string | null;
   customer_address?: string | null;
@@ -299,9 +300,9 @@ function getDiscountableItems(items: PrintableQuotationItem[], settings?: Printa
   return items.filter((item) => !isExcludedFromDiscount(item, settings));
 }
 
-function getDiscountScopeOptions(items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }): DiscountScopeOption[] {
+function getDiscountScopeOptions(items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }, houseArea = 0): DiscountScopeOption[] {
   const discountableItems = getDiscountableItems(items, settings);
-  const feeContext = buildFeeFormulaContext(discountableItems, settings?.quoteCategories);
+  const feeContext = buildFeeFormulaContext(discountableItems, settings?.quoteCategories, houseArea);
   const customCategoryOptions = Object.entries(feeContext.categoryAmounts || {}).map(([label, amount]) => ({
     value: `category:${label}`,
     label,
@@ -400,20 +401,20 @@ function getDiscountRuleValue(rule: DiscountRule) {
   return rule.scope || "total";
 }
 
-function getDiscountRuleScope(rule: DiscountRule, items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }) {
+function getDiscountRuleScope(rule: DiscountRule, items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }, houseArea = 0) {
   const options = rule.type === "space"
     ? getDiscountSpaceOptions(items, settings)
     : rule.type === "work_type"
       ? getDiscountWorkTypeOptions(items, settings)
-      : getDiscountScopeOptions(items, settings, totals);
+      : getDiscountScopeOptions(items, settings, totals, houseArea);
   const value = getDiscountRuleValue(rule);
   return options.find((option) => option.value === value)
     || options.find((option) => option.value === "total")
     || options[0];
 }
 
-function getDiscountRuleAmount(rule: DiscountRule, items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }) {
-  const scope = getDiscountRuleScope(rule, items, settings, totals);
+function getDiscountRuleAmount(rule: DiscountRule, items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }, houseArea = 0) {
+  const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
   const scopeAmount = Math.max(0, toNumber(scope?.amount));
   const excludedAmount = Math.min(scopeAmount, Math.max(0, toNumber(settings?.excludeSpecificDiscountAmount)));
   const baseAmount = Math.max(0, scopeAmount - excludedAmount);
@@ -422,11 +423,11 @@ function getDiscountRuleAmount(rule: DiscountRule, items: PrintableQuotationItem
   return toMoney(Math.min(Math.max(0, toNumber(rule.discount)), baseAmount));
 }
 
-function getDiscountRuleRows(items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }) {
+function getDiscountRuleRows(items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }, houseArea = 0) {
   return getDiscountRules(settings)
     .map((rule) => {
-      const scope = getDiscountRuleScope(rule, items, settings, totals);
-      const amount = getDiscountRuleAmount(rule, items, settings, totals);
+      const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
+      const amount = getDiscountRuleAmount(rule, items, settings, totals, houseArea);
       const label = scope?.label || (rule.type === "space" ? rule.space : rule.type === "work_type" ? rule.workType : getDiscountScopeLabelByValue(rule.scope || "total")) || "优惠对象";
       const rateText = `${(toNumber(rule.rate || 1) * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
       const discountRateText = `${((1 - toNumber(rule.rate || 1)) * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
@@ -464,7 +465,7 @@ function buildCostComposition(items: PrintableQuotationItem[]) {
   };
 }
 
-function buildFeeFormulaContext(items: PrintableQuotationItem[], categories: string[] = []): FeeFormulaContext {
+function buildFeeFormulaContext(items: PrintableQuotationItem[], categories: string[] = [], houseArea = 0): FeeFormulaContext {
   const orderedCategories = orderQuoteCategories([...categories, ...items.map((item) => item.category)]);
   const mainMaterialAmount = items
     .filter((item) => getCategoryKey(item.category) === "main_material")
@@ -492,6 +493,7 @@ function buildFeeFormulaContext(items: PrintableQuotationItem[], categories: str
 
   const customCategoryAmount = Object.values(categoryAmounts).reduce((sum, amount) => sum + toNumber(amount), 0);
   return {
+    houseArea,
     mainMaterialAmount,
     directItemAmount: mainMaterialAmount + customCategoryAmount,
     laborAmount,
@@ -523,17 +525,17 @@ function getOtherFeeRuleDisplay(item: PrintableQuotationItem, total: number, con
   return remark ? `${remark}；${rule}` : rule;
 }
 
-function calculateQuotationTotals(items: PrintableQuotationItem[], settings?: PrintableQuotationSettings): Totals {
+function calculateQuotationTotals(items: PrintableQuotationItem[], settings?: PrintableQuotationSettings, houseArea = 0): Totals {
   const baseAmount = items.filter((item) => isBaseCategory(item.category)).reduce((sum, item) => sum + getItemTotal(item), 0);
   const mainMaterialAmount = items.filter((item) => getCategoryKey(item.category) === "main_material").reduce((sum, item) => sum + getItemTotal(item), 0);
   const customCategoryAmount = items.filter((item) => !isBaseCategory(item.category) && !isOtherCategory(item.category) && getCategoryKey(item.category) !== "main_material").reduce((sum, item) => sum + getItemTotal(item), 0);
   const materialAmount = mainMaterialAmount + customCategoryAmount;
   const otherItems = items.filter((item) => isOtherCategory(item.category));
-  const feeFormulaContext = buildFeeFormulaContext(items, settings?.quoteCategories);
+  const feeFormulaContext = buildFeeFormulaContext(items, settings?.quoteCategories, houseArea);
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
   const directAmount = baseAmount + materialAmount + otherAmount;
   const managementFee = 0;
-  const discountRuleRows = getDiscountRuleRows(items, settings, { otherAmount });
+  const discountRuleRows = getDiscountRuleRows(items, settings, { otherAmount }, houseArea);
   const ruleDiscount = discountRuleRows.reduce((sum, row) => toMoney(sum + row.amount), 0);
   const discount = Math.min(directAmount, Math.max(0, discountRuleRows.length > 0 ? ruleDiscount : toNumber(settings?.discount)));
   const taxAmount = Math.max(0, directAmount - discount) * toNumber(settings?.taxRate) / 100;
@@ -1187,7 +1189,7 @@ function CustomCabinetDetailsTable({ items, settings }: { items: PrintableQuotat
   );
 }
 
-function OtherFeesTable({ items, allItems, totals, settings }: { items: PrintableQuotationItem[]; allItems: PrintableQuotationItem[]; totals: Totals; settings?: PrintableQuotationSettings }) {
+function OtherFeesTable({ items, allItems, totals, settings, houseArea = 0 }: { items: PrintableQuotationItem[]; allItems: PrintableQuotationItem[]; totals: Totals; settings?: PrintableQuotationSettings; houseArea?: number }) {
   const otherFeeTotals = calculateOtherFeeTotals(items, totals.baseAmount, totals.materialAmount, totals.feeFormulaContext);
   const engineeringDirectAmount = toMoney(totals.baseAmount + totals.materialAmount);
   const hasProductDirectAmount = toNumber(totals.materialAmount) > 0;
@@ -1197,7 +1199,7 @@ function OtherFeesTable({ items, allItems, totals, settings }: { items: Printabl
     : `基装直接费 ${formatPrintAmount(totals.baseAmount)} = ${formatPrintAmount(engineeringDirectAmount)}`;
   const otherAmount = otherFeeTotals.reduce((sum, amount) => toMoney(sum + amount), 0);
   const hasDiscount = totals.discount > 0;
-  const discountRows = getDiscountRuleRows(allItems, settings, { otherAmount });
+  const discountRows = getDiscountRuleRows(allItems, settings, { otherAmount }, houseArea);
   const fallbackDiscountRows = hasDiscount && discountRows.length === 0
     ? [{
         id: "legacy",
@@ -1261,7 +1263,7 @@ function OtherFeesTable({ items, allItems, totals, settings }: { items: Printabl
               <tr key={item.id || `other-${index}`} style={printRowStyle(item.row_color)}>
                 <td className="text-center">{formatAlphaSequence(index + 1)}</td>
                 <td className="quotation-print-item-name">{text(item.name)}</td>
-                <td>{getFeeFormulaText(item)}</td>
+                <td>{getFeeFormulaText(item, items, 1)}</td>
                 <td className="text-right font-semibold text-surface-950">
                   {formatPrintAmount(otherFeeTotals[index] || 0)}
                 </td>
@@ -1375,7 +1377,8 @@ export function QuotationPrintDocument({
       items: normalizedItems.filter((item) => getCategoryKey(item.category) === getCategoryKey(category)),
     }))
     .filter((group) => group.items.length > 0);
-  const totals = calculateQuotationTotals(normalizedItems, settings);
+  const houseArea = toNumber(quotation?.customer_area_size ?? quotation?.project_area);
+  const totals = calculateQuotationTotals(normalizedItems, settings, houseArea);
   const costComposition = buildCostComposition(normalizedItems);
   const targetUrl = shareUrl || "";
   const [qrTargetUrl, setQrTargetUrl] = useState("");
@@ -1468,7 +1471,7 @@ export function QuotationPrintDocument({
 
           {shouldShowFees && (
             <Section title="综合费用和总费用" className={shouldSplitAllSections ? "quotation-print-section-new-page" : ""}>
-              <OtherFeesTable items={otherItems} allItems={items} totals={totals} settings={settings} />
+              <OtherFeesTable items={otherItems} allItems={items} totals={totals} settings={settings} houseArea={houseArea} />
             </Section>
           )}
           {shouldShowAppendixNote && <AppendixNoteBlock parts={appendixNoteParts} />}

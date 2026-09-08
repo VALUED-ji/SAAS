@@ -508,9 +508,9 @@ function getDiscountableItems(items: ExportItem[], settings: any) {
   return items.filter((item) => !isExcludedFromDiscount(item, settings));
 }
 
-function getDiscountScopeOptions(items: ExportItem[], settings: any, totals: { otherAmount: number }): DiscountScopeOption[] {
+function getDiscountScopeOptions(items: ExportItem[], settings: any, totals: { otherAmount: number }, houseArea = 0): DiscountScopeOption[] {
   const discountableItems = getDiscountableItems(items, settings);
-  const feeContext = buildFeeFormulaContext(discountableItems, settings?.quoteCategories);
+  const feeContext = buildFeeFormulaContext(discountableItems, settings?.quoteCategories, houseArea);
   const customCategoryOptions = Object.entries(feeContext.categoryAmounts || {}).map(([label, amount]) => ({
     value: `category:${label}`,
     label,
@@ -609,20 +609,20 @@ function getDiscountRuleValue(rule: DiscountRule) {
   return rule.scope || "total";
 }
 
-function getDiscountRuleScope(rule: DiscountRule, items: ExportItem[], settings: any, totals: { otherAmount: number }) {
+function getDiscountRuleScope(rule: DiscountRule, items: ExportItem[], settings: any, totals: { otherAmount: number }, houseArea = 0) {
   const options = rule.type === "space"
     ? getDiscountSpaceOptions(items, settings)
     : rule.type === "work_type"
       ? getDiscountWorkTypeOptions(items, settings)
-      : getDiscountScopeOptions(items, settings, totals);
+      : getDiscountScopeOptions(items, settings, totals, houseArea);
   const value = getDiscountRuleValue(rule);
   return options.find((option) => option.value === value)
     || options.find((option) => option.value === "total")
     || options[0];
 }
 
-function getDiscountRuleAmount(rule: DiscountRule, items: ExportItem[], settings: any, totals: { otherAmount: number }) {
-  const scope = getDiscountRuleScope(rule, items, settings, totals);
+function getDiscountRuleAmount(rule: DiscountRule, items: ExportItem[], settings: any, totals: { otherAmount: number }, houseArea = 0) {
+  const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
   const scopeAmount = Math.max(0, toNumber(scope?.amount));
   const excludedAmount = Math.min(scopeAmount, Math.max(0, toNumber(settings?.excludeSpecificDiscountAmount)));
   const baseAmount = Math.max(0, scopeAmount - excludedAmount);
@@ -631,11 +631,11 @@ function getDiscountRuleAmount(rule: DiscountRule, items: ExportItem[], settings
   return roundMoney(Math.min(Math.max(0, toNumber(rule.discount)), baseAmount));
 }
 
-function getDiscountRuleRows(items: ExportItem[], settings: any, totals: { otherAmount: number }) {
+function getDiscountRuleRows(items: ExportItem[], settings: any, totals: { otherAmount: number }, houseArea = 0) {
   return getDiscountRules(settings)
     .map((rule) => {
-      const scope = getDiscountRuleScope(rule, items, settings, totals);
-      const amount = getDiscountRuleAmount(rule, items, settings, totals);
+      const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
+      const amount = getDiscountRuleAmount(rule, items, settings, totals, houseArea);
       const label = scope?.label || (rule.type === "space" ? rule.space : rule.type === "work_type" ? rule.workType : getDiscountScopeLabelByValue(rule.scope || "total")) || "优惠对象";
       const rateText = `${(toNumber(rule.rate || 1) * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
       const discountRateText = `${((1 - toNumber(rule.rate || 1)) * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
@@ -673,7 +673,7 @@ function buildCostComposition(items: ExportItem[]) {
   };
 }
 
-function buildFeeFormulaContext(items: ExportItem[], categories: string[] = []): FeeFormulaContext {
+function buildFeeFormulaContext(items: ExportItem[], categories: string[] = [], houseArea = 0): FeeFormulaContext {
   const orderedCategories = orderQuoteCategories([...categories, ...items.map((item) => item.category)]);
   const mainMaterialAmount = items
     .filter((item) => isMainMaterialCategory(item.category))
@@ -701,6 +701,7 @@ function buildFeeFormulaContext(items: ExportItem[], categories: string[] = []):
 
   const customCategoryAmount = Object.values(categoryAmounts).reduce((sum, amount) => sum + toNumber(amount), 0);
   return {
+    houseArea,
     mainMaterialAmount,
     directItemAmount: mainMaterialAmount + customCategoryAmount,
     laborAmount,
@@ -1338,6 +1339,7 @@ function addOtherFeeSection(
   taxAmount: number,
   finalAmount: number,
   settings: any,
+  houseArea = 0,
 ) {
   let rowNumber = startRow;
   addSectionTitle(sheet, rowNumber, "综合费用和总费用");
@@ -1371,7 +1373,7 @@ function addOtherFeeSection(
     finalFormulaParts.push("- 优惠");
     finalRuleParts.push(`- 优惠 ${formatExportAmount(discount)}`);
   }
-  const discountRows = getDiscountRuleRows(allItems, settings, { otherAmount });
+  const discountRows = getDiscountRuleRows(allItems, settings, { otherAmount }, houseArea);
   const fallbackDiscountRows = discount > 0 && discountRows.length === 0
     ? [{
         id: "legacy",
@@ -1419,7 +1421,7 @@ function addOtherFeeSection(
   items.forEach((item, index) => {
     const total = otherFeeTotals[index] || 0;
     const ruleText = getOtherFeeRuleDisplay(item, total, feeFormulaContext);
-    addFeeRow([formatAlphaSequence(index + 1), item.name || "", getFeeFormulaText(item), total, ruleText], { rowColor: item.row_color });
+    addFeeRow([formatAlphaSequence(index + 1), item.name || "", getFeeFormulaText(item, items, 1), total, ruleText], { rowColor: item.row_color });
   });
 
   fallbackDiscountRows.forEach((row, index) => {
@@ -1846,6 +1848,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
 	    SELECT q.*, company.name as company_name, p.name as project_name, p.address as project_address, p.area as project_area,
       c.id as customer_id,
       COALESCE(c.name, q.temp_customer_name) as customer_name,
+      COALESCE(c.area_size, q.temp_customer_area, p.area) as customer_area_size,
       COALESCE(c.phone, q.temp_customer_phone) as customer_phone,
       COALESCE(c.address, q.temp_customer_address) as customer_address,
       COALESCE(c.house_address, q.temp_customer_house_address) as customer_house_address,
@@ -1905,10 +1908,11 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   const baseAmount = baseItems.reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const mainMaterialAmount = items.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const materialAmount = materialGroups.reduce((sum, group) => sum + group.items.reduce((groupSum, item) => groupSum + getBaseOrMaterialItemTotal(item), 0), 0);
-  const feeFormulaContext = buildFeeFormulaContext(items, quoteCategories);
+  const quotationHouseArea = toNumber(quotation.customer_area_size ?? quotation.project_area);
+  const feeFormulaContext = buildFeeFormulaContext(items, quoteCategories, quotationHouseArea);
   const otherFeeTotals = calculateOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext);
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
-  const discountRows = getDiscountRuleRows(items, rawSettings, { otherAmount });
+  const discountRows = getDiscountRuleRows(items, rawSettings, { otherAmount }, quotationHouseArea);
   const discount = discountRows.length > 0
     ? Math.min(baseAmount + materialAmount + otherAmount, discountRows.reduce((sum, row) => roundMoney(sum + row.amount), 0))
     : Number(rawSettings.discount || quotation.discount || 0);
@@ -1981,7 +1985,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
           : addMaterialSection(sheet, rowNumber, group.items, rawSettings.quoteSpaces, `${group.label}明细`);
       });
     if (isAllDetailScope || exportScope === "fees") {
-      rowNumber = addOtherFeeSection(sheet, rowNumber, otherItems, items, baseAmount, materialAmount, feeFormulaContext, otherFeeTotals, discount, taxAmount, finalAmount, rawSettings);
+      rowNumber = addOtherFeeSection(sheet, rowNumber, otherItems, items, baseAmount, materialAmount, feeFormulaContext, otherFeeTotals, discount, taxAmount, finalAmount, rawSettings, quotationHouseArea);
     }
   }
   if (outputMode !== "composition" && appendixNote && (exportScope === "all" || exportScope === "all_without_cover" || exportScope === "fees")) {

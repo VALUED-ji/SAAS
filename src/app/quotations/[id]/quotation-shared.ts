@@ -1,7 +1,7 @@
 // 报价详情页共享工具模块
 // 存放报价编辑表格与页面主体共用的类型与纯计算函数。
 
-import type { FeeCalcBase, FeeCalcMethod } from "@/lib/quotationFeeFormulas";
+import type { FeeCalcBase, FeeCalcMethod, FeeScopeMode } from "@/lib/quotationFeeFormulas";
 
 export type QuotationItem = {
   id?: string;
@@ -34,7 +34,7 @@ export type QuotationItem = {
   fee_calc_method?: FeeCalcMethod;
   fee_calc_base?: FeeCalcBase;
   fee_rate?: number;
-  fee_scope_mode?: "all" | "include" | "exclude";
+  fee_scope_mode?: FeeScopeMode;
   fee_scope_space_ids?: string[];
   fee_scope_space_names?: string[];
 };

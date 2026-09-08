@@ -7,10 +7,14 @@ import DataPagination, { useDataPagination } from "@/components/ui/DataPaginatio
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
 import { useAuth } from "@/lib/auth";
 import {
+  bindStableFeeFormula,
   feeCalcMethodLabels,
+  formatStableFeeFormula,
   getFeeCalcBaseError,
+  getStableFeeReferenceIds,
   normalizeFeeCalcBase,
   normalizeFeeCalcMethod,
+  remapStableFeeFormulaIds,
   type FeeCalcMethod,
   type FeeScopeMode,
 } from "@/lib/quotationFeeFormulas";
@@ -311,6 +315,7 @@ export default function QuotaTemplatesPage() {
   const [spaceAutoSaveStatus, setSpaceAutoSaveStatus] = useState<SpaceAutoSaveStatus>("idle");
   const [templateSaveStatus, setTemplateSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [numberInputDrafts, setNumberInputDrafts] = useState<Record<string, string>>({});
+  const [feeFormulaDrafts, setFeeFormulaDrafts] = useState<Record<string, string>>({});
   const templatesRef = useRef<QuotaTemplate[]>(initialTemplates);
   const pointerSpaceDragRef = useRef<{ sourceId: string; startX: number; startY: number; moved: boolean; targetId: string | null; position: ItemDropPosition } | null>(null);
   const pointerProjectGroupDragRef = useRef<PointerProjectGroupDragState>(null);
@@ -336,6 +341,15 @@ export default function QuotaTemplatesPage() {
       // 本地缓存保底，避免网络瞬断时编辑内容丢失。
     });
   }, []);
+
+  const persistTemplates = useCallback((nextTemplates: QuotaTemplate[]) => {
+    templatesRef.current = nextTemplates;
+    setTemplates(nextTemplates);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(QUOTA_TEMPLATE_STORAGE_KEY, JSON.stringify(nextTemplates));
+    }
+    saveTemplatesToServer(nextTemplates);
+  }, [saveTemplatesToServer]);
 
   const makeBranchTemplateScope = useCallback((branchId: string, source?: QuotaTemplateAutoScope | null): QuotaTemplateAutoScope | null => {
     const branch = templateScopeOptions.find((option) => option.id === branchId);
@@ -548,8 +562,7 @@ export default function QuotaTemplatesPage() {
   useEffect(() => {
     if (!templatesLoaded) return;
     window.localStorage.setItem(QUOTA_TEMPLATE_STORAGE_KEY, JSON.stringify(templates));
-    saveTemplatesToServer(templates);
-  }, [saveTemplatesToServer, templates, templatesLoaded]);
+  }, [templates, templatesLoaded]);
 
   useEffect(() => {
     templatesRef.current = templates;
@@ -561,6 +574,7 @@ export default function QuotaTemplatesPage() {
 
   useEffect(() => {
     setNumberInputDrafts({});
+    setFeeFormulaDrafts({});
   }, [editingTemplate?.id]);
 
   useEffect(() => {
@@ -687,9 +701,17 @@ export default function QuotaTemplatesPage() {
   const templateFeeFormulaContext = buildTemplateFeeFormulaContext(templateProjectGroups);
   const templateFormulaFeeItems = buildTemplateFormulaFeeItems(editingTemplate?.comprehensiveFees || []);
   const templateFeeBaseErrors = (editingTemplate?.comprehensiveFees || []).map((fee, feeIndex) => (
-    normalizeFeeCalcMethod(fee.fee_calc_method) === "fixed"
+    normalizeFeeCalcMethod(fee.fee_calc_method) === "fixed" || normalizeFeeCalcMethod(fee.fee_calc_method) === "area_unit"
       ? ""
-      : getFeeCalcBaseError(fee.fee_calc_base, 0, 0, {}, templateFeeFormulaContext, templateFormulaFeeItems, feeIndex)
+      : getFeeCalcBaseError(
+        feeFormulaDrafts[fee.id] ?? fee.fee_calc_base,
+        0,
+        0,
+        {},
+        templateFeeFormulaContext,
+        templateFormulaFeeItems.map((item, index) => index === feeIndex ? { ...item, fee_calc_base: feeFormulaDrafts[fee.id] ?? item.fee_calc_base } : item),
+        feeIndex,
+      )
   ));
   const getTemplateNumberInputProps = (fieldKey: string, value: number, onValueChange: (value: number) => void) => {
     const currentValue = numberInputDrafts[fieldKey] ?? formatTemplateNumberInputValue(value);
@@ -765,6 +787,7 @@ export default function QuotaTemplatesPage() {
       } else if (typeof window !== "undefined") {
         window.localStorage.setItem(QUOTA_TEMPLATE_STORAGE_KEY, JSON.stringify(nextTemplates));
       }
+      saveTemplatesToServer(nextTemplates);
       return;
     }
 
@@ -774,7 +797,7 @@ export default function QuotaTemplatesPage() {
     } else {
       clearTemplateDraftFromStorage();
     }
-  }, []);
+  }, [saveTemplatesToServer]);
 
   const openCreateTemplate = () => {
     const draftTemplate = loadTemplateDraftFromStorage();
@@ -811,6 +834,9 @@ export default function QuotaTemplatesPage() {
 
   const buildCopiedTemplate = (template: QuotaTemplate, name: string): QuotaTemplate => {
     const copySeed = Date.now();
+    const copiedFeeIdBySourceId = new Map(template.comprehensiveFees.map((fee, feeIndex) => (
+      [fee.id, `fee-copy-${copySeed}-${feeIndex}`]
+    )));
     return {
       ...template,
       id: `${template.id}-copy-${copySeed}`,
@@ -818,7 +844,11 @@ export default function QuotaTemplatesPage() {
       status: "enabled",
       createdByName: currentCreatorName,
       autoScope: normalizeEditableTemplateScope(template),
-      comprehensiveFees: template.comprehensiveFees.map((fee, feeIndex) => ({ ...fee, id: `fee-copy-${copySeed}-${feeIndex}` })),
+      comprehensiveFees: template.comprehensiveFees.map((fee) => ({
+        ...fee,
+        id: copiedFeeIdBySourceId.get(fee.id) || fee.id,
+        fee_calc_base: remapStableFeeFormulaIds(fee.fee_calc_base, copiedFeeIdBySourceId),
+      })),
       spaces: template.spaces.map((space, spaceIndex) => ({
         ...space,
         id: `space-copy-${copySeed}-${spaceIndex}`,
@@ -832,7 +862,7 @@ export default function QuotaTemplatesPage() {
   const handleCopyTemplate = (template: QuotaTemplate) => {
     if (!window.confirm(`确认复制模板“${template.name}”吗？\n复制后会生成一份新的模板副本。`)) return;
     const copyTemplate = buildCopiedTemplate(template, `${template.name} 副本`);
-    setTemplates((current) => [copyTemplate, ...current]);
+    persistTemplates([copyTemplate, ...templatesRef.current]);
     setSelectedId(copyTemplate.id);
   };
 
@@ -841,10 +871,11 @@ export default function QuotaTemplatesPage() {
     const actionText = nextStatus === "disabled" ? "停用" : "启用";
     if (!window.confirm(`确认${actionText}模板“${template.name}”吗？`)) return;
     const nextUpdatedAt = todayText();
-    setTemplates((current) => current.map((currentTemplate) => currentTemplate.id === template.id
+    const nextTemplates = templatesRef.current.map((currentTemplate) => currentTemplate.id === template.id
       ? { ...currentTemplate, status: nextStatus, updatedAt: nextUpdatedAt }
       : currentTemplate
-    ));
+    );
+    persistTemplates(nextTemplates);
     if (editingTemplate?.id === template.id) {
       setEditingTemplate({ ...editingTemplate, status: nextStatus, updatedAt: nextUpdatedAt });
     }
@@ -852,7 +883,7 @@ export default function QuotaTemplatesPage() {
 
   const handleDeleteTemplate = (template: QuotaTemplate) => {
     if (!window.confirm(`确认删除模板“${template.name}”吗？`)) return;
-    setTemplates((current) => current.filter((currentTemplate) => currentTemplate.id !== template.id));
+    persistTemplates(templatesRef.current.filter((currentTemplate) => currentTemplate.id !== template.id));
     if (selectedId === template.id) setSelectedId("");
     if (editingTemplate?.id === template.id) {
       setEditingTemplate(null);
@@ -1109,12 +1140,40 @@ export default function QuotaTemplatesPage() {
         return {
           ...nextFee,
           fee_calc_method: method,
-          fee_calc_base: method === "fixed" ? "" : normalizeFeeCalcBase(nextFee.fee_calc_base),
+          fee_calc_base: method === "fixed" ? "" : method === "area_unit" ? "房屋面积" : normalizeFeeCalcBase(nextFee.fee_calc_base),
           fee_rate: method === "percent" ? toAmount(nextFee.fee_rate) : 0,
-          unit_price: method === "fixed" ? toAmount(nextFee.unit_price) : 0,
+          unit_price: method === "fixed" || method === "area_unit" ? toAmount(nextFee.unit_price) : 0,
         };
       }),
     } : current);
+  };
+
+  const updateComprehensiveFeeFormula = (feeId: string, displayFormula: string) => {
+    setEditingTemplate((current) => current ? {
+      ...current,
+      comprehensiveFees: current.comprehensiveFees.map((fee) => fee.id === feeId ? {
+        ...fee,
+        fee_calc_base: bindStableFeeFormula(displayFormula, current.comprehensiveFees),
+      } : fee),
+    } : current);
+  };
+
+  const startEditingComprehensiveFeeFormula = (feeId: string, displayFormula: string) => {
+    setFeeFormulaDrafts((current) => ({ ...current, [feeId]: displayFormula }));
+  };
+
+  const changeComprehensiveFeeFormulaDraft = (feeId: string, value: string) => {
+    setFeeFormulaDrafts((current) => ({ ...current, [feeId]: value }));
+  };
+
+  const commitComprehensiveFeeFormulaDraft = (feeId: string) => {
+    setFeeFormulaDrafts((current) => {
+      if (!(feeId in current)) return current;
+      updateComprehensiveFeeFormula(feeId, current[feeId]);
+      const next = { ...current };
+      delete next[feeId];
+      return next;
+    });
   };
 
   const toggleComprehensiveFeeScopeName = (feeId: string, name: string) => {
@@ -1133,6 +1192,13 @@ export default function QuotaTemplatesPage() {
   };
 
   const removeComprehensiveFee = (feeId: string) => {
+    const referencedBy = (editingTemplate?.comprehensiveFees || [])
+      .filter((fee) => fee.id !== feeId && getStableFeeReferenceIds(fee.fee_calc_base).includes(feeId))
+      .map((fee) => fee.name || "未命名费用");
+    if (referencedBy.length > 0) {
+      window.alert(`该费用正在被“${referencedBy.join("、")}”的公式引用，请先修改引用公式。`);
+      return;
+    }
     setEditingTemplate((current) => current ? {
       ...current,
       comprehensiveFees: current.comprehensiveFees.filter((fee) => fee.id !== feeId),
@@ -1913,9 +1979,9 @@ export default function QuotaTemplatesPage() {
           ...fee,
           name: fee.name.trim(),
           fee_calc_method: normalizeFeeCalcMethod(fee.fee_calc_method),
-          fee_calc_base: normalizeFeeCalcMethod(fee.fee_calc_method) === "fixed" ? "" : normalizeFeeCalcBase(fee.fee_calc_base),
+          fee_calc_base: normalizeFeeCalcMethod(fee.fee_calc_method) === "fixed" ? "" : normalizeFeeCalcMethod(fee.fee_calc_method) === "area_unit" ? "房屋面积" : normalizeFeeCalcBase(fee.fee_calc_base),
           fee_rate: normalizeFeeCalcMethod(fee.fee_calc_method) === "percent" ? toAmount(fee.fee_rate) : 0,
-          unit_price: normalizeFeeCalcMethod(fee.fee_calc_method) === "fixed" ? toAmount(fee.unit_price) : 0,
+          unit_price: normalizeFeeCalcMethod(fee.fee_calc_method) === "fixed" || normalizeFeeCalcMethod(fee.fee_calc_method) === "area_unit" ? toAmount(fee.unit_price) : 0,
           remark: fee.remark.trim(),
 	          fee_scope_mode: (fee.fee_scope_mode === "include" || fee.fee_scope_mode === "exclude" ? fee.fee_scope_mode : "all") as FeeScopeMode,
           fee_scope_space_names: Array.from(new Set((fee.fee_scope_space_names || []).map((name) => name.trim()).filter(Boolean))),
@@ -1949,10 +2015,10 @@ export default function QuotaTemplatesPage() {
       updatedAt: todayText(),
     };
     setTemplateSaveStatus("saving");
-    setTemplates((current) => current.some((template) => template.id === nextTemplate.id)
-      ? current.map((template) => template.id === nextTemplate.id ? nextTemplate : template)
-      : [nextTemplate, ...current]
-    );
+    const nextTemplates = templatesRef.current.some((template) => template.id === nextTemplate.id)
+      ? templatesRef.current.map((template) => template.id === nextTemplate.id ? nextTemplate : template)
+      : [nextTemplate, ...templatesRef.current];
+    persistTemplates(nextTemplates);
     setSelectedId(nextTemplate.id);
     if (editingMode === "create") clearTemplateDraftFromStorage();
     if (spaceAutoSaveTimerRef.current) window.clearTimeout(spaceAutoSaveTimerRef.current);
@@ -2976,6 +3042,7 @@ export default function QuotaTemplatesPage() {
                               const dropBefore = dragOverFee?.id === fee.id && dragOverFee.position === "before";
                               const dropAfter = dragOverFee?.id === fee.id && dragOverFee.position === "after";
                               const recentlyMoved = recentlyMovedFeeId === fee.id;
+                              const displayFee = feeFormulaDrafts[fee.id] !== undefined ? { ...fee, fee_calc_base: feeFormulaDrafts[fee.id] } : fee;
                               return (
                                 <tr
                                   key={fee.id}
@@ -3014,13 +3081,15 @@ export default function QuotaTemplatesPage() {
                                   </td>
                                   <td className="px-2 py-2">
                                     <input
-                                      value={feeMethod === "fixed" ? "" : String(fee.fee_calc_base ?? "")}
-                                      onChange={(event) => updateComprehensiveFee(fee.id, { fee_calc_base: event.target.value })}
-                                      disabled={feeMethod === "fixed"}
+                                      value={feeMethod === "fixed" ? "" : feeMethod === "area_unit" ? "房屋面积" : feeFormulaDrafts[fee.id] ?? formatStableFeeFormula(fee.fee_calc_base, editingTemplate.comprehensiveFees)}
+                                      onFocus={() => startEditingComprehensiveFeeFormula(fee.id, formatStableFeeFormula(fee.fee_calc_base, editingTemplate.comprehensiveFees))}
+                                      onChange={(event) => changeComprehensiveFeeFormulaDraft(fee.id, event.target.value)}
+                                      onBlur={() => commitComprehensiveFeeFormulaDraft(fee.id)}
+                                      disabled={feeMethod === "fixed" || feeMethod === "area_unit"}
                                       aria-invalid={!!feeBaseError}
                                       className={`quota-template-fee-plain-field input-field h-8 w-full py-1 text-xs font-medium leading-5 text-surface-500 disabled:text-surface-300 ${feeBaseError ? "border-red-300 bg-red-50 text-red-700 ring-1 ring-inset ring-red-300 focus:border-red-400 focus:ring-red-100" : ""}`}
-                                      placeholder={feeMethod === "fixed" ? "" : templateFeeFormulaPlaceholder}
-                                      title={feeBaseError || (feeMethod === "fixed" ? "" : `可输入 ${templateFeeFormulaExampleText} 等`)}
+                                      placeholder={feeMethod === "fixed" ? "" : feeMethod === "area_unit" ? "房屋面积" : templateFeeFormulaPlaceholder}
+                                      title={feeBaseError || (feeMethod === "fixed" ? "" : feeMethod === "area_unit" ? "按当前报价房屋面积计算" : `可输入 ${templateFeeFormulaExampleText} 等`)}
                                     />
                                     {feeBaseError && <div className="mt-1 text-xs font-medium text-red-600">{feeBaseError}</div>}
                                   </td>
@@ -3037,7 +3106,7 @@ export default function QuotaTemplatesPage() {
                                         )}
                                         className="quota-template-fee-plain-field input-field h-8 w-16 py-1 text-right text-xs font-medium leading-5 tabular-nums text-surface-500 disabled:text-surface-300"
                                       />
-                                      <span className="w-4 text-xs font-medium leading-5 text-surface-500">{feeMethod === "percent" ? "%" : feeMethod === "fixed" ? "元" : ""}</span>
+                                      <span className="min-w-10 whitespace-nowrap text-left text-xs font-medium leading-5 text-surface-500">{feeMethod === "percent" ? "%" : feeMethod === "fixed" ? "元" : feeMethod === "area_unit" ? "元/㎡" : ""}</span>
                                     </div>
                                   </td>
                                   <td className="px-2 py-2">
@@ -3052,7 +3121,7 @@ export default function QuotaTemplatesPage() {
                                       onToggleName={(name) => toggleComprehensiveFeeScopeName(fee.id, name)}
                                     />
                                   </td>
-                                  <td className={`px-3 py-2 text-xs font-medium leading-5 ${feeBaseError ? "text-red-600" : "text-surface-500"}`}>{feeBaseError ? "无法计算" : getTemplateFeeRulePreview(fee)}</td>
+                                  <td className={`px-3 py-2 text-xs font-medium leading-5 ${feeBaseError ? "text-red-600" : "text-surface-500"}`}>{feeBaseError ? "无法计算" : getTemplateFeeRulePreview(displayFee, editingTemplate.comprehensiveFees)}</td>
                                   <td className="px-2 py-2">
                                     <input
                                       value={fee.remark}

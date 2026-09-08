@@ -5,7 +5,7 @@ export const QUOTA_TEMPLATE_STORAGE_KEY = "zxgj_quota_templates";
 
 import { toPricingAmount, type PackageQuoteConfigInput } from "@/lib/quotaTemplatePricing";
 import { normalizeQuotaTemplateAutoScope, type QuotaTemplateAutoScope } from "@/lib/quotaTemplateScope";
-import { normalizeFeeScopeMode, parseFeeScopeValues, type FeeScopeMode } from "@/lib/quotationFeeFormulas";
+import { bindStableFeeFormula, normalizeFeeScopeMode, parseFeeScopeValues, type FeeScopeMode } from "@/lib/quotationFeeFormulas";
 
 export type QuotaTemplateSpaceQuota = {
   id: string;
@@ -194,7 +194,7 @@ export function normalizeQuotaTemplate(value: any): QuotaTemplateOption | null {
         : [],
     })).filter((space: QuotaTemplateSpace) => space.name)
     : [];
-  const comprehensiveFees = Array.isArray(value.comprehensiveFees)
+  const normalizedComprehensiveFees = Array.isArray(value.comprehensiveFees)
     ? value.comprehensiveFees.map((fee: any, feeIndex: number): QuotaTemplateComprehensiveFee => ({
       id: String(fee?.id || `fee-${feeIndex}`),
       name: String(fee?.name || "").trim(),
@@ -208,6 +208,12 @@ export function normalizeQuotaTemplate(value: any): QuotaTemplateOption | null {
       fee_scope_space_names: parseFeeScopeValues(fee?.fee_scope_space_names),
     })).filter((fee: QuotaTemplateComprehensiveFee) => fee.name)
     : [];
+  const comprehensiveFees = normalizedComprehensiveFees.map((fee: QuotaTemplateComprehensiveFee) => ({
+    ...fee,
+    fee_calc_base: fee.fee_calc_method === "fixed"
+      ? ""
+      : bindStableFeeFormula(fee.fee_calc_base, normalizedComprehensiveFees),
+  }));
   const projectGroups = Array.isArray(value.projectGroups)
     ? value.projectGroups
       .map((group: any) => ({
