@@ -5,6 +5,7 @@ import {
   downloadQuotaImportTemplate,
   readExcelFileAsImportText,
   DEFAULT_QUOTA_SCOPE,
+  DEFAULT_PRICE_SCENE,
   FALLBACK_STORE_SCOPES,
   COMMON_QUOTA_UNITS,
   quotaImportHeaders,
@@ -33,8 +34,8 @@ import type {
 
 
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronDown, Coins, Copy, Download, Pencil, Percent, Plus, Search, SlidersHorizontal, Trash2, Upload, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, Coins, Copy, Download, HelpCircle, History, Pencil, Percent, Plus, Search, SlidersHorizontal, Trash2, Upload, X } from "lucide-react";
 import DataPagination, { useDataPagination } from "@/components/ui/DataPagination";
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
 import { useAuth } from "@/lib/auth";
@@ -52,6 +53,23 @@ import {
   CustomQuotaPromoteDialog,
 } from "./custom-quota-panel";
 
+type QuotaChangeLog = {
+  id: string;
+  quotaItemId: string;
+  userName: string;
+  action: "created" | "updated" | "deleted" | string;
+  summary: string;
+  changes: Array<{
+    field: string;
+    label: string;
+    before: string | number;
+    after: string | number;
+  }>;
+  createdAt: string;
+};
+
+const ADD_PRICE_SCENE_OPTION = "__add_price_scene__";
+
 export default function QuotaLibraryPage() {
   const { user } = useAuth();
   const [libraryMode, setLibraryMode] = useState<"standard" | "custom">("standard");
@@ -64,6 +82,7 @@ export default function QuotaLibraryPage() {
   const [search, setSearch] = useState("");
   const [storeFilter, setStoreFilter] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
+  const [priceSceneFilter, setPriceSceneFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<"" | QuotaItem["status"]>("enabled");
   const [selectedQuotaIds, setSelectedQuotaIds] = useState<string[]>([]);
   const [editingItem, setEditingItem] = useState<QuotaItem | null>(null);
@@ -76,9 +95,15 @@ export default function QuotaLibraryPage() {
   const [importErrors, setImportErrors] = useState<QuotaImportError[]>([]);
   const [importScope, setImportScope] = useState("");
   const [unitOptionsOpen, setUnitOptionsOpen] = useState(false);
+  const [priceSceneHelpOpen, setPriceSceneHelpOpen] = useState(false);
   const [focusedPriceField, setFocusedPriceField] = useState<"laborPrice" | "materialPrice" | "internalLaborCost" | "internalMaterialCost" | "costLossRate" | null>(null);
   const [notice, setNotice] = useState("");
   const [promoteConfirm, setPromoteConfirm] = useState<PromoteConfirmState | null>(null);
+  const [historyItem, setHistoryItem] = useState<QuotaItem | null>(null);
+  const [historyLogs, setHistoryLogs] = useState<QuotaChangeLog[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const priceSceneFieldRef = useRef<HTMLDivElement | null>(null);
 
   const saveQuotaItemsToServer = useCallback((nextItems: QuotaItem[]) => {
     fetch("/api/quota/library", {
@@ -99,9 +124,21 @@ export default function QuotaLibraryPage() {
   useEffect(() => {
     if (!editingItem) {
       setUnitOptionsOpen(false);
+      setPriceSceneHelpOpen(false);
       setFocusedPriceField(null);
     }
   }, [editingItem]);
+
+  useEffect(() => {
+    if (!priceSceneHelpOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && priceSceneFieldRef.current?.contains(target)) return;
+      setPriceSceneHelpOpen(false);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [priceSceneHelpOpen]);
 
   useEffect(() => {
     fetch("/api/org")
@@ -238,23 +275,45 @@ export default function QuotaLibraryPage() {
   }, [quotaItems, quotaItemsLoaded, saveQuotaItemsToServer]);
   const storeFilterOptions = storeScopeOptions;
   const importTargetScope = currentUserStore?.name?.trim() || importScope.trim();
-  const categories = useMemo(() => Array.from(new Set(quotaItems.map((item) => item.category))), [quotaItems]);
+  const storeScopedQuotaItems = useMemo(() => {
+    if (!storeFilter) return quotaItems;
+    return quotaItems.filter((item) => (item.scope?.trim() || DEFAULT_QUOTA_SCOPE) === storeFilter);
+  }, [quotaItems, storeFilter]);
+  const categories = useMemo(() => (
+    Array.from(new Set(storeScopedQuotaItems.map((item) => item.category).filter(Boolean)))
+  ), [storeScopedQuotaItems]);
+  const priceSceneOptions = useMemo(() => (
+    Array.from(new Set(storeScopedQuotaItems.map((item) => item.priceScene || DEFAULT_PRICE_SCENE).filter(Boolean)))
+      .sort((a, b) => a.localeCompare(b, "zh-CN"))
+  ), [storeScopedQuotaItems]);
+  useEffect(() => {
+    if (categoryFilter && !categories.includes(categoryFilter)) {
+      setCategoryFilter("");
+    }
+  }, [categories, categoryFilter]);
+  useEffect(() => {
+    if (priceSceneFilter && !priceSceneOptions.includes(priceSceneFilter)) {
+      setPriceSceneFilter("");
+    }
+  }, [priceSceneFilter, priceSceneOptions]);
   const filteredItems = useMemo(() => {
     const keyword = search.trim().toLowerCase();
     return quotaItems.filter((item) => {
       const itemScope = item.scope?.trim() || DEFAULT_QUOTA_SCOPE;
+      const itemPriceScene = item.priceScene || DEFAULT_PRICE_SCENE;
       const specialPriceText = item.isSpecialPrice ? "特价" : "常规";
-      const matchesKeyword = !keyword || [item.code, itemScope, item.category, item.workTypeName || "", item.materialCategoryName || "", item.name, item.constructionDescription, item.unit, specialPriceText].some((value) => value.toLowerCase().includes(keyword));
+      const matchesKeyword = !keyword || [item.code, itemScope, itemPriceScene, item.category, item.workTypeName || "", item.materialCategoryName || "", item.name, item.constructionDescription, item.unit, specialPriceText].some((value) => value.toLowerCase().includes(keyword));
       const matchesStore = !storeFilter || itemScope === storeFilter;
       const matchesCategory = !categoryFilter || item.category === categoryFilter;
+      const matchesPriceScene = !priceSceneFilter || itemPriceScene === priceSceneFilter;
       const matchesStatus = !statusFilter || item.status === statusFilter;
-      return matchesKeyword && matchesStore && matchesCategory && matchesStatus;
+      return matchesKeyword && matchesStore && matchesCategory && matchesPriceScene && matchesStatus;
     });
-  }, [categoryFilter, quotaItems, search, statusFilter, storeFilter]);
+  }, [categoryFilter, priceSceneFilter, quotaItems, search, statusFilter, storeFilter]);
   const importPreviewData = useMemo(() => buildQuotaImportPreviewData(importText), [importText]);
   const importPreviewHeaders = importPreviewData.headers;
   const importPreviewRows = importPreviewData.rows;
-  const pagination = useDataPagination(filteredItems, [search, storeFilter, categoryFilter, statusFilter].join("|"));
+  const pagination = useDataPagination(filteredItems, [search, storeFilter, categoryFilter, priceSceneFilter, statusFilter].join("|"));
   const selectedQuotaIdSet = useMemo(() => new Set(selectedQuotaIds), [selectedQuotaIds]);
   const selectedQuotaItems = useMemo(() => quotaItems.filter((item) => selectedQuotaIdSet.has(item.id)), [quotaItems, selectedQuotaIdSet]);
   const currentPageIds = useMemo(() => pagination.pageItems.map((item) => item.id), [pagination.pageItems]);
@@ -270,6 +329,35 @@ export default function QuotaLibraryPage() {
     scope,
     storeScopeOptions,
   ), [quotaItems, storeScopeOptions]);
+  const editingPriceSceneOptions = useMemo(() => {
+    const editingScope = editingItem?.scope?.trim() || "";
+    const scenes = quotaItems
+      .filter((item) => !editingScope || (item.scope?.trim() || DEFAULT_QUOTA_SCOPE) === editingScope)
+      .map((item) => item.priceScene || DEFAULT_PRICE_SCENE);
+    if (editingItem?.priceScene) scenes.push(editingItem.priceScene);
+    scenes.push(DEFAULT_PRICE_SCENE);
+    return Array.from(new Set(scenes.map((scene) => scene.trim()).filter(Boolean))).sort((a, b) => {
+      if (a === DEFAULT_PRICE_SCENE) return -1;
+      if (b === DEFAULT_PRICE_SCENE) return 1;
+      return a.localeCompare(b, "zh-CN");
+    });
+  }, [editingItem?.priceScene, editingItem?.scope, quotaItems]);
+  const addPriceSceneForEditingItem = (sourceItem: QuotaItem) => {
+    const raw = window.prompt("请输入新的价格类型名称，例如：别墅、土建、局改");
+    if (raw == null) return;
+    const scene = raw.replace(/\s+/g, "").trim();
+    if (!scene) {
+      window.alert("价格类型不能为空");
+      return;
+    }
+    if (!/^[\u4e00-\u9fa5A-Za-z0-9]{2,8}$/.test(scene)) {
+      window.alert("价格类型建议填写 2-8 个字，只支持中文、英文或数字");
+      return;
+    }
+    const matchedScene = editingPriceSceneOptions.find((option) => option === scene);
+    setEditingItem({ ...sourceItem, priceScene: matchedScene || scene });
+    setNotice(matchedScene ? `已选择已有价格类型：${matchedScene}` : `已新增价格类型：${scene}`);
+  };
   const getDefaultCreateScope = () => currentUserStore?.name || storeFilterOptions[0] || "";
   const validateCustomQuotaForPromote = (item: CustomQuotaItem, targetScope: string) => {
     if (isDisallowedQuotaScope(targetScope)) {
@@ -312,6 +400,7 @@ export default function QuotaLibraryPage() {
       id: `quota-promoted-${item.id}-${Date.now()}`,
       code,
       scope: targetScope,
+      priceScene: DEFAULT_PRICE_SCENE,
       category: item.category.trim() || "未分类",
       workTypeId: item.workTypeId || "",
       workTypeName: item.workTypeName || "",
@@ -344,6 +433,7 @@ export default function QuotaLibraryPage() {
     const nextUnit = item.unit.trim();
     const duplicate = quotaItems.find((quota) =>
       quota.scope === targetScope &&
+      (quota.priceScene || DEFAULT_PRICE_SCENE) === DEFAULT_PRICE_SCENE &&
       quota.category === nextCategory &&
       quota.name === nextName &&
       quota.unit === nextUnit
@@ -409,12 +499,14 @@ export default function QuotaLibraryPage() {
       ...item,
       id: `${item.id}-copy-${Date.now()}`,
       code: makeCodeForScope(item.scope),
-      name: `${item.name} 副本`,
+      name: item.name,
+      priceScene: item.priceScene || DEFAULT_PRICE_SCENE,
       status: "enabled" as const,
       updatedAt: todayText(),
     };
-    setQuotaItems((current) => [copyItem, ...current]);
-    setNotice(`已复制定额：${copyItem.name}，新编码 ${copyItem.code}`);
+    setEditMode("create");
+    setEditingItem(copyItem);
+    setNotice("已带入原定额信息，请选择价格类型并调整价格后保存");
   };
   const handleDelete = (item: QuotaItem) => {
     if (!window.confirm(`确认删除定额“${item.name}”吗？`)) return;
@@ -422,6 +514,43 @@ export default function QuotaLibraryPage() {
     setSelectedQuotaIds((current) => current.filter((id) => id !== item.id));
     setNotice(`已删除定额：${item.name}`);
     if (editingItem?.id === item.id) setEditingItem(null);
+  };
+  const openHistoryDialog = async (item: QuotaItem) => {
+    setHistoryItem(item);
+    setHistoryLogs([]);
+    setHistoryError("");
+    setHistoryLoading(true);
+    try {
+      const response = await fetch(`/api/quota/library?historyItemId=${encodeURIComponent(item.id)}`, { cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data?.message || "读取修改记录失败");
+      setHistoryLogs(Array.isArray(data?.logs) ? data.logs : []);
+    } catch (error: any) {
+      setHistoryError(error?.message || "读取修改记录失败");
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+  const formatHistoryTime = (value: string) => {
+    if (!value) return "-";
+    const normalized = value.includes("T") ? value : value.replace(" ", "T");
+    const parsed = new Date(/[zZ]|[+-]\d{2}:?\d{2}$/.test(normalized) ? normalized : `${normalized}Z`);
+    if (Number.isNaN(parsed.getTime())) return value;
+    return parsed.toLocaleString("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  };
+  const getHistoryActionLabel = (action: string) => {
+    if (action === "created") return "新增";
+    if (action === "updated") return "修改";
+    if (action === "deleted") return "删除";
+    return "记录";
   };
   const toggleQuotaSelection = (id: string) => {
     setSelectedQuotaIds((current) => current.includes(id) ? current.filter((currentId) => currentId !== id) : [...current, id]);
@@ -497,6 +626,7 @@ export default function QuotaLibraryPage() {
       code: nextCode,
       category: editingItem.category.trim() || "未分类",
       scope: nextScope,
+      priceScene: editingItem.priceScene.trim() || DEFAULT_PRICE_SCENE,
       name: editingItem.name.trim(),
       constructionDescription: editingItem.constructionDescription.trim(),
       unit: editingItem.unit.trim(),
@@ -509,6 +639,19 @@ export default function QuotaLibraryPage() {
       isSpecialPrice: Boolean(editingItem.isSpecialPrice),
       updatedAt: todayText(),
     };
+    const sameSceneDuplicate = quotaItems.find((item) => (
+      item.id !== nextItem.id &&
+      (item.scope?.trim() || DEFAULT_QUOTA_SCOPE) === nextItem.scope &&
+      (item.priceScene || DEFAULT_PRICE_SCENE) === nextItem.priceScene &&
+      (item.category || "未分类") === nextItem.category &&
+      item.name.trim() === nextItem.name &&
+      item.unit.trim() === nextItem.unit
+    ));
+    if (sameSceneDuplicate && !window.confirm(
+      `当前门店的“${nextItem.priceScene}”价格类型下，已经存在同名同单位定额“${sameSceneDuplicate.name}”。\n\n继续保存会形成两条相同类型的定额，后续添加项目时用户需要自行区分。是否仍然保存？`,
+    )) {
+      return;
+    }
     setQuotaItems((current) => editMode === "create" ? [nextItem, ...current] : current.map((item) => item.id === nextItem.id ? nextItem : item));
     setNotice(editMode === "create" ? `已新增定额：${nextItem.name}` : `已保存定额：${nextItem.name}`);
     setEditingItem(null);
@@ -596,8 +739,8 @@ export default function QuotaLibraryPage() {
   const fillImportExample = () => {
     setImportText([
       quotaImportHeaders.join("\t"),
-      ["泥瓦工程", "墙砖铺贴 300x600", "基层清理后水泥砂浆铺贴并控制空鼓率", "㎡", "52", "10", "38", "7", "3", "否"].join("\t"),
-      ["安装工程", "开关插座安装", "按图纸定位安装并通电测试", "个", "12", "0", "8", "0", "0", "是"].join("\t"),
+      ["标准", "泥瓦工程", "墙砖铺贴 300x600", "基层清理后水泥砂浆铺贴并控制空鼓率", "㎡", "52", "10", "38", "7", "3", "否"].join("\t"),
+      ["别墅", "安装工程", "开关插座安装", "按图纸定位安装并通电测试", "个", "12", "0", "8", "0", "0", "是"].join("\t"),
     ].join("\n"));
     setImportIsExample(true);
     setHasRealImportFile(false);
@@ -674,6 +817,10 @@ export default function QuotaLibraryPage() {
               <option value="">全部分类</option>
               {categories.map((category) => <option key={category} value={category}>{category}</option>)}
             </SystemSelect>
+            <SystemSelect aria-label="按价格类型筛选" value={priceSceneFilter} onChange={(event) => setPriceSceneFilter(event.target.value)} className="input-field h-10 w-36 py-0">
+              <option value="">全部类型</option>
+              {priceSceneOptions.map((scene) => <option key={scene} value={scene}>{scene}</option>)}
+            </SystemSelect>
             <SystemSelect aria-label="按状态筛选" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as "" | QuotaItem["status"])} className="input-field h-10 w-32 py-0">
               <option value="">全部状态</option>
               <option value="enabled">启用</option>
@@ -716,6 +863,7 @@ export default function QuotaLibraryPage() {
                 </th>
                 <th className="px-3 py-3 text-center">定额编码</th>
                 <th className="px-3 py-3 text-center">分类</th>
+                <th className="px-3 py-3 text-center">价格类型</th>
                 <th className="px-3 py-3 text-left">项目名称</th>
                 <th className="px-3 py-3 text-center">单位</th>
                 <th className="px-3 py-3 text-center">人工单价</th>
@@ -730,7 +878,7 @@ export default function QuotaLibraryPage() {
             <tbody>
               {pagination.pageItems.length === 0 ? (
                 <tr className="quota-empty-row">
-                  <td colSpan={12} className="px-4 py-12 text-center">
+                  <td colSpan={13} className="px-4 py-12 text-center">
                     <div className="quota-empty-icon mx-auto flex h-10 w-10 items-center justify-center rounded-[10px]">
                       <Search className="h-4 w-4" />
                     </div>
@@ -751,6 +899,7 @@ export default function QuotaLibraryPage() {
                   </td>
 	                  <td className="quota-code-cell px-3 py-3 text-center">{item.code}</td>
 	                  <td className="quota-category-cell px-3 py-3 text-center">{item.category}</td>
+                  <td className="quota-category-cell px-3 py-3 text-center">{item.priceScene || DEFAULT_PRICE_SCENE}</td>
                   <td className="quota-primary-cell px-3 py-3">
                     <p className="quota-item-name">{item.name}</p>
                   </td>
@@ -778,6 +927,9 @@ export default function QuotaLibraryPage() {
                   </td>
                   <td className="px-3 py-3 text-center">
                     <div className="quota-row-actions inline-flex items-center justify-center gap-1">
+                      <button type="button" onClick={() => openHistoryDialog(item)} className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-surface-200 bg-white text-surface-600 transition hover:border-primary-200 hover:bg-primary-50 hover:text-primary-700" title="查看修改记录">
+                        <History className="h-3.5 w-3.5" />
+                      </button>
                       <button type="button" onClick={() => { setEditMode("edit"); setEditingItem(item); }} className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-surface-200 bg-white text-surface-600 transition hover:border-primary-200 hover:bg-primary-50 hover:text-primary-700" title="编辑定额">
                         <Pencil className="h-3.5 w-3.5" />
                       </button>
@@ -806,9 +958,85 @@ export default function QuotaLibraryPage() {
           materialCategoryOptions={materialCategoryOptions}
         />
       )}
+      {historyItem && (
+        <div className="qm-modal-overlay fixed inset-y-0 left-[var(--active-sidebar-width,260px)] right-0 z-50 flex items-center justify-center px-6 py-7 max-md:inset-0 max-md:px-4">
+          <div role="dialog" aria-modal="true" className="qm-modal-shell quota-history-modal flex w-full max-w-4xl flex-col overflow-hidden border border-surface-200 bg-white">
+            <div className="qm-modal-header flex items-center justify-between border-b border-surface-200 px-5 py-4">
+              <div className="min-w-0">
+                <p className="qm-modal-title text-base font-semibold text-surface-900">修改记录</p>
+                <p className="qm-modal-subtitle mt-0.5 truncate text-xs text-surface-500">{historyItem.code || "未编号"} · {historyItem.name}</p>
+              </div>
+              <button type="button" onClick={() => setHistoryItem(null)} className="qm-icon-button inline-flex h-9 w-9 items-center justify-center text-surface-500 hover:bg-surface-100 hover:text-surface-900" aria-label="关闭">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="qm-modal-body quota-history-body overflow-y-auto bg-white px-5 py-4 text-xs">
+              {historyLoading ? (
+                <div className="flex h-40 items-center justify-center text-surface-500">正在读取修改记录...</div>
+              ) : historyError ? (
+                <div className="flex h-40 items-center justify-center text-red-500">{historyError}</div>
+              ) : historyLogs.length === 0 ? (
+                <div className="flex h-40 flex-col items-center justify-center text-center">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-[10px] bg-surface-100 text-surface-500">
+                    <History className="h-4 w-4" />
+                  </div>
+                  <p className="mt-3 text-sm font-semibold text-surface-800">暂无修改记录</p>
+                  <p className="mt-1 text-xs text-surface-500">后续新增、编辑或删除该定额都会记录在这里</p>
+                </div>
+              ) : (
+                <div className="quota-history-table-wrap overflow-hidden border border-surface-200">
+                  <table className="quota-history-table min-w-full border-separate border-spacing-0 text-xs">
+                    <thead className="bg-surface-100 text-surface-700">
+                      <tr>
+                        <th className="w-40 border-b border-r border-surface-200 px-3 py-3 text-center font-semibold">时间</th>
+                        <th className="w-28 border-b border-r border-surface-200 px-3 py-3 text-center font-semibold">操作人</th>
+                        <th className="w-20 border-b border-r border-surface-200 px-3 py-3 text-center font-semibold">操作</th>
+                        <th className="border-b border-surface-200 px-3 py-3 text-left font-semibold">变更内容</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {historyLogs.map((log) => (
+                        <tr key={log.id} className="bg-white align-middle">
+                          <td className="border-b border-r border-surface-100 px-3 py-3 text-center align-middle tabular-nums text-surface-600">{formatHistoryTime(log.createdAt)}</td>
+                          <td className="border-b border-r border-surface-100 px-3 py-3 text-center align-middle text-surface-700">{log.userName || "-"}</td>
+                          <td className="border-b border-r border-surface-100 px-3 py-3 text-center align-middle">
+                            <span className={log.action === "deleted" ? "font-semibold text-red-600" : log.action === "created" ? "font-semibold text-emerald-700" : "font-semibold text-primary-700"}>
+                              {getHistoryActionLabel(log.action)}
+                            </span>
+                          </td>
+                          <td className="border-b border-surface-100 px-3 py-3 text-surface-700">
+                            <p className="font-semibold text-surface-800">{log.summary || getHistoryActionLabel(log.action)}</p>
+                            {log.changes.length > 0 && (
+                              <div className="mt-2">
+                                {log.changes.map((change) => (
+                                  <div key={`${log.id}-${change.field}`} className="grid grid-cols-[88px_minmax(0,1fr)] gap-2 border-t border-surface-100 px-0 py-2 first:border-t-0 first:pt-0 last:pb-0">
+                                    <span className="font-semibold text-surface-600">{change.label}</span>
+                                    <span className="min-w-0 text-surface-700">
+                                      <span className="break-words text-surface-700">{String(change.before ?? "-")}</span>
+                                      <span className="px-2 text-surface-700">改为</span>
+                                      <span className="break-words text-surface-700">{String(change.after ?? "-")}</span>
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+            <div className="qm-modal-footer flex justify-end gap-2 border-t border-surface-200 px-5 py-4">
+              <button type="button" onClick={() => setHistoryItem(null)} className="btn-secondary">关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
       {editingItem && (
         <div className="qm-modal-overlay quota-custom-editor-overlay fixed inset-y-0 left-[var(--active-sidebar-width,260px)] right-0 z-50 flex items-center justify-center px-6 py-7 max-md:inset-0 max-md:px-4">
-          <div role="dialog" aria-modal="true" className="qm-modal-shell qm-editor-modal quota-editor-redesign flex w-full max-w-5xl flex-col overflow-hidden border border-surface-200 bg-white">
+          <div role="dialog" aria-modal="true" className="qm-modal-shell qm-editor-modal quota-editor-redesign quota-library-editor-modal flex w-full max-w-5xl flex-col overflow-hidden border border-surface-200 bg-white">
             <div className="qm-modal-header quota-editor-header flex items-center justify-between border-b border-surface-200 px-6 py-4">
               <div>
                 <p className="qm-modal-title text-base font-semibold text-surface-900">{editMode === "create" ? "新增定额" : "编辑定额"}</p>
@@ -850,6 +1078,48 @@ export default function QuotaLibraryPage() {
                     </SystemSelect>
                   )}
                 </label>
+                <div ref={priceSceneFieldRef} className="qm-field quota-editor-identity-field quota-price-scene-field">
+                  <span className="flex items-center gap-1.5">
+                    价格类型
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setPriceSceneHelpOpen((open) => !open);
+                      }}
+                      className="quota-price-scene-help-trigger"
+                      aria-label="价格类型说明"
+                      aria-expanded={priceSceneHelpOpen}
+                    >
+                      <HelpCircle className="h-3.5 w-3.5 text-surface-400" />
+                    </button>
+                  </span>
+                  {priceSceneHelpOpen && (
+                    <div className="quota-price-scene-help" role="tooltip">
+                      <p>用于区分同一门店下不同业务的定额价格。</p>
+                      <p>例如同一个拆除项目，标准类型为 100，别墅类型为 120。</p>
+                      <p>模板和报价添加基装定额时，可按价格类型筛选。</p>
+                    </div>
+                  )}
+                  <SystemSelect
+                    value={editingItem.priceScene || DEFAULT_PRICE_SCENE}
+                    onChange={(event) => {
+                      const nextValue = event.target.value;
+                      if (nextValue === ADD_PRICE_SCENE_OPTION) {
+                        addPriceSceneForEditingItem(editingItem);
+                        return;
+                      }
+                      setEditingItem({ ...editingItem, priceScene: nextValue });
+                    }}
+                    className="input-field"
+                  >
+                    {editingPriceSceneOptions.map((scene) => (
+                      <option key={scene} value={scene}>{scene}</option>
+                    ))}
+                    <option value={ADD_PRICE_SCENE_OPTION}>+ 新增价格类型</option>
+                  </SystemSelect>
+                </div>
               </div>
 
               <div className="quota-editor-flow">
@@ -1195,6 +1465,7 @@ export default function QuotaLibraryPage() {
                                 header === "施工说明" ? "w-[42%]"
                                   : header === "项目名称" ? "w-[24%]"
                                     : header === "分类" ? "w-[18%]"
+                                      : header === "价格类型" ? "w-[12%]"
                                       : header === "单位" ? "w-[8%]"
                                         : header.includes("成本") ? "w-[12%]"
                                           : header.includes("单价") ? "w-[10%]"

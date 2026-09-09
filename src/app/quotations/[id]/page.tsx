@@ -78,6 +78,7 @@ type QuotaLibraryItem = {
   scope: string;
   storeName?: string;
   category: string;
+  priceScene: string;
   workTypeId?: string;
   workTypeName?: string;
   materialCategoryId?: string;
@@ -520,6 +521,7 @@ const quoteCategoryCreateOptions = [
 const allSpacesValue = "__ALL_SPACES__";
 const defaultQuoteSpaces: string[] = [];
 const quotaLibraryStorageKey = "zxgj_quota_library_items";
+const budgetRecordReturnStateKey = "quotationBudgetRecordReturnState";
 let clientItemKeySeed = 0;
 
 function formatProjectInfoArea(value: unknown) {
@@ -532,6 +534,22 @@ function authHeaders(): Record<string, string> {
   if (typeof window === "undefined") return {};
   const token = localStorage.getItem("zxgj_token");
   return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function readBudgetRecordReturnState() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(budgetRecordReturnStateKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const quotationId = String(parsed?.quotationId || "").trim();
+    const customerId = String(parsed?.customerId || "").trim();
+    const recordKey = String(parsed?.recordKey || "").trim();
+    if (!quotationId || (!customerId && !recordKey)) return null;
+    return { quotationId, customerId, recordKey };
+  } catch {
+    return null;
+  }
 }
 
 function getCategoryLabel(category: string) {
@@ -631,6 +649,7 @@ function normalizeQuotaLibraryItem(value: unknown): QuotaLibraryItem | null {
     scope: String(raw.scope || "").trim(),
     storeName: String(raw.storeName || raw.store_name || raw.scope || "").trim(),
     category: String(raw.category || "未分类").trim() || "未分类",
+    priceScene: String(raw.priceScene || raw.price_scene || "标准").trim() || "标准",
     workTypeId: String(raw.workTypeId || raw.work_type_id || "").trim(),
     workTypeName: String(raw.workTypeName || raw.work_type_name || "").trim(),
     materialCategoryId: String(raw.materialCategoryId || raw.material_category_id || "").trim(),
@@ -2771,9 +2790,27 @@ export default function QuotationDetailPage() {
 
   const returnToBudgetRecords = async () => {
     await waitForLatestAutoSave();
-    const customerId = String(data?.customer_id || "").trim();
+    let latestQuotation = data;
+    try {
+      const res = await fetch(`/api/quotations/${quotationId}`, { headers: authHeaders() });
+      const payload = await res.json().catch(() => null);
+      if (res.ok && payload) latestQuotation = payload;
+    } catch {
+      // Fall back to the current page state; returning should still work when the detail refresh fails.
+    }
+    const returnTo = searchParams.get("returnTo");
+    const customerIdFromQuery = String(searchParams.get("customerId") || "").trim();
+    const recordKeyFromQuery = String(searchParams.get("recordKey") || "").trim();
+    const savedReturnState = readBudgetRecordReturnState();
+    const savedMatchesCurrentQuotation = savedReturnState?.quotationId === String(quotationId);
+    const customerId = (savedMatchesCurrentQuotation ? savedReturnState?.customerId || "" : "") || (returnTo === "budgetRecords" ? customerIdFromQuery : "") || String(latestQuotation?.customer_id || "").trim();
+    const recordKey = (savedMatchesCurrentQuotation ? savedReturnState?.recordKey || "" : "") || (returnTo === "budgetRecords" ? recordKeyFromQuery : "") || (latestQuotation?.is_unbound ? `unbound:${quotationId}` : customerId);
     if (customerId) {
-      router.push(`/quotations?openRecords=1&refreshRecords=1&customerId=${encodeURIComponent(customerId)}&fromQuotationId=${encodeURIComponent(quotationId)}&t=${Date.now()}`);
+      router.push(`/quotations?openRecords=1&refreshRecords=1&ignoreOrgFilter=1&customerId=${encodeURIComponent(customerId)}&recordKey=${encodeURIComponent(recordKey)}&fromQuotationId=${encodeURIComponent(quotationId)}&t=${Date.now()}`);
+      return;
+    }
+    if (recordKey) {
+      router.push(`/quotations?openRecords=1&refreshRecords=1&ignoreOrgFilter=1&recordKey=${encodeURIComponent(recordKey)}&fromQuotationId=${encodeURIComponent(quotationId)}&t=${Date.now()}`);
       return;
     }
     router.push(`/quotations?refreshRecords=1&fromQuotationId=${encodeURIComponent(quotationId)}&t=${Date.now()}`);
@@ -11445,6 +11482,7 @@ function QuotaLibraryPickerModal({
 }) {
   const [keyword, setKeyword] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [priceSceneFilter, setPriceSceneFilter] = useState("all");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   useEffect(() => {
@@ -11467,21 +11505,27 @@ function QuotaLibraryPickerModal({
     () => uniqueValues(availableItems.map((item) => item.category || "未分类")).sort((a, b) => a.localeCompare(b, "zh-CN")),
     [availableItems],
   );
+  const priceScenes = useMemo(
+    () => uniqueValues(availableItems.map((item) => item.priceScene || "标准")).sort((a, b) => a.localeCompare(b, "zh-CN")),
+    [availableItems],
+  );
   const filteredItems = useMemo(() => {
     const text = keyword.trim().toLowerCase();
     return availableItems.filter((item) => {
       if (categoryFilter !== "all" && item.category !== categoryFilter) return false;
+      if (priceSceneFilter !== "all" && (item.priceScene || "标准") !== priceSceneFilter) return false;
       if (!text) return true;
       return [
         item.code,
         item.scope,
         item.category,
+        item.priceScene || "标准",
         item.name,
         item.constructionDescription,
         item.unit,
       ].join(" ").toLowerCase().includes(text);
     });
-  }, [availableItems, categoryFilter, keyword]);
+  }, [availableItems, categoryFilter, keyword, priceSceneFilter]);
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectedItems = useMemo(() => {
     const itemMap = new Map(availableItems.map((item) => [item.id, item]));
@@ -11493,6 +11537,7 @@ function QuotaLibraryPickerModal({
   );
   const isReplaceMode = mode === "replace";
   const categoryLabel = categoryFilter === "all" ? "全部分类" : categoryFilter;
+  const priceSceneLabel = priceSceneFilter === "all" ? "全部类型" : priceSceneFilter;
   const allFilteredSelected = filteredItems.length > 0 && filteredItems.every((item) => selectedIdSet.has(item.id));
   const shouldUseTallPicker = filteredItems.length > 8;
 
@@ -11550,7 +11595,7 @@ function QuotaLibraryPickerModal({
           </button>
         </div>
 
-        <div className="quote-library-filter-row grid gap-3 border-b border-[#e8eef6] bg-[#f7f9fc] px-5 py-3 md:grid-cols-[minmax(320px,1fr)_220px_auto_auto] md:items-end">
+        <div className="quote-library-filter-row grid gap-3 border-b border-[#e8eef6] bg-[#f7f9fc] px-5 py-3 md:grid-cols-[minmax(280px,1fr)_190px_190px_auto_auto] md:items-end">
           <label className="quote-library-filter-field relative block">
             <span>搜索项目</span>
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#9aa8bb]" />
@@ -11577,6 +11622,21 @@ function QuotaLibraryPickerModal({
               ))}
             </SystemSelect>
           </label>
+          <label className="quote-library-filter-field block">
+            <span>价格类型</span>
+            <SystemSelect
+              value={priceSceneFilter}
+              onChange={(event) => setPriceSceneFilter(event.target.value)}
+              className="quote-library-category-select h-10 rounded-[10px] border border-[#d9e2ef] bg-white px-3 text-sm font-medium text-[#182230] outline-none transition focus:border-[#407AFF] focus:ring-2 focus:ring-[#407AFF]/10"
+              menuClassName="quote-system-select-menu"
+              optionClassName="quote-system-select-option"
+            >
+              <option value="all">全部类型</option>
+              {priceScenes.map((scene) => (
+                <option key={scene} value={scene}>{scene}</option>
+              ))}
+            </SystemSelect>
+          </label>
           {isReplaceMode ? (
             <div className="quote-library-select-all inline-flex h-10 items-center justify-center rounded-[10px] border border-[#e8eef6] bg-white px-4 text-sm font-semibold text-[#6f7f96]">
               单选替换
@@ -11592,7 +11652,7 @@ function QuotaLibraryPickerModal({
             </button>
           )}
           <div className="quote-library-filter-note">
-            <b>{categoryLabel}</b><span>{filteredItems.length} 项</span><span>已选 {selectedItems.length}</span>
+            <b>{categoryLabel} · {priceSceneLabel}</b><span>{filteredItems.length} 项</span><span>已选 {selectedItems.length}</span>
           </div>
         </div>
 
@@ -11609,12 +11669,13 @@ function QuotaLibraryPickerModal({
             </div>
           ) : (
             <div className={`quote-library-table-wrap overflow-auto bg-white ${shouldUseTallPicker ? "h-full" : "max-h-[420px]"}`}>
-              <table className="quote-library-table quote-base-library-table w-full min-w-[1500px] border-separate border-spacing-0 text-sm">
+              <table className="quote-library-table quote-base-library-table w-full min-w-[1600px] border-separate border-spacing-0 text-sm">
                 <thead className="sticky top-0 z-10 bg-[#f4f7fb] text-left text-xs font-semibold text-[#34445a]">
                   <tr>
                     <th className="quote-library-sticky-select w-14 px-3 py-0 text-center whitespace-nowrap">{isReplaceMode ? "替换" : "选择"}</th>
                     <th className="quote-library-sticky-category w-28 px-3 py-0 whitespace-nowrap">分类</th>
                     <th className="quote-library-sticky-name w-80 px-3 py-0 whitespace-nowrap">项目名称</th>
+                    <th className="w-28 px-3 py-0 text-center whitespace-nowrap">价格类型</th>
                     <th className="w-28 px-3 py-0 text-right whitespace-nowrap">材料单价</th>
                     <th className="w-28 px-3 py-0 text-right whitespace-nowrap">人工单价</th>
                     <th className="w-28 px-3 py-0 text-right whitespace-nowrap">总价</th>
@@ -11654,6 +11715,7 @@ function QuotaLibraryPickerModal({
                             </div>
                           </div>
                         </td>
+                        <td className="px-3 py-0 text-center text-[#52647b] whitespace-nowrap">{item.priceScene || "标准"}</td>
                         <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatQuoteAmount(item.materialPrice)}</td>
                         <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatQuoteAmount(item.laborPrice)}</td>
                         <td className="quote-library-total-price px-3 py-0 text-right font-semibold tabular-nums whitespace-nowrap">{formatQuoteAmount(item.totalPrice)}</td>

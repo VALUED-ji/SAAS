@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 
 interface User {
@@ -76,6 +77,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
+  const queryClient = useQueryClient();
   const userRef = useRef<User | null>(null);
   const handlingSessionExpiredRef = useRef(false);
   const lastSessionTouchAtRef = useRef(0);
@@ -92,6 +94,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       handlingSessionExpiredRef.current = true;
       localStorage.removeItem("zxgj_token");
       sessionStorage.setItem(SESSION_EXPIRED_STORAGE_KEY, SESSION_EXPIRED_MESSAGE);
+      queryClient.clear();
       setUser(null);
       originalFetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }).catch(() => undefined);
       const currentPath = redirectPath || `${window.location.pathname}${window.location.search}`;
@@ -143,11 +146,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       document.removeEventListener("visibilitychange", touchSessionAfterActivity);
       window.removeEventListener("app:navigation-start", checkSessionBeforeNavigation);
     };
-  }, [router]);
+  }, [queryClient, router]);
 
   // Restore session on mount
   useEffect(() => {
-    localStorage.removeItem("zxgj_token");
     fetch("/api/auth/me")
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => setUser(data))
@@ -168,20 +170,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = useCallback(async (username: string, password: string) => {
+    queryClient.clear();
     const data = await api.post<{ user: User }>("/api/auth/login", { username, password });
     localStorage.removeItem("zxgj_token");
     handlingSessionExpiredRef.current = false;
     lastSessionTouchAtRef.current = Date.now();
+    queryClient.clear();
     setUser(data.user);
     return data.user;
-  }, []);
+  }, [queryClient]);
 
   const logout = useCallback(async () => {
     await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
     localStorage.removeItem("zxgj_token");
+    queryClient.clear();
     setUser(null);
     router.push("/login");
-  }, [router]);
+  }, [queryClient, router]);
 
   return (
     <AuthContext.Provider value={{ user, loading, login, logout, isAuthenticated: !!user }}>

@@ -7092,7 +7092,7 @@ html body .dashboard-scale-root .admin-config-ui.branch-settings-ui [role="combo
 .quota-management-ui .construction-template-picker {
   border-color: #dfe4ec !important;
   border-radius: 16px !important;
-  box-shadow: 0 12px 34px rgba(15, 23, 42, 0.1) !important;
+  box-shadow: none !important;
 }
 
 .quota-management-ui .construction-template-picker-header,
@@ -8010,7 +8010,7 @@ html body .quotation-index-workbench .quotation-index-primary-button:hover {
 }
 
 html body .quotation-index-workbench .quotation-list-table {
-  min-width: 1420px;
+  min-width: 1574px;
   border-collapse: separate;
   border-spacing: 0;
   background: var(--quote-list-surface) !important;
@@ -15160,6 +15160,75 @@ html body .dashboard-scale-root .quota-management-ui.quota-library-page .qm-moda
   box-shadow: none !important;
 }
 
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-modal,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-modal .qm-modal-header,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-modal .qm-modal-body,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-modal .qm-modal-footer {
+  background: #ffffff !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-modal {
+  max-width: 920px !important;
+  background: #ffffff !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-body {
+  border: 0 !important;
+  padding: 16px 20px !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-modal .qm-modal-header {
+  border-bottom: 0 !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-modal .qm-modal-footer {
+  border-top: 0 !important;
+  box-shadow: none !important;
+  padding-top: 0 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-table-wrap {
+  border: 1px solid #e5e9f0 !important;
+  border-radius: 10px !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-table {
+  color: #344054 !important;
+  font-size: 12px !important;
+  line-height: 18px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-table th {
+  height: 40px !important;
+  border-color: #e5e9f0 !important;
+  background: #f6f8fb !important;
+  color: #475467 !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  line-height: 18px !important;
+  vertical-align: middle !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-table td {
+  min-height: 52px !important;
+  border-color: #eef1f5 !important;
+  background: #ffffff !important;
+  font-size: 12px !important;
+  line-height: 18px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-table td:nth-child(-n+3) {
+  vertical-align: middle !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-history-table tbody tr:last-child td {
+  border-bottom: 0 !important;
+}
+
 html body .dashboard-scale-root .quota-management-ui.quota-library-page .qm-import-actions {
   border-color: var(--quota-library-line) !important;
   padding: 14px 20px !important;
@@ -16798,20 +16867,22 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .constr
   border: 1px solid #dfe4ec !important;
   border-radius: 18px !important;
   background: #ffffff !important;
-  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.14) !important;
+  box-shadow: none !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .construction-template-picker-header {
   min-height: 72px !important;
   padding: 15px 20px !important;
-  border-color: #e5e9f0 !important;
+  border: 0 !important;
   background: #ffffff !important;
+  box-shadow: none !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .construction-template-picker-search {
   padding: 12px 20px !important;
-  border-color: #e5e9f0 !important;
-  background: #f8fafc !important;
+  border: 0 !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .construction-template-picker-search input {
@@ -16827,6 +16898,7 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .constr
   margin: 16px 20px !important;
   border-color: #dfe4ec !important;
   border-radius: 12px !important;
+  background: #ffffff !important;
   box-shadow: none !important;
 }
 
@@ -16848,8 +16920,9 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .constr
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .construction-template-picker-footer {
   min-height: 64px !important;
   padding: 11px 20px !important;
-  border-color: #e5e9f0 !important;
+  border: 0 !important;
   background: #ffffff !important;
+  box-shadow: none !important;
 }
 
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .construction-template-picker-footer button {
@@ -19582,6 +19655,69 @@ html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-
   transform: none !important;
 }
 
+/* Split scrolling for quota template space editor: keep spaces visible while the detail table scrolls. */
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-workbench {
+  height: clamp(560px, calc(100vh - 280px), 780px) !important;
+  min-height: 560px !important;
+  overflow: hidden !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-content,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-main,
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board {
+  min-height: 0 !important;
+  max-height: 100% !important;
+  overflow: hidden !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar {
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar .quota-template-space-toolbar {
+  min-height: 0 !important;
+  flex: 1 1 auto !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  overscroll-behavior: contain !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board {
+  display: flex !important;
+  flex: 1 1 auto !important;
+  flex-direction: column !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board > .overflow-hidden {
+  min-height: 0 !important;
+  flex: 1 1 auto !important;
+  overflow: auto !important;
+  overscroll-behavior: contain !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board > .quota-template-project-scroll {
+  min-height: 0 !important;
+  flex: 1 1 auto !important;
+  overflow: auto !important;
+  overscroll-behavior: contain !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board > .border-t {
+  flex: 0 0 auto !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table thead {
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 2 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table thead th {
+  background: #f8fafc !important;
+}
+
 /* Counts in the template space/project tabs should read as plain numbers. */
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar .quota-template-space-item-count,
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-group-tabs [data-template-project-group-tab] > span {
@@ -19664,4 +19800,163 @@ html body .dashboard-scale-root .fixed .quotation-change-log-modal.quotation-cha
   overflow-y: auto !important;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
+}
+
+/* Standard quota edit dialog: one-piece white modal surface. */
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-header,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-body,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-footer {
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal {
+  border-color: #e5e9f0 !important;
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.14) !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-header {
+  border-bottom: 1px solid #eef1f5 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-footer {
+  border-top: 1px solid #eef1f5 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-body {
+  gap: 0 !important;
+  padding: 0 20px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-context-row {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 12px !important;
+  padding: 18px 0 16px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-flow {
+  gap: 0 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-section,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-cost-section,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-meta-section,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-cost-panel,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .qm-cost-parameter-panel,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .qm-cost-calculator {
+  border-radius: 0 !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-section {
+  border: 0 !important;
+  border-top: 1px solid #eef1f5 !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-section-head {
+  min-height: 46px !important;
+  border-bottom: 0 !important;
+  background: #ffffff !important;
+  padding: 12px 0 8px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-field-grid,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-meta-grid,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-meta-grid-edit {
+  padding: 10px 0 18px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-editor-identity-field {
+  border-color: #e5e9f0 !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .qm-cost-calculator {
+  padding: 10px 0 18px !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .qm-cost-line-field,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .qm-cost-result-panel {
+  border-color: #e5e9f0 !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+html body .system-select-menu button[title="+ 新增价格类型"] {
+  margin-top: 4px !important;
+  border: 1px solid #cfe0ff !important;
+  background: #eef4ff !important;
+  color: #2563eb !important;
+}
+
+html body .system-select-menu button[title="+ 新增价格类型"]:hover,
+html body .system-select-menu button[title="+ 新增价格类型"][data-active="true"] {
+  background: #407aff !important;
+  color: #ffffff !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-price-scene-help-trigger {
+  display: inline-flex;
+  height: 16px;
+  width: 16px;
+  align-items: center;
+  justify-content: center;
+  border: 0 !important;
+  border-radius: 999px !important;
+  background: transparent !important;
+  padding: 0 !important;
+  color: #98a2b3 !important;
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-price-scene-help-trigger:hover,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-price-scene-help-trigger[aria-expanded="true"] {
+  background: #eef4ff !important;
+  color: #407aff !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-price-scene-help-trigger:hover svg,
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-price-scene-help-trigger[aria-expanded="true"] svg {
+  color: #407aff !important;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-price-scene-field {
+  position: relative;
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-price-scene-help {
+  position: absolute;
+  top: 34px;
+  right: 12px;
+  z-index: 20;
+  width: min(300px, calc(100% - 24px));
+  border: 1px solid #cfe0ff;
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 10px 12px;
+  color: #52647b;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  box-shadow: 0 14px 34px rgba(15, 35, 70, 0.16);
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-price-scene-help::before {
+  position: absolute;
+  top: -5px;
+  left: 72px;
+  width: 8px;
+  height: 8px;
+  border-top: 1px solid #cfe0ff;
+  border-left: 1px solid #cfe0ff;
+  background: #ffffff;
+  content: "";
+  transform: rotate(45deg);
+}
+
+html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-library-editor-modal .quota-price-scene-help p + p {
+  margin-top: 2px;
 }

@@ -59,6 +59,7 @@ export type PointerQuotaDragState = {
   quoteScope: TemplateSpaceQuotaScope;
   startX: number;
   startY: number;
+  scrollElement: HTMLElement | null;
   moved: boolean;
   targetQuotaId: string | null;
   position: ItemDropPosition;
@@ -129,6 +130,7 @@ export type TemplateSpaceQuota = {
   quotaId: string;
   code: string;
   category: string;
+  priceScene?: string;
   name: string;
   constructionDescription: string;
   unit: string;
@@ -191,6 +193,7 @@ export type QuotaLibraryItem = {
   code: string;
   scope: string;
   category: string;
+  priceScene: string;
   name: string;
   constructionDescription: string;
   unit: string;
@@ -221,6 +224,7 @@ export const BUILTIN_PROJECT_GROUPS: TemplateProjectGroup[] = [
   { id: "main_material", name: "产品" },
   { id: "custom_cabinet", name: "定制柜" },
 ];
+export const DEFAULT_PRICING_MODE: PricingMode = "list";
 export const quoteTypes: QuoteType[] = ["半包", "全包", "清包"];
 export type TemplateEditMode = "create" | "edit";
 export type SpaceAutoSaveStatus = "idle" | "pending" | "saving" | "saved" | "draft" | "error";
@@ -480,7 +484,12 @@ export function normalizeCombinedAreaPricingTiers(value: any, fallback?: { found
 }
 
 export function makeDefaultQuoteConfig(partial?: Partial<QuoteConfig>): QuoteConfig {
-  const mode: PricingMode = partial?.mode === "area" || partial?.mode === "list" || partial?.mode === "foundation_material_area" ? partial.mode : "package";
+  const mode: PricingMode = partial?.mode === "area"
+    || partial?.mode === "list"
+    || partial?.mode === "foundation_material_area"
+    || partial?.mode === "package"
+    ? partial.mode
+    : DEFAULT_PRICING_MODE;
   const includedArea = toAmount(partial?.includedArea ?? 100);
   const extraAreaPrice = toAmount(partial?.extraAreaPrice ?? 800);
   const areaUnitPrice = toAmount(partial?.areaUnitPrice ?? 1000);
@@ -761,6 +770,7 @@ export function makeQuotaItemFromLibrary(quota: QuotaLibraryItem, quoteScope?: T
     quotaId: quota.id,
     code: quota.code,
     category: quota.category,
+    priceScene: quota.priceScene,
     name: quota.name,
     constructionDescription: quota.constructionDescription,
     unit: quota.unit,
@@ -778,6 +788,7 @@ export function normalizeSpaceQuotaItem(value: any, index: number): TemplateSpac
     quotaId: String(value?.quotaId || value?.quota_id || ""),
     code: String(value?.code || ""),
     category: String(value?.category || ""),
+    priceScene: String(value?.priceScene || value?.price_scene || "标准"),
     name: String(value?.name || value?.quotaName || ""),
     constructionDescription: String(value?.constructionDescription || value?.description || ""),
     unit: String(value?.unit || ""),
@@ -878,6 +889,7 @@ export function loadQuotaLibraryItems() {
           code: String(item.code || ""),
           scope: String(item.scope || ""),
           category: String(item.category || ""),
+          priceScene: String(item.priceScene || item.price_scene || "标准"),
           name: String(item.name || ""),
           constructionDescription: String(item.constructionDescription || ""),
           unit: String(item.unit || ""),

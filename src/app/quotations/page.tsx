@@ -433,6 +433,7 @@ function mergeCustomerSnapshot(customer: any, snapshot: CreateCustomerSnapshot) 
 
 const ENABLE_TEMPORARY_QUOTATION = false;
 const MAX_COMPARE_RECORDS = 4;
+const BUDGET_RECORD_RETURN_STATE_KEY = "quotationBudgetRecordReturnState";
 const recordDecorationTypeOptions = ["全包", "半包", "清包", "局改", "整装"];
 const quotationShareExpireOptions = [
   { label: "24小时", value: "24h", desc: "临时查看" },
@@ -448,13 +449,70 @@ function waitForQuotationSaveCheck(delay = 300) {
 }
 
 function clearQuotationReturnParams(params: URLSearchParams) {
+  params.delete("returnTo");
   params.delete("openRecords");
   params.delete("refreshRecords");
+  params.delete("ignoreOrgFilter");
   params.delete("customerId");
+  params.delete("recordKey");
   params.delete("fromQuotationId");
   params.delete("t");
   const nextQuery = params.toString();
   window.history.replaceState(null, "", nextQuery ? `/quotations?${nextQuery}` : "/quotations");
+}
+
+function saveBudgetRecordReturnState(record: any) {
+  if (typeof window === "undefined") return;
+  const quotationId = String(record?.id || "").trim();
+  if (!quotationId) return;
+  const customerId = String(record?.customer_id || "").trim();
+  const recordKey = record?.is_unbound ? `unbound:${quotationId}` : customerId || String(record?.customer_name || record?.customer_phone || record?.project_id || "").trim();
+  if (!recordKey && !customerId) return;
+  window.sessionStorage.setItem(BUDGET_RECORD_RETURN_STATE_KEY, JSON.stringify({
+    quotationId,
+    customerId,
+    recordKey,
+    at: Date.now(),
+  }));
+}
+
+function readBudgetRecordReturnState() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(BUDGET_RECORD_RETURN_STATE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const quotationId = String(parsed?.quotationId || "").trim();
+    const customerId = String(parsed?.customerId || "").trim();
+    const recordKey = String(parsed?.recordKey || "").trim();
+    const at = Number(parsed?.at || 0);
+    if (at && Date.now() - at > 30 * 60 * 1000) {
+      window.sessionStorage.removeItem(BUDGET_RECORD_RETURN_STATE_KEY);
+      return null;
+    }
+    if (!quotationId || (!customerId && !recordKey)) return null;
+    return { quotationId, customerId, recordKey };
+  } catch {
+    return null;
+  }
+}
+
+function clearBudgetRecordReturnState() {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(BUDGET_RECORD_RETURN_STATE_KEY);
+}
+
+function buildBudgetRecordQuotationHref(record: any) {
+  const quotationId = String(record?.id || "").trim();
+  if (!quotationId) return "/quotations";
+  const customerId = String(record?.customer_id || "").trim();
+  const recordKey = record?.is_unbound ? `unbound:${quotationId}` : customerId || String(record?.customer_name || record?.customer_phone || record?.project_id || "").trim();
+  const params = new URLSearchParams();
+  params.set("returnTo", "budgetRecords");
+  if (customerId) params.set("customerId", customerId);
+  if (recordKey) params.set("recordKey", recordKey);
+  const query = params.toString();
+  return query ? `/quotations/${encodeURIComponent(quotationId)}?${query}` : `/quotations/${encodeURIComponent(quotationId)}`;
 }
 
 function hasBranchQuotaTemplateScope(template: QuotaTemplateOption) {
@@ -557,9 +615,11 @@ export default function QuotationsPage() {
   const openRecordsRequestRef = useRef("");
   const createReturnRecordCustomerKeyRef = useRef("");
   const router = useRouter();
-  const { user } = useAuth();
-  const { data: quotations, isLoading, refetch } = useQuotations(selectedOrgUnitId);
-  const { data: deletedQuotations, refetch: refetchDeletedQuotations } = useDeletedQuotations(selectedOrgUnitId);
+  const { user, loading: authLoading } = useAuth();
+  const quotationViewerKey = user?.id || "";
+  const quotationQueriesEnabled = Boolean(quotationViewerKey);
+  const { data: quotations, isLoading, refetch } = useQuotations(selectedOrgUnitId, quotationViewerKey, quotationQueriesEnabled);
+  const { data: deletedQuotations, refetch: refetchDeletedQuotations } = useDeletedQuotations(selectedOrgUnitId, quotationViewerKey, quotationQueriesEnabled);
   const isTemporaryQuotationMode = ENABLE_TEMPORARY_QUOTATION && createMode === "temporary";
   const isNewCustomerMode = createMode === "new_customer";
 
@@ -1112,12 +1172,16 @@ export default function QuotationsPage() {
     const params = new URLSearchParams(window.location.search);
     const shouldOpenRecords = params.get("openRecords") === "1";
     const shouldRefreshRecords = params.get("refreshRecords") === "1";
-    if (!shouldOpenRecords && !shouldRefreshRecords) return;
-    const fromQuotationId = String(params.get("fromQuotationId") || "").trim();
-    const targetCustomerId = String(params.get("customerId") || "").trim();
+    const savedReturnState = readBudgetRecordReturnState();
+    if (!shouldOpenRecords && !shouldRefreshRecords && !savedReturnState) return;
+    const fromQuotationId = String(params.get("fromQuotationId") || savedReturnState?.quotationId || "").trim();
+    const targetCustomerId = String(params.get("customerId") || savedReturnState?.customerId || "").trim();
+    const targetRecordKey = String(params.get("recordKey") || savedReturnState?.recordKey || "").trim();
+    const ignoreOrgFilter = params.get("ignoreOrgFilter") === "1";
+    const shouldRestoreSavedRecords = !shouldOpenRecords && !shouldRefreshRecords && Boolean(savedReturnState);
     const requestKey = [
-      shouldOpenRecords ? "open" : "refresh",
-      targetCustomerId,
+      shouldOpenRecords || shouldRestoreSavedRecords ? "open" : "refresh",
+      targetCustomerId || targetRecordKey,
       fromQuotationId,
       params.get("t") || "",
     ].join(":");
@@ -1125,20 +1189,36 @@ export default function QuotationsPage() {
       clearQuotationReturnParams(params);
       return;
     }
-    if (shouldOpenRecords && !targetCustomerId) {
+    if ((shouldOpenRecords || shouldRestoreSavedRecords) && !targetCustomerId && !targetRecordKey) {
       clearQuotationReturnParams(params);
       return;
     }
     if (openRecordsRequestRef.current === requestKey) return;
     openRecordsRequestRef.current = requestKey;
+    if ((shouldOpenRecords || shouldRestoreSavedRecords) && ignoreOrgFilter && selectedOrgUnitId) {
+      setSelectedOrgUnitId("");
+      openRecordsRequestRef.current = "";
+      return;
+    }
+    if (shouldOpenRecords || shouldRestoreSavedRecords) {
+      const immediateTargetKey = targetRecordKey || targetCustomerId;
+      if (immediateTargetKey) {
+        setRecordCustomerKey(immediateTargetKey);
+        setShowRecycleBin(false);
+        clearBudgetRecordReturnState();
+        clearQuotationReturnParams(params);
+      }
+    }
 
     let cancelled = false;
     const handleReturnRefresh = async () => {
       let activeRows = quotations || [];
       let deletedRows = deletedQuotations || [];
+      let didRefreshRecords = false;
       if (shouldRefreshRecords) {
         try {
           const [activeResult, deletedResult] = await Promise.all([refetch(), refetchDeletedQuotations()]);
+          didRefreshRecords = true;
           if (Array.isArray(activeResult.data)) activeRows = activeResult.data;
           if (Array.isArray(deletedResult.data)) deletedRows = deletedResult.data;
         } catch {
@@ -1150,17 +1230,25 @@ export default function QuotationsPage() {
       }
       if (cancelled) return;
 
-      if (shouldOpenRecords) {
+      if (shouldOpenRecords || shouldRestoreSavedRecords) {
         const rows = [...activeRows, ...deletedRows];
         const returnedRecord = rows.find((record: any) => String(record?.id || "").trim() === fromQuotationId);
         const matchedCustomerId = String(returnedRecord?.customer_id || "").trim();
-        const targetRecord = rows.find((record: any) => String(record?.customer_id || "").trim() === targetCustomerId);
-        const targetKey = targetRecord ? getCustomerKey(targetRecord) : "";
-        if (targetKey && (!returnedRecord || matchedCustomerId === targetCustomerId)) {
+        const targetRecord = rows.find((record: any) => {
+          const key = getCustomerKey(record);
+          return key === targetRecordKey || String(record?.customer_id || "").trim() === targetCustomerId;
+        });
+        const targetKey = targetRecord ? getCustomerKey(targetRecord) : targetRecordKey || targetCustomerId;
+        if (!targetRecord && isLoading && !didRefreshRecords) {
+          openRecordsRequestRef.current = "";
+          return;
+        }
+        if (targetKey && (!returnedRecord || targetRecordKey || !matchedCustomerId || matchedCustomerId === targetCustomerId)) {
           setRecordCustomerKey(targetKey);
           setShowRecycleBin(false);
         }
       }
+      clearBudgetRecordReturnState();
       clearQuotationReturnParams(params);
     };
 
@@ -1168,7 +1256,7 @@ export default function QuotationsPage() {
     return () => {
       cancelled = true;
     };
-  }, [deletedQuotations, quotations, refetch, refetchDeletedQuotations]);
+  }, [deletedQuotations, isLoading, quotations, refetch, refetchDeletedQuotations, selectedOrgUnitId]);
   const quickCustomerSnapshot = useMemo<CreateCustomerSnapshot>(() => ({
     phone: quickCustomer.phone,
     address: quickCustomer.address,
@@ -1893,7 +1981,7 @@ export default function QuotationsPage() {
     );
   };
 
-  if (isLoading) {
+  if (authLoading || isLoading) {
     return (
       <div className="quotation-contract-ui quotation-index-workbench customer-list-ui enterprise-list-ui">
         <section className="quotation-index-table-panel flex min-h-0 flex-1 items-center justify-center overflow-hidden text-[#4B5563]">
@@ -1973,7 +2061,7 @@ export default function QuotationsPage() {
 
       <section className="quotation-index-table-panel flex min-h-0 flex-1 flex-col overflow-hidden">
         <ThinScrollArea className="min-h-0 flex-1" scrollClassName="h-full">
-          <table className="quotation-list-table w-full min-w-[1424px] table-fixed border-separate border-spacing-0 text-sm">
+          <table className="quotation-list-table w-full min-w-[1574px] table-fixed border-separate border-spacing-0 text-sm">
             <colgroup>
               <col className="w-[68px]" />
               <col className="w-[260px]" />
@@ -2061,7 +2149,7 @@ export default function QuotationsPage() {
                 );
               }) : (
 	                <tr className="quotation-index-empty-row">
-	                  <td colSpan={13} className="quotation-index-empty-cell h-[360px] py-14 text-center">
+	                  <td colSpan={12} className="quotation-index-empty-cell h-[360px] py-14 text-center">
 	                    <div className="mx-auto max-w-sm px-6 py-8">
 	                      <span className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-[8px] border border-[#D6E2F1] bg-[#F8FBFF] text-[#407AFF]">
 	                        <ReceiptText className="h-7 w-7" />
@@ -2153,7 +2241,7 @@ export default function QuotationsPage() {
                   </span>
                   {showRecycleBin ? "返回记录" : `回收站 ${activeDeletedRecordRows.length}`}
                 </button>
-                <button type="button" onClick={() => setRecordCustomerKey("")} className="inline-flex h-10 w-10 items-center justify-center rounded-[10px] text-[#667085] transition hover:bg-[#f2f4f7] hover:text-[#182230]" aria-label="关闭报价记录">
+                <button type="button" onClick={() => { clearBudgetRecordReturnState(); setRecordCustomerKey(""); }} className="inline-flex h-10 w-10 items-center justify-center rounded-[10px] text-[#667085] transition hover:bg-[#f2f4f7] hover:text-[#182230]" aria-label="关闭报价记录">
                   <X className="h-4 w-4" />
                 </button>
               </div>
@@ -2353,7 +2441,7 @@ export default function QuotationsPage() {
                             </div>
                           ) : (
                             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                              <Link href={`/quotations/${record.id}`} className={`${actionBaseClass} border-[#407aff] bg-[#407aff] text-white hover:border-[#2f66e8] hover:bg-[#2f66e8] focus-visible:ring-[#407aff]/20`}><Eye className="h-3.5 w-3.5" />打开报价</Link>
+                              <Link href={buildBudgetRecordQuotationHref(record)} onClick={() => saveBudgetRecordReturnState(record)} className={`${actionBaseClass} border-[#407aff] bg-[#407aff] text-white hover:border-[#2f66e8] hover:bg-[#2f66e8] focus-visible:ring-[#407aff]/20`}><Eye className="h-3.5 w-3.5" />打开报价</Link>
                               {record.is_unbound ? (
                                 <button type="button" disabled={busy} onClick={() => openBindQuotationDialog(record)} className={`${actionBaseClass} border-amber-200 bg-amber-50 text-amber-700 hover:border-amber-300 hover:bg-amber-100 focus-visible:ring-amber-500/15`}><Users className="h-3.5 w-3.5" />绑定客户</button>
                               ) : null}

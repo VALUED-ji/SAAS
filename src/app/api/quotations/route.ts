@@ -649,7 +649,7 @@ export async function GET(req: NextRequest) {
 
   const placeholders = quotationIds.map(() => "?").join(",");
 	  const quotationItems = db.prepare(`
-    SELECT quotation_id, category, space, quantity, unit_price, total_price, material_cost, labor_cost, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names
+    SELECT id, quotation_id, category, space, quantity, unit_price, total_price, material_cost, labor_cost, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names
     FROM quotation_items
     WHERE quotation_id IN (${placeholders})
     ORDER BY quotation_id, sort_order ASC, created_at ASC

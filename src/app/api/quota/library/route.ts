@@ -44,6 +44,21 @@ function ensureStandardQuotaItemsTable(db: Db) {
       ON standard_quota_items(company_id, quota_item_id);
     CREATE INDEX IF NOT EXISTS idx_standard_quota_items_company_status
       ON standard_quota_items(company_id, status, deleted_at);
+    CREATE TABLE IF NOT EXISTS standard_quota_item_change_logs (
+      id TEXT PRIMARY KEY,
+      company_id TEXT NOT NULL REFERENCES companies(id),
+      quota_item_id TEXT NOT NULL,
+      user_id TEXT REFERENCES users(id),
+      user_name TEXT,
+      action TEXT NOT NULL,
+      summary TEXT,
+      changes TEXT NOT NULL DEFAULT '[]',
+      before_payload TEXT,
+      after_payload TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_standard_quota_item_change_logs_item
+      ON standard_quota_item_change_logs(company_id, quota_item_id, created_at);
   `);
 }
 
@@ -58,6 +73,7 @@ function normalizeQuotaPayload(value: any) {
     name,
     code: String(value?.code || "").trim(),
     scope: String(value?.scope || "").trim(),
+    priceScene: String(value?.priceScene || value?.price_scene || "标准").trim() || "标准",
     category: String(value?.category || "未分类").trim() || "未分类",
     status: value?.status === "disabled" ? "disabled" : "enabled",
     laborPrice: Number.isFinite(laborPrice) ? Math.max(0, laborPrice) : 0,
@@ -177,6 +193,71 @@ function filterItemsByManageableStore(items: any[], storeNames: Set<string>) {
   return items.filter((item) => storeNames.has(cleanText(item?.scope)));
 }
 
+const QUOTA_CHANGE_FIELDS = [
+  ["code", "定额编码"],
+  ["scope", "适用门店"],
+  ["priceScene", "价格类型"],
+  ["category", "分类"],
+  ["name", "项目名称"],
+  ["unit", "单位"],
+  ["laborPrice", "人工单价"],
+  ["materialPrice", "材料单价"],
+  ["totalPrice", "客户单价"],
+  ["internalLaborCost", "内部人工成本"],
+  ["internalMaterialCost", "内部材料成本"],
+  ["costLossRate", "材料损耗率"],
+  ["constructionDescription", "施工说明"],
+  ["status", "状态"],
+  ["isSpecialPrice", "是否特价"],
+  ["workTypeName", "工种"],
+  ["materialCategoryName", "材料分类"],
+] as const;
+
+const QUOTA_NUMBER_FIELDS = new Set([
+  "laborPrice",
+  "materialPrice",
+  "totalPrice",
+  "internalLaborCost",
+  "internalMaterialCost",
+  "costLossRate",
+]);
+
+function comparableValue(field: string, value: any) {
+  if (QUOTA_NUMBER_FIELDS.has(field)) {
+    const numberValue = Number(value || 0);
+    return Number.isFinite(numberValue) ? Number(numberValue.toFixed(4)) : 0;
+  }
+  if (field === "isSpecialPrice") return Boolean(value) ? "是" : "否";
+  if (typeof value === "number") return Number.isFinite(value) ? Number(value.toFixed(4)) : 0;
+  if (typeof value === "boolean") return value ? "是" : "否";
+  return cleanText(value);
+}
+
+function getQuotaItemChanges(beforeItem: any, afterItem: any) {
+  return QUOTA_CHANGE_FIELDS
+    .map(([field, label]) => {
+      const beforeValue = comparableValue(field, beforeItem?.[field]);
+      const afterValue = comparableValue(field, afterItem?.[field]);
+      if (beforeValue === afterValue) return null;
+      return { field, label, before: beforeValue === "" ? "-" : beforeValue, after: afterValue === "" ? "-" : afterValue };
+    })
+    .filter(Boolean);
+}
+
+function getUserName(db: Db, auth: NonNullable<ReturnType<typeof getAuthContext>>) {
+  const row = db.prepare(`
+    SELECT name
+    FROM users
+    WHERE id = ? AND company_id = ? AND deleted_at IS NULL
+    LIMIT 1
+  `).get(auth.userId, auth.companyId) as { name?: string | null } | undefined;
+  return cleanText(row?.name) || "当前用户";
+}
+
+function itemBelongsToManageableStore(item: any, storeNames: Set<string>) {
+  return storeNames.has(cleanText(item?.scope));
+}
+
 export async function GET(req: NextRequest) {
   const auth = getAuthContext(req);
   if (!auth) return NextResponse.json({ message: "请先登录" }, { status: 401 });
@@ -184,6 +265,39 @@ export async function GET(req: NextRequest) {
 
   const db = getDb();
   ensureStandardQuotaItemsTable(db);
+  const historyItemId = cleanText(req.nextUrl.searchParams.get("historyItemId"));
+  if (historyItemId) {
+    const row = db.prepare(`
+      SELECT payload
+      FROM standard_quota_items
+      WHERE company_id = ? AND quota_item_id = ?
+      LIMIT 1
+    `).get(auth.companyId, historyItemId) as { payload?: string | null } | undefined;
+    const item = safeJsonParse(row?.payload, null);
+    const manageableStoreNames = getManageableStoreNames(db, auth);
+    if (!item || !itemBelongsToManageableStore(item, manageableStoreNames)) {
+      return NextResponse.json({ message: "没有权限查看该定额记录" }, { status: 403 });
+    }
+    const logs = db.prepare(`
+      SELECT id, quota_item_id, user_id, user_name, action, summary, changes, before_payload, after_payload, created_at
+      FROM standard_quota_item_change_logs
+      WHERE company_id = ? AND quota_item_id = ?
+      ORDER BY datetime(created_at) DESC, id DESC
+      LIMIT 100
+    `).all(auth.companyId, historyItemId).map((log: any) => ({
+      id: String(log.id || ""),
+      quotaItemId: String(log.quota_item_id || ""),
+      userId: String(log.user_id || ""),
+      userName: cleanText(log.user_name) || "系统记录",
+      action: String(log.action || ""),
+      summary: String(log.summary || ""),
+      changes: safeJsonParse(log.changes, []),
+      beforePayload: safeJsonParse(log.before_payload, null),
+      afterPayload: safeJsonParse(log.after_payload, null),
+      createdAt: String(log.created_at || ""),
+    }));
+    return NextResponse.json({ logs });
+  }
   const rows = db.prepare(`
     SELECT payload
     FROM standard_quota_items
@@ -237,6 +351,57 @@ export async function POST(req: NextRequest) {
     const manageableStores = Array.from(manageableStoreNames);
     const manageableStorePlaceholders = manageableStores.map(() => "?").join(",");
     if (manageableStores.length === 0) return;
+    const existingRows = db.prepare(`
+      SELECT quota_item_id, payload, deleted_at
+      FROM standard_quota_items
+      WHERE company_id = ? AND scope IN (${manageableStorePlaceholders})
+    `).all(auth.companyId, ...manageableStores) as Array<{ quota_item_id?: string | null; payload?: string | null; deleted_at?: string | null }>;
+    const existingByItemId = new Map(existingRows.map((row) => [
+      String(row.quota_item_id || ""),
+      {
+        payload: safeJsonParse(row.payload, null),
+        deletedAt: cleanText(row.deleted_at),
+      },
+    ]));
+    const userName = getUserName(db, auth);
+    const insertLog = db.prepare(`
+      INSERT INTO standard_quota_item_change_logs (
+        id, company_id, quota_item_id, user_id, user_name, action, summary, changes, before_payload, after_payload, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `);
+    const writeLog = (quotaItemId: string, action: string, summary: string, changes: any[], beforePayload: any, afterPayload: any) => {
+      insertLog.run(
+        makeId("standard_quota_log"),
+        auth.companyId,
+        quotaItemId,
+        auth.userId,
+        userName,
+        action,
+        summary,
+        JSON.stringify(changes || []),
+        beforePayload ? JSON.stringify(beforePayload) : null,
+        afterPayload ? JSON.stringify(afterPayload) : null,
+      );
+    };
+    items.forEach((item: any) => {
+      const existing = existingByItemId.get(String(item.id));
+      if (!existing?.payload || existing.deletedAt) {
+        writeLog(String(item.id), "created", "新增定额", [], null, item);
+        return;
+      }
+      const changes = getQuotaItemChanges(existing.payload, item);
+      if (changes.length > 0) {
+        writeLog(String(item.id), "updated", `修改了 ${changes.length} 项内容`, changes, existing.payload, item);
+      }
+    });
+    const activeIdSet = new Set(activeIds);
+    existingRows.forEach((row) => {
+      const quotaItemId = String(row.quota_item_id || "");
+      if (!quotaItemId || activeIdSet.has(quotaItemId) || cleanText(row.deleted_at)) return;
+      const payload = safeJsonParse(row.payload, null);
+      writeLog(quotaItemId, "deleted", "删除定额", [], payload, null);
+    });
     if (activeIds.length > 0) {
       const placeholders = activeIds.map(() => "?").join(",");
       db.prepare(`

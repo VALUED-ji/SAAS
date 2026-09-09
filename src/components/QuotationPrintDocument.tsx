@@ -2172,6 +2172,10 @@ export function QuotationPrintDocument({
           font-size: 10px;
           line-height: 1.42;
         }
+        .quotation-print-fee-table th,
+        .quotation-print-fee-table td {
+          vertical-align: middle !important;
+        }
         .quotation-print-head-table {
           border: var(--quotation-print-head-line-width) solid #111111 !important;
           background: #ffffff !important;
@@ -2781,6 +2785,10 @@ export function QuotationPrintDocument({
           .quotation-print-appendix-note-label {
             border-color: var(--quotation-print-line) !important;
             border-width: 0.75px !important;
+          }
+          .quotation-print-fee-table th,
+          .quotation-print-fee-table td {
+            vertical-align: middle !important;
           }
           .quotation-print-document th {
             font-weight: 500 !important;

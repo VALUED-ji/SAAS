@@ -30,6 +30,7 @@ import {
 
 import {
   CUSTOM_QUOTA_NUMBER_INPUT_KEYS,
+  DEFAULT_PRICING_MODE,
   DEFAULT_TEMPLATE_CREATOR,
   QUOTA_TEMPLATE_DRAFT_STORAGE_KEY,
   QUOTA_TEMPLATE_STORAGE_KEY,
@@ -63,7 +64,6 @@ import {
   initialTemplates,
   isBuiltinProjectGroup,
   loadQuotaLibraryItems as loadCachedQuotaLibraryItems,
-  loadTemplateDraftFromStorage,
   loadTemplatesFromStorage,
   makeCombinedAreaPricingTier,
   makeComprehensiveFeeItem,
@@ -123,6 +123,23 @@ import type {
 
 function hasBranchTemplateScope(template: QuotaTemplate) {
   return template.autoScope?.scopeType === "branch" && Boolean(template.autoScope.orgUnitId || template.autoScope.branchOrgUnitId);
+}
+
+function getTemplateDirtyPayload(template: QuotaTemplate | null) {
+  if (!template) return "";
+  return JSON.stringify({
+    name: template.name,
+    type: template.type,
+    remark: template.remark,
+    autoScope: template.autoScope,
+    constructionTemplateConfig: template.constructionTemplateConfig,
+    quoteConfig: template.quoteConfig,
+    projectGroups: template.projectGroups,
+    comprehensiveFees: template.comprehensiveFees,
+    appendixNote: template.appendixNote,
+    budgetCompilationHtml: template.budgetCompilationHtml,
+    spaces: template.spaces,
+  });
 }
 
 const templateFeeScopeModeOptions: Array<{ value: FeeScopeMode; label: string }> = [
@@ -296,6 +313,7 @@ export default function QuotaTemplatesPage() {
   const [quotaPickerTarget, setQuotaPickerTarget] = useState<QuotaPickerTarget>(null);
   const [quotaPickerSearch, setQuotaPickerSearch] = useState("");
   const [quotaPickerCategory, setQuotaPickerCategory] = useState("");
+  const [quotaPickerPriceScene, setQuotaPickerPriceScene] = useState("");
   const [quotaPickerStore, setQuotaPickerStore] = useState("");
   const [pickedQuotaIds, setPickedQuotaIds] = useState<string[]>([]);
   const [showCustomQuotaForm, setShowCustomQuotaForm] = useState(false);
@@ -314,13 +332,19 @@ export default function QuotaTemplatesPage() {
   const [recentlyMovedFeeId, setRecentlyMovedFeeId] = useState<string | null>(null);
   const [spaceAutoSaveStatus, setSpaceAutoSaveStatus] = useState<SpaceAutoSaveStatus>("idle");
   const [templateSaveStatus, setTemplateSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [unsavedClosePromptOpen, setUnsavedClosePromptOpen] = useState(false);
   const [numberInputDrafts, setNumberInputDrafts] = useState<Record<string, string>>({});
   const [feeFormulaDrafts, setFeeFormulaDrafts] = useState<Record<string, string>>({});
   const templatesRef = useRef<QuotaTemplate[]>(initialTemplates);
+  const openedTemplateRef = useRef<QuotaTemplate | null>(null);
+  const openedTemplatePayloadRef = useRef("");
   const pointerSpaceDragRef = useRef<{ sourceId: string; startX: number; startY: number; moved: boolean; targetId: string | null; position: ItemDropPosition } | null>(null);
   const pointerProjectGroupDragRef = useRef<PointerProjectGroupDragState>(null);
   const pointerQuotaDragRef = useRef<PointerQuotaDragState>(null);
   const pointerFeeDragRef = useRef<PointerFeeDragState>(null);
+  const quotaDragAutoScrollFrameRef = useRef<number | null>(null);
+  const quotaDragPointerRef = useRef({ x: 0, y: 0 });
+  const projectScrollRef = useRef<HTMLDivElement | null>(null);
   const movedSpaceTimerRef = useRef<number | null>(null);
   const movedProjectGroupTimerRef = useRef<number | null>(null);
   const movedQuotaTimerRef = useRef<number | null>(null);
@@ -331,6 +355,7 @@ export default function QuotaTemplatesPage() {
   const spaceAutoSaveRunRef = useRef(0);
   const lastSpaceAutoSavePayloadRef = useRef("");
   const budgetCompilationEditorRef = useRef<HTMLDivElement | null>(null);
+  const [hasMoreProjectItemsBelow, setHasMoreProjectItemsBelow] = useState(false);
 
   const saveTemplatesToServer = useCallback((nextTemplates: QuotaTemplate[]) => {
     fetch("/api/quota/templates", {
@@ -372,6 +397,11 @@ export default function QuotaTemplatesPage() {
   const makeDefaultTemplateScope = useCallback((source?: QuotaTemplateAutoScope | null): QuotaTemplateAutoScope | null => {
     const branchId = source?.orgUnitId || source?.branchOrgUnitId || templateScopeOptions[0]?.id || "";
     return makeBranchTemplateScope(branchId, source);
+  }, [makeBranchTemplateScope, templateScopeOptions]);
+
+  const makeNewTemplateScope = useCallback((): QuotaTemplateAutoScope | null => {
+    if (templateScopeOptions.length !== 1) return null;
+    return makeBranchTemplateScope(templateScopeOptions[0].id);
   }, [makeBranchTemplateScope, templateScopeOptions]);
 
   const normalizeEditableTemplateScope = useCallback((template: QuotaTemplate): QuotaTemplateAutoScope | null => {
@@ -481,6 +511,7 @@ export default function QuotaTemplatesPage() {
               code: String(item.code || ""),
               scope: String(item.scope || ""),
               category: String(item.category || ""),
+              priceScene: String(item.priceScene || item.price_scene || "标准"),
               name: String(item.name || ""),
               constructionDescription: String(item.constructionDescription || ""),
               unit: String(item.unit || ""),
@@ -578,11 +609,11 @@ export default function QuotaTemplatesPage() {
   }, [editingTemplate?.id]);
 
   useEffect(() => {
-    if (!editingTemplate || hasBranchTemplateScope(editingTemplate) || templateScopeOptions.length === 0) return;
+    if (editingMode === "create" || !editingTemplate || hasBranchTemplateScope(editingTemplate) || templateScopeOptions.length === 0) return;
     const nextScope = makeDefaultTemplateScope(editingTemplate.autoScope);
     if (!nextScope) return;
     setEditingTemplate({ ...editingTemplate, autoScope: nextScope });
-  }, [editingTemplate, makeDefaultTemplateScope, templateScopeOptions.length]);
+  }, [editingMode, editingTemplate, makeDefaultTemplateScope, templateScopeOptions.length]);
 
   useEffect(() => {
     if (!budgetCompilationEditorRef.current) return;
@@ -630,19 +661,28 @@ export default function QuotaTemplatesPage() {
   const quotaCategoryOptions = useMemo(() => {
     return Array.from(new Set(storeFilteredQuotaLibraryItems.map((item) => item.category).filter(Boolean))).sort((a, b) => a.localeCompare(b, "zh-CN"));
   }, [storeFilteredQuotaLibraryItems]);
+  const quotaPriceSceneOptions = useMemo(() => {
+    return Array.from(new Set(storeFilteredQuotaLibraryItems.map((item) => item.priceScene || "标准").filter(Boolean))).sort((a, b) => a.localeCompare(b, "zh-CN"));
+  }, [storeFilteredQuotaLibraryItems]);
   useEffect(() => {
     if (quotaPickerCategory && !quotaCategoryOptions.includes(quotaPickerCategory)) {
       setQuotaPickerCategory("");
     }
   }, [quotaCategoryOptions, quotaPickerCategory]);
+  useEffect(() => {
+    if (quotaPickerPriceScene && !quotaPriceSceneOptions.includes(quotaPickerPriceScene)) {
+      setQuotaPickerPriceScene("");
+    }
+  }, [quotaPickerPriceScene, quotaPriceSceneOptions]);
   const filteredQuotaLibraryItems = useMemo(() => {
     const keyword = quotaPickerSearch.trim().toLowerCase();
     return storeFilteredQuotaLibraryItems.filter((item) => {
       const matchesCategory = !quotaPickerCategory || item.category === quotaPickerCategory;
-      const matchesKeyword = !keyword || [item.code, item.category, item.name, item.constructionDescription, item.unit, formatAmount(item.laborPrice), formatAmount(item.materialPrice), formatAmount(item.totalPrice)].some((value) => value.toLowerCase().includes(keyword));
-      return matchesCategory && matchesKeyword;
+      const matchesPriceScene = !quotaPickerPriceScene || (item.priceScene || "标准") === quotaPickerPriceScene;
+      const matchesKeyword = !keyword || [item.code, item.category, item.priceScene || "标准", item.name, item.constructionDescription, item.unit, formatAmount(item.laborPrice), formatAmount(item.materialPrice), formatAmount(item.totalPrice)].some((value) => value.toLowerCase().includes(keyword));
+      return matchesCategory && matchesPriceScene && matchesKeyword;
     });
-  }, [quotaPickerCategory, quotaPickerSearch, storeFilteredQuotaLibraryItems]);
+  }, [quotaPickerCategory, quotaPickerPriceScene, quotaPickerSearch, storeFilteredQuotaLibraryItems]);
   const filteredConstructionTemplateOptions = useMemo(() => {
     const keyword = constructionTemplateSearch.trim().toLowerCase();
     if (!keyword) return constructionTemplateOptions;
@@ -675,12 +715,16 @@ export default function QuotaTemplatesPage() {
       .filter((item) => pickedQuotaIdSet.has(item.id))
       .reduce((sum, item) => sum + Number(item.totalPrice || 0), 0)
   ), [pickedQuotaIdSet, quotaLibraryItems]);
+  const hasUnsavedTemplateChanges = useMemo(() => {
+    if (!editingTemplate) return false;
+    return getTemplateDirtyPayload(editingTemplate) !== openedTemplatePayloadRef.current;
+  }, [editingTemplate]);
   const spaceAutoSaveText = getSpaceAutoSaveText(spaceAutoSaveStatus, editingMode);
   const quoteRemarkShouldFill = editingTemplate?.quoteConfig.mode === "list"
     || editingTemplate?.quoteConfig.mode === "package"
     || editingTemplate?.quoteConfig.mode === "area"
     || editingTemplate?.quoteConfig.mode === "foundation_material_area";
-  const spaceConfigCopy = getSpaceConfigModeCopy(editingTemplate?.quoteConfig.mode || "package");
+  const spaceConfigCopy = getSpaceConfigModeCopy(editingTemplate?.quoteConfig.mode || DEFAULT_PRICING_MODE);
   const templateProjectGroups = getTemplateProjectGroups(editingTemplate);
   const activeSpaceProjectGroups = getSpaceProjectGroups(activeSpace, templateProjectGroups);
   const templateFeeScopeOptions = useMemo(() => {
@@ -800,11 +844,14 @@ export default function QuotaTemplatesPage() {
   }, [saveTemplatesToServer]);
 
   const openCreateTemplate = () => {
-    const draftTemplate = loadTemplateDraftFromStorage();
-    const defaultScope = makeDefaultTemplateScope(draftTemplate?.autoScope || null);
-    const template = draftTemplate
-      ? { ...draftTemplate, createdByName: draftTemplate.createdByName || currentCreatorName, autoScope: normalizeEditableTemplateScope(draftTemplate) || defaultScope }
-      : { ...makeEmptyTemplate(), createdByName: currentCreatorName, autoScope: defaultScope };
+    clearTemplateDraftFromStorage();
+    const template = {
+      ...makeEmptyTemplate(),
+      createdByName: currentCreatorName,
+      autoScope: makeNewTemplateScope(),
+    };
+    openedTemplateRef.current = template;
+    openedTemplatePayloadRef.current = getTemplateDirtyPayload(template);
     setEditingMode("create");
     setEditingTemplate(template);
     setActiveSpaceId(template.spaces[0]?.id || "");
@@ -815,10 +862,12 @@ export default function QuotaTemplatesPage() {
     setConstructionTemplateSearch("");
     setSelectedId(template.id);
     lastSpaceAutoSavePayloadRef.current = getTemplateAutoSavePayload(template, "create");
-    setSpaceAutoSaveStatus(template.spaces.length > 0 || hasTemplateDraftContent(template) ? "draft" : "idle");
+    setSpaceAutoSaveStatus("idle");
   };
 
   const openEditTemplate = (template: QuotaTemplate) => {
+    openedTemplateRef.current = template;
+    openedTemplatePayloadRef.current = getTemplateDirtyPayload(template);
     setEditingMode("edit");
     setEditingTemplate(template);
     setActiveSpaceId(template.spaces[0]?.id || "");
@@ -864,6 +913,33 @@ export default function QuotaTemplatesPage() {
     const copyTemplate = buildCopiedTemplate(template, `${template.name} 副本`);
     persistTemplates([copyTemplate, ...templatesRef.current]);
     setSelectedId(copyTemplate.id);
+  };
+
+  const handleTemplateBranchChange = (branchId: string) => {
+    if (!editingTemplate) return;
+    const currentBranchId = String(editingTemplate.autoScope?.orgUnitId || editingTemplate.autoScope?.branchOrgUnitId || "").trim();
+    if (branchId === currentBranchId) return;
+    const nextScope = makeBranchTemplateScope(branchId, editingTemplate.autoScope);
+    if (!nextScope) return;
+    const detailCount = editingTemplate.spaces.reduce((sum, space) => sum + space.quotaItems.length, 0);
+    if (detailCount > 0) {
+      const confirmed = window.confirm(
+        `确认将适用分公司改为“${nextScope.orgUnitName || nextScope.branchOrgUnitName}”吗？\n\n`
+        + "不同分公司使用的基装定额、产品、定制柜不是同一套库。为了避免把原分公司的项目带到新分公司，继续后会清空所有空间/类别下的基装、产品、定制柜明细。\n\n"
+        + "空间和类别本身会保留，切换后可重新添加新分公司适用的项目。",
+      );
+      if (!confirmed) return;
+    }
+    setEditingTemplate({
+      ...editingTemplate,
+      autoScope: nextScope,
+      spaces: editingTemplate.spaces.map((space) => ({
+        ...space,
+        quotaItems: branchId === currentBranchId ? space.quotaItems : [],
+      })),
+    });
+    setQuotaPickerTarget(null);
+    setPickedQuotaIds([]);
   };
 
   const toggleTemplateStatus = (template: QuotaTemplate) => {
@@ -1309,8 +1385,6 @@ export default function QuotaTemplatesPage() {
       const groupName = getProjectGroupName(templateProjectGroups, quoteScope);
       const nextItem = makeSpaceQuotaItem({
         category: groupName,
-        name: `${groupName}项目`,
-        unit: quoteScope === "custom_cabinet" ? "㎡" : "项",
         quoteScope,
       });
       setEditingTemplate((current) => current ? {
@@ -1335,6 +1409,7 @@ export default function QuotaTemplatesPage() {
     setQuotaPickerTarget({ spaceId, quoteScope });
     setQuotaPickerSearch("");
     setQuotaPickerCategory("");
+    setQuotaPickerPriceScene("");
     setQuotaPickerStore("");
     setPickedQuotaIds([]);
     resetCustomQuotaDraft();
@@ -1484,7 +1559,8 @@ export default function QuotaTemplatesPage() {
     if (event.button !== 0 || event.ctrlKey || event.metaKey) return;
     event.preventDefault();
     event.stopPropagation();
-    pointerQuotaDragRef.current = { spaceId, quotaItemId, quoteScope, startX: event.clientX, startY: event.clientY, moved: false, targetQuotaId: quotaItemId, position: "after" };
+    const scrollElement = event.currentTarget.closest(".quota-template-project-board")?.querySelector<HTMLElement>(".quota-template-project-scroll") || null;
+    pointerQuotaDragRef.current = { spaceId, quotaItemId, quoteScope, startX: event.clientX, startY: event.clientY, scrollElement, moved: false, targetQuotaId: quotaItemId, position: "after" };
     setActiveSpaceId(spaceId);
     setDraggingQuotaId(null);
     setDragOverQuota(null);
@@ -1498,6 +1574,25 @@ export default function QuotaTemplatesPage() {
     setDraggingFeeId(null);
     setDragOverFee(null);
   };
+
+  const updateProjectScrollHint = useCallback(() => {
+    const element = projectScrollRef.current;
+    if (!element) {
+      setHasMoreProjectItemsBelow(false);
+      return;
+    }
+    const hasMoreBelow = element.scrollHeight - element.scrollTop - element.clientHeight > 8;
+    setHasMoreProjectItemsBelow(hasMoreBelow);
+  }, []);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(updateProjectScrollHint);
+    window.addEventListener("resize", updateProjectScrollHint);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", updateProjectScrollHint);
+    };
+  }, [activeSpaceId, activeQuotaScope, editingTemplate?.spaces, updateProjectScrollHint]);
 
   useEffect(() => () => {
     if (movedSpaceTimerRef.current) window.clearTimeout(movedSpaceTimerRef.current);
@@ -1615,20 +1710,89 @@ export default function QuotaTemplatesPage() {
   }, [reorderProjectGroup]);
 
   useEffect(() => {
+    const stopQuotaDragAutoScroll = () => {
+      if (quotaDragAutoScrollFrameRef.current) {
+        window.cancelAnimationFrame(quotaDragAutoScrollFrameRef.current);
+        quotaDragAutoScrollFrameRef.current = null;
+      }
+    };
+
     const getTargetQuota = (clientX: number, clientY: number) => {
       const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
       const row = element?.closest<HTMLElement>("[data-template-quota-row]");
       const quotaId = row?.dataset.quotaId;
       const quoteScope = normalizeQuotaScope(row?.dataset.quotaScope);
-      if (!row || !quotaId) return null;
+      if (!row || !quotaId) {
+        const state = pointerQuotaDragRef.current;
+        const scrollElement = state?.scrollElement;
+        if (!state || !scrollElement) return null;
+        const rect = scrollElement.getBoundingClientRect();
+        const edgeSize = Math.min(92, Math.max(48, rect.height * 0.14));
+        const rows = Array.from(scrollElement.querySelectorAll<HTMLElement>("[data-template-quota-row]"))
+          .filter((item) => normalizeQuotaScope(item.dataset.quotaScope) === state.quoteScope && item.dataset.quotaId !== state.quotaItemId);
+        if (!rows.length) return null;
+        if (clientY <= rect.top + edgeSize) {
+          const firstRow = rows[0];
+          const firstId = firstRow.dataset.quotaId;
+          return firstId ? { id: firstId, position: "before" as ItemDropPosition, quoteScope: state.quoteScope } : null;
+        }
+        if (clientY >= rect.bottom - edgeSize) {
+          const lastRow = rows[rows.length - 1];
+          const lastId = lastRow.dataset.quotaId;
+          return lastId ? { id: lastId, position: "after" as ItemDropPosition, quoteScope: state.quoteScope } : null;
+        }
+        return null;
+      }
       const rect = row.getBoundingClientRect();
       const position: ItemDropPosition = clientY < rect.top + rect.height / 2 ? "before" : "after";
       return { id: quotaId, position, quoteScope };
     };
 
+    const syncQuotaDragTarget = () => {
+      const state = pointerQuotaDragRef.current;
+      if (!state?.moved) return;
+      const target = getTargetQuota(quotaDragPointerRef.current.x, quotaDragPointerRef.current.y);
+      if (!target || target.id === state.quotaItemId || target.quoteScope !== state.quoteScope) {
+        state.targetQuotaId = null;
+        setDragOverQuota(null);
+        return;
+      }
+      state.targetQuotaId = target.id;
+      state.position = target.position;
+      setDragOverQuota(target);
+    };
+
+    const startQuotaDragAutoScroll = () => {
+      if (quotaDragAutoScrollFrameRef.current) return;
+      const tick = () => {
+        quotaDragAutoScrollFrameRef.current = null;
+        const state = pointerQuotaDragRef.current;
+        if (!state?.moved) return;
+        const scrollElement = state.scrollElement;
+        if (!scrollElement) return;
+        const rect = scrollElement.getBoundingClientRect();
+        const threshold = Math.min(110, Math.max(72, rect.height * 0.16));
+        const maxSpeed = 22;
+        const pointerY = quotaDragPointerRef.current.y;
+        let velocity = 0;
+        if (pointerY < rect.top + threshold) {
+          velocity = -Math.ceil(((rect.top + threshold - pointerY) / threshold) * maxSpeed);
+        } else if (pointerY > rect.bottom - threshold) {
+          velocity = Math.ceil(((pointerY - (rect.bottom - threshold)) / threshold) * maxSpeed);
+        }
+        if (velocity !== 0) {
+          scrollElement.scrollTop += velocity;
+          syncQuotaDragTarget();
+          quotaDragAutoScrollFrameRef.current = window.requestAnimationFrame(tick);
+        }
+      };
+      quotaDragAutoScrollFrameRef.current = window.requestAnimationFrame(tick);
+    };
+
     const handlePointerMove = (event: PointerEvent) => {
       const state = pointerQuotaDragRef.current;
       if (!state) return;
+      quotaDragPointerRef.current = { x: event.clientX, y: event.clientY };
       const distance = Math.hypot(event.clientX - state.startX, event.clientY - state.startY);
       if (!state.moved && distance > 4) {
         state.moved = true;
@@ -1640,16 +1804,19 @@ export default function QuotaTemplatesPage() {
       if (!target || target.id === state.quotaItemId || target.quoteScope !== state.quoteScope) {
         state.targetQuotaId = null;
         setDragOverQuota(null);
+        startQuotaDragAutoScroll();
         return;
       }
       state.targetQuotaId = target.id;
       state.position = target.position;
       setDragOverQuota(target);
+      startQuotaDragAutoScroll();
     };
 
     const handlePointerUp = (event: PointerEvent) => {
       const state = pointerQuotaDragRef.current;
       if (!state) return;
+      stopQuotaDragAutoScroll();
       pointerQuotaDragRef.current = null;
       if (state.moved) {
         const target = getTargetQuota(event.clientX, event.clientY);
@@ -1666,6 +1833,7 @@ export default function QuotaTemplatesPage() {
     window.addEventListener("pointermove", handlePointerMove, { passive: false });
     window.addEventListener("pointerup", handlePointerUp);
     return () => {
+      stopQuotaDragAutoScroll();
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
@@ -1762,20 +1930,15 @@ export default function QuotaTemplatesPage() {
 
   const addPickedQuotasForTarget = () => {
     if (!quotaPickerTarget || !pickerIsMultiSelect || pickedQuotaIds.length === 0) return;
-    const pickedSet = new Set(pickedQuotaIds);
-    const pickedQuotas = quotaLibraryItems.filter((quota) => pickedSet.has(quota.id));
+    const quotaById = new Map(quotaLibraryItems.map((quota) => [quota.id, quota]));
+    const pickedQuotas = pickedQuotaIds
+      .map((quotaId) => quotaById.get(quotaId))
+      .filter((quota): quota is QuotaLibraryItem => Boolean(quota));
     setEditingTemplate((current) => current ? {
       ...current,
       spaces: current.spaces.map((space) => {
         if (space.id !== quotaPickerTarget.spaceId) return space;
-        const existingQuotaIds = new Set(
-          space.quotaItems
-            .filter((item) => normalizeQuotaScope(item.quoteScope) === quotaPickerTarget.quoteScope)
-            .map((item) => item.quotaId)
-            .filter(Boolean),
-        );
         const nextItems = pickedQuotas
-          .filter((quota) => !existingQuotaIds.has(quota.id))
           .map((quota) => makeQuotaItemFromLibrary(quota, quotaPickerTarget.quoteScope));
         return { ...withSpaceProjectGroup(space, quotaPickerTarget.quoteScope), quotaItems: [...space.quotaItems, ...nextItems] };
       }),
@@ -1841,19 +2004,6 @@ export default function QuotaTemplatesPage() {
     setQuotaPickerTarget(null);
   };
 
-  const flushTemplateAutoSave = useCallback((updateState = true) => {
-    if (!templatesLoaded || !editingTemplate) return;
-    const payload = getTemplateAutoSavePayload(editingTemplate, editingMode);
-    if (!payload || payload === lastSpaceAutoSavePayloadRef.current) return;
-    try {
-      persistTemplateAutoSave(editingTemplate, editingMode, updateState);
-      lastSpaceAutoSavePayloadRef.current = payload;
-      if (updateState) setSpaceAutoSaveStatus(editingMode === "edit" ? "saved" : "draft");
-    } catch {
-      if (updateState) setSpaceAutoSaveStatus("error");
-    }
-  }, [editingMode, editingTemplate, persistTemplateAutoSave, templatesLoaded]);
-
   useEffect(() => {
     if (!templatesLoaded || !editingTemplate) return;
     const payload = getTemplateAutoSavePayload(editingTemplate, editingMode);
@@ -1883,12 +2033,15 @@ export default function QuotaTemplatesPage() {
   }, [editingMode, editingTemplate, persistTemplateAutoSave, templatesLoaded]);
 
   useEffect(() => {
-    const handleBeforeUnload = () => {
-      flushTemplateAutoSave(false);
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!hasUnsavedTemplateChanges) return;
+      event.preventDefault();
+      event.returnValue = "";
+      return "";
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [flushTemplateAutoSave]);
+  }, [hasUnsavedTemplateChanges]);
 
   useEffect(() => {
     return () => {
@@ -1897,13 +2050,13 @@ export default function QuotaTemplatesPage() {
     };
   }, []);
 
-  const closeEditingTemplate = () => {
+  const forceCloseEditingTemplate = () => {
     if (spaceAutoSaveTimerRef.current) window.clearTimeout(spaceAutoSaveTimerRef.current);
     if (templateSaveTimerRef.current) window.clearTimeout(templateSaveTimerRef.current);
     if (templateSaveStatusTimerRef.current) window.clearTimeout(templateSaveStatusTimerRef.current);
     templateSaveTimerRef.current = null;
     templateSaveStatusTimerRef.current = null;
-    flushTemplateAutoSave();
+    setUnsavedClosePromptOpen(false);
     setEditingTemplate(null);
     setActiveSpaceId("");
     setQuotaPickerTarget(null);
@@ -1914,7 +2067,30 @@ export default function QuotaTemplatesPage() {
     setTemplateSaveStatus("idle");
   };
 
-	  const saveEditingTemplate = () => {
+  const closeEditingTemplate = () => {
+    if (hasUnsavedTemplateChanges) {
+      setUnsavedClosePromptOpen(true);
+      return;
+    }
+    forceCloseEditingTemplate();
+  };
+
+  const discardTemplateChangesAndClose = () => {
+    if (spaceAutoSaveTimerRef.current) window.clearTimeout(spaceAutoSaveTimerRef.current);
+    if (editingMode === "create") {
+      clearTemplateDraftFromStorage();
+    } else if (openedTemplateRef.current) {
+      const originalTemplate = openedTemplateRef.current;
+      const nextTemplates = templatesRef.current.map((template) => template.id === originalTemplate.id ? originalTemplate : template);
+      persistTemplates(nextTemplates);
+      setSelectedId(originalTemplate.id);
+    }
+    openedTemplateRef.current = null;
+    openedTemplatePayloadRef.current = "";
+    forceCloseEditingTemplate();
+  };
+
+  const saveEditingTemplate = () => {
 	    if (!editingTemplate) return;
 	    if (templateSaveStatus !== "idle") return;
 	    if (!editingTemplate.name.trim()) {
@@ -2020,6 +2196,9 @@ export default function QuotaTemplatesPage() {
       : [nextTemplate, ...templatesRef.current];
     persistTemplates(nextTemplates);
     setSelectedId(nextTemplate.id);
+    openedTemplateRef.current = nextTemplate;
+    openedTemplatePayloadRef.current = getTemplateDirtyPayload(nextTemplate);
+    setUnsavedClosePromptOpen(false);
     if (editingMode === "create") clearTemplateDraftFromStorage();
     if (spaceAutoSaveTimerRef.current) window.clearTimeout(spaceAutoSaveTimerRef.current);
     lastSpaceAutoSavePayloadRef.current = "";
@@ -2029,15 +2208,9 @@ export default function QuotaTemplatesPage() {
       templateSaveStatusTimerRef.current = null;
     }, 180);
     templateSaveTimerRef.current = window.setTimeout(() => {
-      setEditingTemplate(null);
-      setActiveSpaceId("");
-      setQuotaPickerTarget(null);
-      setPickedQuotaIds([]);
-      setConstructionTemplatePickerOpen(false);
-      setConstructionTemplateSearch("");
-      setSpaceAutoSaveStatus("idle");
-      setTemplateSaveStatus("idle");
-      templateSaveTimerRef.current = null;
+      openedTemplateRef.current = null;
+      openedTemplatePayloadRef.current = "";
+      forceCloseEditingTemplate();
     }, 680);
   };
 
@@ -2233,11 +2406,7 @@ export default function QuotaTemplatesPage() {
 		                        <span className="text-xs font-semibold text-surface-600">适用分公司 <span className="text-red-500">*</span></span>
 		                        <SystemSelect
 		                          value={editingTemplate.autoScope?.orgUnitId || editingTemplate.autoScope?.branchOrgUnitId || ""}
-		                          onChange={(event) => {
-		                            const nextScope = makeBranchTemplateScope(event.target.value, editingTemplate.autoScope);
-		                            if (!nextScope) return;
-		                            setEditingTemplate({ ...editingTemplate, autoScope: nextScope });
-		                          }}
+		                          onChange={(event) => handleTemplateBranchChange(event.target.value)}
 		                          disabled={templateScopeOptions.length === 0}
 		                          className="input-field h-10 py-0 disabled:cursor-not-allowed disabled:bg-surface-100 disabled:text-surface-400"
 		                          menuMinWidth={360}
@@ -2742,6 +2911,8 @@ export default function QuotaTemplatesPage() {
                           );
                         }
                         const sectionItems = activeSpace.quotaItems.filter((item) => normalizeQuotaScope(item.quoteScope) === activeSection.scope);
+                        const isMainMaterialSection = activeSection.scope === "main_material";
+                        const isEmptyMainMaterialItem = (item: TemplateSpaceQuota) => !item.code.trim() && !item.name.trim() && !item.unit.trim() && !item.constructionDescription.trim() && Number(item.totalPrice || 0) === 0;
 
                         return (
                           <div className="quota-template-space-main">
@@ -2844,36 +3015,64 @@ export default function QuotaTemplatesPage() {
                               </div>
                             </div>
                           <div className="quota-template-project-board overflow-hidden rounded-lg border border-surface-200 bg-white">
-                            <div className="overflow-hidden">
+                            <div
+                              ref={projectScrollRef}
+                              onScroll={updateProjectScrollHint}
+                              className="quota-template-project-scroll overflow-y-auto overflow-x-hidden"
+                            >
                               <table className="quota-template-project-table w-full table-fixed text-sm">
-                                <colgroup>
-                                  <col className="w-[4%]" />
-                                  <col className="w-[10%]" />
-                                  <col className="w-[21%]" />
-                                  <col className="w-[5%]" />
-                                  <col className="w-[7%]" />
-                                  <col className="w-[7%]" />
-                                  <col className="w-[7%]" />
-                                  <col className="w-[31%]" />
-                                  <col className="w-[8%]" />
-                                </colgroup>
+                                {isMainMaterialSection ? (
+                                  <colgroup>
+                                    <col className="w-[4%]" />
+                                    <col className="w-[9.33%]" />
+                                    <col className="w-[20%]" />
+                                    <col className="w-[8%]" />
+                                    <col className="w-[12%]" />
+                                    <col className="w-[38.67%]" />
+                                    <col className="w-[8%]" />
+                                  </colgroup>
+                                ) : (
+                                  <colgroup>
+                                    <col className="w-[4%]" />
+                                    <col className="w-[10%]" />
+                                    <col className="w-[21%]" />
+                                    <col className="w-[5%]" />
+                                    <col className="w-[7%]" />
+                                    <col className="w-[7%]" />
+                                    <col className="w-[7%]" />
+                                    <col className="w-[31%]" />
+                                    <col className="w-[8%]" />
+                                  </colgroup>
+                                )}
                                 <thead className="bg-white text-xs font-semibold text-surface-600">
-                                  <tr className="border-b border-surface-200">
-                                    <th className="px-2 py-2 text-center"></th>
-                                    <th className="px-3 py-2 text-left">定额编码</th>
-                                    <th className="px-3 py-2 text-left">项目名称</th>
-                                    <th className="px-2 py-2 text-center">单位</th>
-                                    <th className="px-2 py-2 text-right">人工单价</th>
-                                    <th className="px-2 py-2 text-right">材料单价</th>
-                                    <th className="px-2 py-2 text-right">{spaceConfigCopy.priceHeader}</th>
-                                    <th className="px-3 py-2 text-left">施工说明</th>
-                                    <th className="px-3 py-2 text-center">操作</th>
-                                  </tr>
+                                  {isMainMaterialSection ? (
+                                    <tr className="border-b border-surface-200">
+                                      <th className="px-2 py-2 text-center"></th>
+                                      <th className="px-3 py-2 text-left">产品编码</th>
+                                      <th className="px-3 py-2 text-left">材料名称</th>
+                                      <th className="px-2 py-2 text-center">单位</th>
+                                      <th className="px-2 py-2 text-right">单价</th>
+                                      <th className="px-3 py-2 text-left">备注</th>
+                                      <th className="px-3 py-2 text-center">操作</th>
+                                    </tr>
+                                  ) : (
+                                    <tr className="border-b border-surface-200">
+                                      <th className="px-2 py-2 text-center"></th>
+                                      <th className="px-3 py-2 text-left">定额编码</th>
+                                      <th className="px-3 py-2 text-left">项目名称</th>
+                                      <th className="px-2 py-2 text-center">单位</th>
+                                      <th className="px-2 py-2 text-right">人工单价</th>
+                                      <th className="px-2 py-2 text-right">材料单价</th>
+                                      <th className="px-2 py-2 text-right">{spaceConfigCopy.priceHeader}</th>
+                                      <th className="px-3 py-2 text-left">施工说明</th>
+                                      <th className="px-3 py-2 text-center">操作</th>
+                                    </tr>
+                                  )}
                                 </thead>
                                 <tbody className="divide-y divide-surface-100">
                                   {sectionItems.length === 0 ? (
                                     <tr>
-                                      <td colSpan={9} className="px-3 py-6 text-center text-sm text-surface-400">
+                                      <td colSpan={isMainMaterialSection ? 7 : 9} className="px-3 py-6 text-center text-sm text-surface-400">
                                         <div className="quota-template-table-empty">
                                           <p>{activeSection.emptyText}</p>
                                           <span>下方按钮可继续添加当前分组的报价项目。</span>
@@ -2904,8 +3103,14 @@ export default function QuotaTemplatesPage() {
                                           <GripVertical className="h-4 w-4" />
                                         </button>
                                       </td>
-	                                      <td className="px-3 py-2 font-mono text-xs font-medium text-surface-700">
-                                        {item.code ? (
+                                      <td className="px-3 py-2 font-mono text-xs font-medium text-surface-700">
+                                        {isMainMaterialSection ? (
+                                          <input
+                                            value={item.code}
+                                            onChange={(event) => updateSpaceQuota(activeSpace.id, item.id, { code: event.target.value })}
+                                            className="quota-template-project-plain-input h-8 w-full bg-transparent font-mono text-xs font-medium text-surface-700 outline-none"
+                                          />
+                                        ) : item.code ? (
                                           <span className="block truncate" title={item.code}>{item.code}</span>
                                         ) : (
                                           <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-sans text-[11px] font-semibold text-amber-700">自定义</span>
@@ -2918,10 +3123,14 @@ export default function QuotaTemplatesPage() {
 	                                          className="quota-template-project-alias block truncate text-xs font-medium text-surface-500"
                                           title="点击修改当前模板中的项目别名，不影响基装定额库"
                                           role="textbox"
-                                          aria-label="项目别名"
+                                          aria-label={isMainMaterialSection ? "材料名称" : "项目别名"}
                                           onBlur={(event) => {
                                             const nextName = (event.currentTarget.textContent || "").trim();
                                             if (!nextName) {
+                                              if (isMainMaterialSection) {
+                                                updateSpaceQuota(activeSpace.id, item.id, { name: "" });
+                                                return;
+                                              }
                                               event.currentTarget.textContent = item.name || "";
                                               return;
                                             }
@@ -2936,21 +3145,53 @@ export default function QuotaTemplatesPage() {
                                             }
                                           }}
                                         >
-                                          {item.name || "-"}
+                                          {item.name || ""}
                                         </span>
                                       </td>
-                                      <td className="px-2 py-2 text-center text-surface-700">{item.unit || "-"}</td>
-                                      <td className="px-2 py-2 text-right tabular-nums text-surface-700">{formatAmount(item.laborPrice)}</td>
-                                      <td className="px-2 py-2 text-right tabular-nums text-surface-700">{formatAmount(item.materialPrice)}</td>
-                                      <td className={`${spaceConfigCopy.priceClassName} quota-template-project-price-cell`} title={spaceConfigCopy.priceTitle}>
-                                        <span className="quota-template-project-price-value">{formatAmount(item.totalPrice)}</span>
-                                        {item.isSpecialPrice && (
-                                          <span className="quota-template-project-special-mark" title="特价项目">特</span>
-                                        )}
+                                      <td className="px-2 py-2 text-center text-surface-700">
+                                        {isMainMaterialSection ? (
+                                          <input
+                                            value={item.unit}
+                                            onChange={(event) => updateSpaceQuota(activeSpace.id, item.id, { unit: event.target.value })}
+                                            className="quota-template-project-plain-input h-8 w-full bg-transparent text-center text-xs font-medium text-surface-700 outline-none"
+                                          />
+                                        ) : item.unit || ""}
                                       </td>
-                                      <td className="px-3 py-2 text-surface-700">
-                                        <p className="line-clamp-3 leading-5" title={item.constructionDescription || undefined}>{item.constructionDescription || "-"}</p>
-                                      </td>
+                                      {isMainMaterialSection ? (
+                                        <>
+                                          <td className="px-2 py-2 text-right tabular-nums text-surface-700">
+                                            <input
+                                              type="text"
+                                              {...getTemplateNumberInputProps(`spaceQuota.${activeSpace.id}.${item.id}.totalPrice`, item.totalPrice, (value) => updateSpaceQuota(activeSpace.id, item.id, { totalPrice: value }))}
+                                              className="quota-template-project-plain-input h-8 w-full bg-transparent text-right text-xs font-medium tabular-nums text-surface-700 outline-none"
+                                            />
+                                            {!isEmptyMainMaterialItem(item) && item.isSpecialPrice && (
+                                              <span className="quota-template-project-special-mark" title="特价项目">特</span>
+                                            )}
+                                          </td>
+                                          <td className="px-3 py-2 text-surface-700">
+                                            <input
+                                              value={item.constructionDescription}
+                                              onChange={(event) => updateSpaceQuota(activeSpace.id, item.id, { constructionDescription: event.target.value })}
+                                              className="quota-template-project-plain-input h-8 w-full bg-transparent text-xs font-medium text-surface-700 outline-none"
+                                            />
+                                          </td>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <td className="px-2 py-2 text-right tabular-nums text-surface-700">{formatAmount(item.laborPrice)}</td>
+                                          <td className="px-2 py-2 text-right tabular-nums text-surface-700">{formatAmount(item.materialPrice)}</td>
+                                          <td className={`${spaceConfigCopy.priceClassName} quota-template-project-price-cell`} title={spaceConfigCopy.priceTitle}>
+                                            <span className="quota-template-project-price-value">{formatAmount(item.totalPrice)}</span>
+                                            {item.isSpecialPrice && (
+                                              <span className="quota-template-project-special-mark" title="特价项目">特</span>
+                                            )}
+                                          </td>
+                                          <td className="px-3 py-2 text-surface-700">
+                                            <p className="line-clamp-3 leading-5" title={item.constructionDescription || undefined}>{item.constructionDescription || "-"}</p>
+                                          </td>
+                                        </>
+                                      )}
                                       <td className="px-2 py-2 text-center">
                                         <div className="inline-flex items-center justify-center gap-1">
                                           <button type="button" onClick={() => removeSpaceQuota(activeSpace.id, item.id)} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-red-100 bg-white text-red-500 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600" title="删除定额">
@@ -2963,6 +3204,12 @@ export default function QuotaTemplatesPage() {
                                   })}
                                 </tbody>
                               </table>
+                              {hasMoreProjectItemsBelow && (
+                                <div className="quota-template-project-more-hint" aria-hidden="true">
+                                  <ChevronDown className="h-3.5 w-3.5" />
+                                  下方还有项目，继续向下滚动
+                                </div>
+                              )}
                             </div>
                             <div className="border-t border-surface-200 bg-surface-50 px-3 py-3">
                               <button
@@ -3242,6 +3489,31 @@ export default function QuotaTemplatesPage() {
               </div>
             </div>
           </div>
+          {unsavedClosePromptOpen && (
+            <div className="fixed inset-0 z-[90] flex items-center justify-center bg-[#111827]/30 px-4 py-6">
+              <div role="dialog" aria-modal="true" aria-labelledby="quota-template-unsaved-title" className="w-full max-w-[420px] overflow-hidden rounded-xl border border-surface-200 bg-white text-surface-900 shadow-[0_24px_70px_rgba(15,35,70,0.18)]">
+                <div className="px-5 pt-5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <p id="quota-template-unsaved-title" className="text-base font-semibold leading-6 text-surface-900">模板内容尚未保存</p>
+                      <p className="mt-2 text-sm leading-6 text-surface-600">当前定额模板有未保存的修改。保存后会写入模板；不保存会放弃本次进入编辑器后的修改。</p>
+                    </div>
+                    <button type="button" onClick={() => setUnsavedClosePromptOpen(false)} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-surface-500 hover:bg-surface-100 hover:text-surface-900" aria-label="取消关闭">
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center justify-end gap-2 px-5 py-5">
+                  <button type="button" onClick={discardTemplateChangesAndClose} className="btn-secondary min-h-9 px-3 text-xs">不保存并关闭</button>
+                  <button type="button" onClick={() => setUnsavedClosePromptOpen(false)} className="btn-secondary min-h-9 px-3 text-xs">继续编辑</button>
+                  <button type="button" onClick={saveEditingTemplate} className="btn-primary min-h-9 px-3 text-xs" disabled={templateSaveStatus !== "idle"}>
+                    {templateSaveStatus === "saving" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    <span>保存并关闭</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
           {constructionTemplatePickerOpen && (
             <div
               className="qm-modal-overlay construction-template-picker-overlay fixed inset-0 z-[80] flex items-center justify-center bg-[#111827]/32 px-4 py-6"
@@ -3257,7 +3529,7 @@ export default function QuotaTemplatesPage() {
                 className="construction-template-picker qm-modal-shell flex max-h-[82vh] w-full max-w-[880px] flex-col overflow-hidden border border-[#DCE4F0] bg-white"
                 onClick={(event) => event.stopPropagation()}
               >
-                <div className="construction-template-picker-header flex items-center justify-between gap-4 border-b border-[#E7E9EE] bg-white px-5 py-4">
+                <div className="construction-template-picker-header flex items-center justify-between gap-4 bg-white px-5 py-4">
                   <div className="min-w-0">
                     <p id="construction-template-picker-title" className="text-[15px] font-semibold leading-5 text-[#111827]">选择施工模板</p>
                     <p className="mt-1 text-xs leading-5 text-[#7C8798]">
@@ -3277,7 +3549,7 @@ export default function QuotaTemplatesPage() {
                   </button>
                 </div>
 
-                <div className="construction-template-picker-search border-b border-[#E7E9EE] bg-[#FAFBFC] px-5 py-3">
+                <div className="construction-template-picker-search bg-white px-5 py-3">
                   <label className="relative block max-w-[520px]">
                     <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#8A97AA]" />
                     <input
@@ -3397,7 +3669,7 @@ export default function QuotaTemplatesPage() {
                   </div>
                 </div>
 
-                <div className="construction-template-picker-footer flex items-center justify-between gap-3 border-t border-[#E7E9EE] bg-white px-5 py-3">
+                <div className="construction-template-picker-footer flex items-center justify-between gap-3 bg-white px-5 py-3">
                   <p className="min-w-0 truncate text-xs font-semibold text-[#7C8798]">
                     当前选择：{selectedConstructionTemplateConfig.name || "未选择施工模板"}
                   </p>
@@ -3494,6 +3766,21 @@ export default function QuotaTemplatesPage() {
                       ))}
                     </SystemSelect>
                   </label>
+                  <label className="quote-library-filter-field block">
+                    <span>价格类型</span>
+                    <SystemSelect
+                      value={quotaPickerPriceScene}
+                      onChange={(event) => setQuotaPickerPriceScene(event.target.value)}
+                      className="quota-template-picker-select quote-library-price-scene-select h-10 rounded-[10px] border border-[#d9e2ef] bg-white px-3 text-sm font-medium text-[#182230] outline-none transition focus:border-[#407AFF] focus:ring-2 focus:ring-[#407AFF]/10"
+                      menuClassName="quote-system-select-menu"
+                      optionClassName="quote-system-select-option"
+                    >
+                      <option value="">全部类型</option>
+                      {quotaPriceSceneOptions.map((scene) => (
+                        <option key={scene} value={scene}>{scene}</option>
+                      ))}
+                    </SystemSelect>
+                  </label>
                   {pickerIsMultiSelect ? (
                     <button
                       type="button"
@@ -3509,7 +3796,7 @@ export default function QuotaTemplatesPage() {
                     </div>
                   )}
                   <div className="quote-library-filter-note">
-                    <b>{quotaPickerStore || quotaPickerCategory || "全部项目"}</b><span>{filteredQuotaLibraryItems.length} 项</span><span>已选 {pickedQuotaIds.length}</span>
+                    <b>{quotaPickerStore || quotaPickerCategory || quotaPickerPriceScene || "全部项目"}</b><span>{filteredQuotaLibraryItems.length} 项</span><span>已选 {pickedQuotaIds.length}</span>
                   </div>
                 </div>
 
@@ -3625,6 +3912,7 @@ export default function QuotaTemplatesPage() {
                           <col style={{ width: 56 }} />
                           <col style={{ width: 112 }} />
                           <col style={{ width: 300 }} />
+                          <col style={{ width: 112 }} />
                           <col style={{ width: 72 }} />
                           <col style={{ width: 112 }} />
                           <col style={{ width: 112 }} />
@@ -3637,6 +3925,7 @@ export default function QuotaTemplatesPage() {
                             <th className="quote-library-sticky-select px-3 py-0 text-center whitespace-nowrap">{pickerIsMultiSelect ? "选择" : "替换"}</th>
                             <th className="quote-library-sticky-category px-3 py-0 whitespace-nowrap">分类</th>
                             <th className="quote-library-sticky-name px-3 py-0 whitespace-nowrap">项目名称</th>
+                            <th className="px-3 py-0 text-center whitespace-nowrap">价格类型</th>
                             <th className="px-3 py-0 text-center whitespace-nowrap">单位</th>
                             <th className="px-3 py-0 text-right whitespace-nowrap">材料单价</th>
                             <th className="px-3 py-0 text-right whitespace-nowrap">人工单价</th>
@@ -3687,6 +3976,7 @@ export default function QuotaTemplatesPage() {
                                   </div>
                                 </div>
                               </td>
+                              <td className="px-3 py-0 text-center text-[#52647b] whitespace-nowrap">{quota.priceScene || "标准"}</td>
                               <td className="px-3 py-0 text-center font-medium text-[#52647b] whitespace-nowrap">{quota.unit || "-"}</td>
                               <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatAmount(quota.materialPrice)}</td>
                               <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatAmount(quota.laborPrice)}</td>
@@ -4334,6 +4624,44 @@ export default function QuotaTemplatesPage() {
           border: 0 !important;
           border-radius: 0 !important;
         }
+        .quota-template-project-scroll {
+          position: relative;
+          flex: 1;
+          min-height: 0;
+          scrollbar-gutter: stable;
+        }
+        .quota-template-project-more-hint {
+          position: sticky;
+          bottom: 0;
+          z-index: 6;
+          display: flex;
+          height: 34px;
+          width: 100%;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          border-top: 1px solid #dbe7ff;
+          background: linear-gradient(180deg, rgba(255, 255, 255, 0.22), rgba(238, 245, 255, 0.96) 42%, #eef5ff);
+          color: #315cba;
+          font-size: 12px;
+          font-weight: 750;
+          pointer-events: none;
+        }
+        .quota-template-project-more-hint svg {
+          color: #407aff;
+          animation: quotaTemplateMoreHintPulse 1.25s ease-in-out infinite;
+        }
+        @keyframes quotaTemplateMoreHintPulse {
+          0%,
+          100% {
+            transform: translateY(-1px);
+            opacity: 0.72;
+          }
+          50% {
+            transform: translateY(2px);
+            opacity: 1;
+          }
+        }
         .quota-template-project-board-head {
           display: none !important;
           width: 100% !important;
@@ -4583,7 +4911,7 @@ export default function QuotaTemplatesPage() {
         }
         .quota-template-picker-toolbar {
           flex: 0 0 auto;
-          grid-template-columns: minmax(320px, 1fr) 220px auto auto !important;
+          grid-template-columns: minmax(280px, 1fr) 190px 190px auto auto !important;
           align-items: end;
           gap: 12px !important;
           padding: 12px 20px !important;
@@ -4591,7 +4919,7 @@ export default function QuotaTemplatesPage() {
           background: #f7f9fc !important;
         }
         .quota-template-picker-toolbar[data-has-store-filter="true"] {
-          grid-template-columns: minmax(280px, 1fr) 190px 190px auto auto !important;
+          grid-template-columns: minmax(260px, 1fr) 170px 170px 170px auto auto !important;
         }
         .quota-template-picker .quote-library-filter-field > span {
           display: block;
@@ -4609,6 +4937,7 @@ export default function QuotaTemplatesPage() {
         .quota-template-picker .quote-library-search-input,
         .quota-template-picker .quote-library-store-select,
         .quota-template-picker .quote-library-category-select,
+        .quota-template-picker .quote-library-price-scene-select,
         .quota-template-picker .quote-library-select-all,
         .quota-template-picker .quote-library-footer button,
         .quota-template-picker .quote-library-close {
@@ -4617,6 +4946,7 @@ export default function QuotaTemplatesPage() {
         .quota-template-picker .quote-library-search-input,
         .quota-template-picker .quote-library-store-select,
         .quota-template-picker .quote-library-category-select,
+        .quota-template-picker .quote-library-price-scene-select,
         .quota-template-picker .quote-library-select-all {
           height: 40px !important;
           min-height: 40px !important;

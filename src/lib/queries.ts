@@ -388,16 +388,18 @@ function buildQuotationListPath(deleted: boolean, orgUnitId?: string) {
   return query ? `/api/quotations?${query}` : "/api/quotations";
 }
 
-export function useQuotations(orgUnitId = "") {
+export function useQuotations(orgUnitId = "", viewerKey = "", enabled = true) {
   return useQuery({
-    queryKey: ["quotations", orgUnitId || "all"],
+    queryKey: ["quotations", viewerKey || "anonymous", orgUnitId || "all"],
     queryFn: () => api.get<QuotationData[]>(buildQuotationListPath(false, orgUnitId)),
+    enabled,
   });
 }
 
-export function useDeletedQuotations(orgUnitId = "") {
+export function useDeletedQuotations(orgUnitId = "", viewerKey = "", enabled = true) {
   return useQuery({
-    queryKey: ["quotations", "deleted", orgUnitId || "all"],
+    queryKey: ["quotations", "deleted", viewerKey || "anonymous", orgUnitId || "all"],
     queryFn: () => api.get<QuotationData[]>(buildQuotationListPath(true, orgUnitId)),
+    enabled,
   });
 }
