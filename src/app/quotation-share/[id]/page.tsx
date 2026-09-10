@@ -267,7 +267,7 @@ export default function QuotationSharePage() {
                 onClick={() => setExportColumnDialog((current) => current ? { ...current, includeBudgetCompilation: !current.includeBudgetCompilation } : current)}
               >
                 <i><Check className="h-3.5 w-3.5" /></i>
-                <span>{exportColumnDialog.action === "print" ? "打印预算编制" : "导出预算编制"}</span>
+                <span>预算编制</span>
                 {!hasBudgetCompilation && <em>当前报价暂无预算编制内容</em>}
               </button>
             )}

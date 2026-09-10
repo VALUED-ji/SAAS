@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useState } from "react";
+import type { CSSProperties, FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Eye, EyeOff, Loader2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
@@ -10,6 +11,20 @@ const REMEMBER_LOGIN_KEY = "zxgj_remembered_login";
 const SESSION_EXPIRED_STORAGE_KEY = "zxgj_session_expired_message";
 const SESSION_EXPIRED_MESSAGE = "登录已过期，请重新登录";
 const loginHeroImage = "/brand/login-palace-c.png";
+const ginkgoLeafImage = "/brand/ginkgo-leaf-yellow.png";
+const fallingLeafStyles = [
+  { left: "6%", delay: "-11s", duration: "51s", size: "38px", sway: "90px", spin: "76deg" },
+  { left: "14%", delay: "-39s", duration: "67s", size: "30px", sway: "64px", spin: "-96deg" },
+  { left: "23%", delay: "-24s", duration: "59s", size: "46px", sway: "112px", spin: "104deg" },
+  { left: "32%", delay: "-52s", duration: "73s", size: "28px", sway: "70px", spin: "-82deg" },
+  { left: "41%", delay: "-7s", duration: "47s", size: "34px", sway: "86px", spin: "92deg" },
+  { left: "50%", delay: "-61s", duration: "79s", size: "42px", sway: "116px", spin: "-118deg" },
+  { left: "59%", delay: "-31s", duration: "63s", size: "26px", sway: "58px", spin: "88deg" },
+  { left: "68%", delay: "-18s", duration: "55s", size: "40px", sway: "98px", spin: "-108deg" },
+  { left: "77%", delay: "-69s", duration: "83s", size: "32px", sway: "78px", spin: "116deg" },
+  { left: "86%", delay: "-45s", duration: "71s", size: "48px", sway: "126px", spin: "-126deg" },
+  { left: "94%", delay: "-3s", duration: "49s", size: "30px", sway: "72px", spin: "98deg" },
+] as const;
 
 function encodeRememberedLogin(username: string, password: string) {
   return window.btoa(unescape(encodeURIComponent(JSON.stringify({ username, password }))));
@@ -25,6 +40,27 @@ function decodeRememberedLogin(value: string) {
   } catch {
     return null;
   }
+}
+
+function FallingLeaves() {
+  return (
+    <div className="zxgj-login-leaves" aria-hidden="true">
+      {fallingLeafStyles.map((style, index) => (
+        <span
+          key={`ginkgo-leaf-${index}`}
+          style={{
+            "--leaf-image": `url("${ginkgoLeafImage}")`,
+            "--leaf-left": style.left,
+            "--leaf-delay": style.delay,
+            "--leaf-duration": style.duration,
+            "--leaf-size": style.size,
+            "--leaf-sway": style.sway,
+            "--leaf-spin": style.spin,
+          } as CSSProperties}
+        />
+      ))}
+    </div>
+  );
 }
 
 function LoginForm() {
@@ -70,7 +106,7 @@ function LoginForm() {
     if (!checked) localStorage.removeItem(REMEMBER_LOGIN_KEY);
   };
 
-  const handleLogin = async (e: React.FormEvent) => {
+  const handleLogin = async (e: FormEvent) => {
     e.preventDefault();
     setError("");
     setLoading(true);
@@ -100,6 +136,7 @@ function LoginForm() {
         }}
       >
         <LoginStyles />
+        <FallingLeaves />
         <Loader2 className="zxgj-login-loading" />
       </main>
     );
@@ -113,6 +150,7 @@ function LoginForm() {
       }}
     >
       <LoginStyles />
+      <FallingLeaves />
       <section className="zxgj-login-shell" aria-label="账号登录">
         <div className="zxgj-login-panel">
           <div className="zxgj-login-panel-inner">
@@ -202,6 +240,14 @@ function LoginStyles() {
         --zxgj-login-ease: cubic-bezier(.32,.72,0,1);
       }
 
+      @font-face {
+        font-family: "ZxgjLoginScript";
+        src: url("/fonts/kalam-700.ttf") format("truetype");
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+      }
+
       @keyframes zxgj-login-rise {
         from {
           opacity: 0;
@@ -210,6 +256,30 @@ function LoginStyles() {
         to {
           opacity: 1;
           transform: translate(-50%, -50%) scale(1);
+        }
+      }
+
+      @keyframes zxgj-leaf-fall {
+        0% {
+          transform: translate3d(0, -34vh, 0) rotate(calc(var(--leaf-spin) * -.42));
+        }
+        34% {
+          transform: translate3d(calc(var(--leaf-sway) * .42), 28vh, 0) rotate(calc(var(--leaf-spin) * .24));
+        }
+        68% {
+          transform: translate3d(calc(var(--leaf-sway) * -.2), 78vh, 0) rotate(calc(var(--leaf-spin) * .68));
+        }
+        100% {
+          transform: translate3d(var(--leaf-sway), 132vh, 0) rotate(var(--leaf-spin));
+        }
+      }
+
+      @keyframes zxgj-leaf-drift {
+        0%, 100% {
+          margin-left: 0;
+        }
+        50% {
+          margin-left: calc(var(--leaf-sway) * -.16);
         }
       }
 
@@ -226,12 +296,40 @@ function LoginStyles() {
 
       .zxgj-login-loading {
         position: absolute;
+        z-index: 3;
         left: 50%;
         top: 50%;
         width: 32px;
         height: 32px;
         color: #fff8e7;
         transform: translate(-50%, -50%);
+      }
+
+      .zxgj-login-leaves {
+        pointer-events: none;
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        overflow: hidden;
+      }
+
+      .zxgj-login-leaves span {
+        position: absolute;
+        top: 0;
+        left: var(--leaf-left);
+        width: var(--leaf-size);
+        height: calc(var(--leaf-size) * 1.12);
+        opacity: .96;
+        transform-origin: 50% 68%;
+        background-image: var(--leaf-image);
+        background-repeat: no-repeat;
+        background-size: contain;
+        background-position: center;
+        filter: drop-shadow(0 10px 18px rgba(92,43,10,.16));
+        animation:
+          zxgj-leaf-fall var(--leaf-duration) linear var(--leaf-delay) infinite,
+          zxgj-leaf-drift calc(var(--leaf-duration) * .44) ease-in-out var(--leaf-delay) infinite;
+        will-change: transform;
       }
 
       .zxgj-login-shell {
@@ -281,11 +379,11 @@ function LoginStyles() {
         background: rgba(154,51,41,.1);
         padding: 0 12px;
         color: #a83a31;
-        font-family: "凌慧体-简", "LingWai SC", "手札体-简", "Apple Chancery", cursive;
-        font-size: 18px;
+        font-family: "ZxgjLoginScript", cursive;
+        font-size: 17px;
         font-style: normal;
         font-weight: 700;
-        letter-spacing: .02em;
+        letter-spacing: 0;
       }
 
       .zxgj-login-title {
@@ -519,6 +617,17 @@ function LoginStyles() {
         to {
           opacity: 1;
           transform: translateY(0) scale(1);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .zxgj-login-shell {
+          opacity: 1;
+          animation: none;
+        }
+
+        .zxgj-login-leaves {
+          display: none;
         }
       }
     `}</style>
