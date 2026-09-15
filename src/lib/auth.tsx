@@ -43,36 +43,6 @@ const SESSION_EXPIRED_MESSAGE = "登录已过期，请重新登录";
 const SESSION_EXPIRED_STORAGE_KEY = "zxgj_session_expired_message";
 const SESSION_ACTIVITY_TOUCH_INTERVAL_MS = 5 * 60 * 1000;
 
-function getFetchUrl(input: RequestInfo | URL) {
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return input.toString();
-  return input.url;
-}
-
-function isProtectedSystemRequest(input: RequestInfo | URL) {
-  if (typeof window === "undefined") return false;
-  try {
-    const url = new URL(getFetchUrl(input), window.location.href);
-    if (url.origin !== window.location.origin) return false;
-    const pathname = url.pathname;
-    if (pathname === "/api/auth/login" || pathname === "/api/auth/logout" || pathname === "/api/auth/me") return false;
-    if (pathname.startsWith("/api/site-checkin/")) return false;
-    if (pathname.startsWith("/api/signature-capture/")) return false;
-    if (pathname.startsWith("/api/vr-shares/")) return false;
-    if (pathname.startsWith("/api/quotation-shares/")) return false;
-    if (pathname.startsWith("/api/")) return true;
-    return [
-      "/uploads/customers/",
-      "/uploads/projects/",
-      "/uploads/materials/",
-      "/uploads/users/",
-      "/uploads/branches/",
-    ].some((prefix) => pathname.startsWith(prefix));
-  } catch {
-    return false;
-  }
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -102,23 +72,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       router.replace(`/login${redirect}`);
     };
 
-    window.fetch = async (input, init) => {
-      const response = await originalFetch(input, init);
-      if (
-        response.status === 401
-        && userRef.current
-        && isProtectedSystemRequest(input)
-        && !handlingSessionExpiredRef.current
-      ) {
-        redirectToLogin();
-      }
-      return response;
-    };
-
-    const touchSessionAfterActivity = () => {
+    const touchSessionAfterActivity = (event?: Event) => {
       if (!userRef.current || handlingSessionExpiredRef.current) return;
       const now = Date.now();
-      if (now - lastSessionTouchAtRef.current < SESSION_ACTIVITY_TOUCH_INTERVAL_MS) return;
+      const isDirectInteraction = event?.type === "pointerdown" || event?.type === "touchstart";
+      if (!isDirectInteraction && now - lastSessionTouchAtRef.current < SESSION_ACTIVITY_TOUCH_INTERVAL_MS) return;
       lastSessionTouchAtRef.current = now;
       originalFetch("/api/auth/me", { credentials: "same-origin" })
         .then((response) => {
@@ -136,14 +94,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         })
         .catch(() => undefined);
     };
-    const activityEvents = ["pointerdown", "keydown", "wheel", "touchstart", "scroll"] as const;
+    const activityEvents = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
     activityEvents.forEach((eventName) => window.addEventListener(eventName, touchSessionAfterActivity, { passive: true }));
-    document.addEventListener("visibilitychange", touchSessionAfterActivity);
     window.addEventListener("app:navigation-start", checkSessionBeforeNavigation);
     return () => {
-      window.fetch = originalFetch;
       activityEvents.forEach((eventName) => window.removeEventListener(eventName, touchSessionAfterActivity));
-      document.removeEventListener("visibilitychange", touchSessionAfterActivity);
       window.removeEventListener("app:navigation-start", checkSessionBeforeNavigation);
     };
   }, [queryClient, router]);

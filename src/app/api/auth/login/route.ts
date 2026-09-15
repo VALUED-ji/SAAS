@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
-import { getDb } from "@/lib/db";
+import { ensureUserLoginColumns, getDb } from "@/lib/db";
 import { setSessionCookie, signSessionToken } from "@/lib/security/session";
 import { isSameOriginMutation } from "@/lib/security/authorization";
 import { getRequestIp } from "@/lib/security/requestIp";
+import { resolveLoginLocation } from "@/lib/security/loginLocation";
 import { getCompanyShortNameForOrgUnit, getSidebarBrandLogoUrlForOrgUnit, getSidebarBrandNameForOrgUnit, getSidebarBrandSubtitleForOrgUnit } from "@/lib/branchSettingsLookup";
 
 const DUMMY_PASSWORD_HASH = "$2b$10$K81ebwPQ.NQxF.HhcaYgeO6XmFcNITNI3OEKxwHt4rktjUDC2i41i";
@@ -61,7 +62,8 @@ export async function POST(req: NextRequest) {
     if (isRateLimited(attemptKey)) {
       return NextResponse.json({ message: "登录尝试次数过多，请15分钟后再试" }, { status: 429 });
     }
-    const db = getDb();
+  const db = getDb();
+  ensureUserLoginColumns(db);
 
     const user = db.prepare(`
       SELECT id, company_id, name, phone, password, avatar, role, org_unit_id, COALESCE(session_version, 0) as session_version
@@ -89,7 +91,9 @@ export async function POST(req: NextRequest) {
     }
 
     const now = new Date().toISOString();
-    db.prepare("UPDATE users SET last_login_at = ?, last_seen_at = ?, updated_at = datetime('now') WHERE id = ?").run(now, now, user.id);
+    const loginLocation = await resolveLoginLocation(req);
+    db.prepare("UPDATE users SET last_login_at = ?, last_login_ip = ?, last_login_location = ?, last_seen_at = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(now, loginLocation.ip, loginLocation.location, now, user.id);
 
     const company = db.prepare("SELECT name FROM companies WHERE id = ? AND deleted_at IS NULL").get(user.company_id) as any;
     if (!company) return NextResponse.json({ message: "账号所属公司不可用" }, { status: 403 });

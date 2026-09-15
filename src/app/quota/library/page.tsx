@@ -35,7 +35,7 @@ import type {
 
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Coins, Copy, Download, HelpCircle, History, Pencil, Percent, Plus, Search, SlidersHorizontal, Trash2, Upload, X } from "lucide-react";
+import { ChevronDown, Coins, Copy, Download, HelpCircle, History, Loader2, Pencil, Percent, Plus, Search, SlidersHorizontal, Trash2, Upload, X } from "lucide-react";
 import DataPagination, { useDataPagination } from "@/components/ui/DataPagination";
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
 import { useAuth } from "@/lib/auth";
@@ -75,6 +75,11 @@ export default function QuotaLibraryPage() {
   const [libraryMode, setLibraryMode] = useState<"standard" | "custom">("standard");
   const [quotaItems, setQuotaItems] = useState<QuotaItem[]>(initialQuotaItems);
   const [quotaItemsLoaded, setQuotaItemsLoaded] = useState(false);
+  const quotaItemsPersistSkipRef = useRef(true);
+  const quotaDictionariesLoadedRef = useRef(false);
+  const quotaRequestStartedRef = useRef(false);
+  const activeStoreScopeOptionsRef = useRef<string[]>([]);
+  const orgUnitsLoadedRef = useRef(false);
   const [orgUnits, setOrgUnits] = useState<OrgUnit[]>([]);
   const [orgUnitsLoaded, setOrgUnitsLoaded] = useState(false);
   const [workTypeOptions, setWorkTypeOptions] = useState<DictionaryOption[]>([]);
@@ -149,28 +154,34 @@ export default function QuotaLibraryPage() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/settings/work-types?status=active")
-      .then((res) => res.json())
-      .then((data) => {
-        const rows = Array.isArray(data?.workTypes) ? data.workTypes : [];
-        setWorkTypeOptions(rows.map((item: any) => ({ id: String(item.id || ""), name: String(item.name || "") })).filter((item: DictionaryOption) => item.id && item.name));
-      })
-      .catch(() => setWorkTypeOptions([]));
-    fetch("/api/materials?view=categories")
-      .then((res) => res.json())
-      .then((data) => {
-        const rows = Array.isArray(data?.categories) ? data.categories : [];
-        setMaterialCategoryOptions(rows
-          .filter((item: any) => Number(item.is_active ?? 1) === 1)
-          .map((item: any) => ({
-            id: String(item.id || ""),
-            name: item.parent_name ? `${item.parent_name} / ${item.name}` : String(item.name || ""),
-            parentName: String(item.parent_name || ""),
-          }))
-          .filter((item: DictionaryOption) => item.id && item.name));
-      })
-      .catch(() => setMaterialCategoryOptions([]));
-  }, []);
+    if (libraryMode !== "custom" && !editingItem) return;
+    if (quotaDictionariesLoadedRef.current) return;
+    quotaDictionariesLoadedRef.current = true;
+
+    Promise.all([
+      fetch("/api/settings/work-types?status=active")
+        .then((res) => res.json())
+        .catch(() => ({})),
+      fetch("/api/materials?view=categories")
+        .then((res) => res.json())
+        .catch(() => ({})),
+    ]).then(([workTypeData, materialData]) => {
+      const workTypeRows = Array.isArray(workTypeData?.workTypes) ? workTypeData.workTypes : [];
+      setWorkTypeOptions(workTypeRows
+        .map((item: any) => ({ id: String(item.id || ""), name: String(item.name || "") }))
+        .filter((item: DictionaryOption) => item.id && item.name));
+
+      const materialRows = Array.isArray(materialData?.categories) ? materialData.categories : [];
+      setMaterialCategoryOptions(materialRows
+        .filter((item: any) => Number(item.is_active ?? 1) === 1)
+        .map((item: any) => ({
+          id: String(item.id || ""),
+          name: item.parent_name ? `${item.parent_name} / ${item.name}` : String(item.name || ""),
+          parentName: String(item.parent_name || ""),
+        }))
+        .filter((item: DictionaryOption) => item.id && item.name));
+    });
+  }, [editingItem, libraryMode]);
 
   useEffect(() => {
     setSelectedQuotaIds([]);
@@ -229,16 +240,18 @@ export default function QuotaLibraryPage() {
   }, [activeStoreScopeOptions]);
 
   useEffect(() => {
-    if (!orgUnitsLoaded) return;
+    activeStoreScopeOptionsRef.current = activeStoreScopeOptions;
+  }, [activeStoreScopeOptions]);
+
+  useEffect(() => {
+    orgUnitsLoadedRef.current = orgUnitsLoaded;
+  }, [orgUnitsLoaded]);
+
+  useEffect(() => {
+    if (quotaRequestStartedRef.current) return;
+    quotaRequestStartedRef.current = true;
     let cancelled = false;
-    const activeScopes = new Set(activeStoreScopeOptions);
-    const filterActiveLocalItems = (items: QuotaItem[]) => (
-      activeScopes.size === 0 ? items : items.filter((item) => activeScopes.has(item.scope?.trim()))
-    );
     const loadQuotaItems = async () => {
-      const storedItems = loadQuotaItemsFromStorage();
-      const recoveredItems = storedItems.length > 0 ? [] : recoverQuotaItemsFromTemplates();
-      const localItems = filterActiveLocalItems(storedItems.length > 0 ? storedItems : recoveredItems);
       try {
         const response = await fetch("/api/quota/library", { cache: "no-store" });
         const data = await response.json().catch(() => ({}));
@@ -248,13 +261,17 @@ export default function QuotaLibraryPage() {
           : [];
         const loadedItems = serverItems;
         if (cancelled) return;
-        if (recoveredItems.length > 0) {
-          window.localStorage.setItem(QUOTA_LIBRARY_STORAGE_KEY, JSON.stringify(localItems));
-        }
         setQuotaItems(loadedItems);
         setQuotaItemsLoaded(true);
       } catch {
         if (cancelled) return;
+        const storedItems = loadQuotaItemsFromStorage();
+        const recoveredItems = storedItems.length > 0 ? [] : recoverQuotaItemsFromTemplates();
+        const activeScopes = new Set(activeStoreScopeOptionsRef.current);
+        const localItems = orgUnitsLoadedRef.current
+          ? (storedItems.length > 0 ? storedItems : recoveredItems)
+            .filter((item) => activeScopes.size === 0 || activeScopes.has(item.scope?.trim()))
+          : [];
         if (recoveredItems.length > 0) {
           window.localStorage.setItem(QUOTA_LIBRARY_STORAGE_KEY, JSON.stringify(localItems));
         }
@@ -266,11 +283,26 @@ export default function QuotaLibraryPage() {
     return () => {
       cancelled = true;
     };
-  }, [activeStoreScopeOptions, orgUnitsLoaded, saveQuotaItemsToServer]);
+  }, []);
+
+  useEffect(() => {
+    if (!orgUnitsLoaded || quotaItemsLoaded) return;
+    const storedItems = loadQuotaItemsFromStorage();
+    const recoveredItems = storedItems.length > 0 ? [] : recoverQuotaItemsFromTemplates();
+    const activeScopes = new Set(activeStoreScopeOptions);
+    const localItems = (storedItems.length > 0 ? storedItems : recoveredItems)
+      .filter((item) => activeScopes.size === 0 || activeScopes.has(item.scope?.trim()));
+    if (localItems.length === 0) return;
+    setQuotaItems(localItems);
+  }, [activeStoreScopeOptions, orgUnitsLoaded, quotaItemsLoaded]);
 
   useEffect(() => {
     if (!quotaItemsLoaded) return;
     window.localStorage.setItem(QUOTA_LIBRARY_STORAGE_KEY, JSON.stringify(quotaItems));
+    if (quotaItemsPersistSkipRef.current) {
+      quotaItemsPersistSkipRef.current = false;
+      return;
+    }
     saveQuotaItemsToServer(quotaItems);
   }, [quotaItems, quotaItemsLoaded, saveQuotaItemsToServer]);
   const storeFilterOptions = storeScopeOptions;
@@ -808,6 +840,12 @@ export default function QuotaLibraryPage() {
             <input value={search} onChange={(event) => setSearch(event.target.value)} className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-surface-400" placeholder="搜索定额编码、门店、项目名称、施工说明" />
           </div>
           <div className="quota-toolbar-compact flex flex-wrap items-center gap-2">
+            {!quotaItemsLoaded && (
+              <span className="inline-flex h-8 items-center gap-1.5 px-1 text-xs font-medium text-surface-500" role="status" aria-live="polite">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                正在加载
+              </span>
+            )}
             <span className="quota-filter-label inline-flex items-center gap-1.5 text-xs font-semibold text-surface-500"><SlidersHorizontal className="h-3.5 w-3.5" />筛选</span>
             <SystemSelect aria-label="按门店筛选" value={storeFilter} onChange={(event) => setStoreFilter(event.target.value)} className="input-field h-10 w-36 py-0">
               <option value="">全部门店</option>
@@ -876,7 +914,16 @@ export default function QuotaLibraryPage() {
               </tr>
             </thead>
             <tbody>
-              {pagination.pageItems.length === 0 ? (
+              {!quotaItemsLoaded && pagination.pageItems.length === 0 ? (
+                <tr className="quota-loading-row">
+                  <td colSpan={13} className="px-4 py-12 text-center">
+                    <div className="inline-flex items-center gap-2 text-sm font-medium text-surface-500" role="status" aria-live="polite">
+                      <Loader2 className="h-4 w-4 animate-spin text-primary-600" aria-hidden="true" />
+                      正在读取基装定额
+                    </div>
+                  </td>
+                </tr>
+              ) : pagination.pageItems.length === 0 ? (
                 <tr className="quota-empty-row">
                   <td colSpan={13} className="px-4 py-12 text-center">
                     <div className="quota-empty-icon mx-auto flex h-10 w-10 items-center justify-center rounded-[10px]">

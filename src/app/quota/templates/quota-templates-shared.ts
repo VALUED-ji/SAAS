@@ -129,6 +129,7 @@ export type TemplateSpaceQuota = {
   id: string;
   quotaId: string;
   code: string;
+  source?: "standard" | "custom";
   category: string;
   priceScene?: string;
   name: string;
@@ -191,6 +192,7 @@ export type QuotaTemplate = {
 export type QuotaLibraryItem = {
   id: string;
   code: string;
+  source?: "standard" | "custom";
   scope: string;
   category: string;
   priceScene: string;
@@ -279,7 +281,7 @@ export function makeDefaultComprehensiveFees() {
       fee_calc_method: "percent",
       fee_calc_base: "直接费",
       fee_rate: 10,
-      remark: "按工程直接费比例计取",
+      remark: "",
     }),
   ];
 }
@@ -292,7 +294,7 @@ export function isDefaultComprehensiveFeesOnly(value: TemplateComprehensiveFee[]
     && (normalizeFeeCalcBase(fee.fee_calc_base) || "直接费") === "直接费"
     && toAmount(fee.fee_rate) === 10
     && toAmount(fee.unit_price) === 0
-    && fee.remark.trim() === "按工程直接费比例计取"
+    && (fee.remark.trim() === "" || fee.remark.trim() === "按工程直接费比例计取")
     && normalizeFeeScopeMode(fee.fee_scope_mode) === "all"
     && fee.fee_scope_space_names.length === 0;
 }
@@ -769,6 +771,7 @@ export function makeQuotaItemFromLibrary(quota: QuotaLibraryItem, quoteScope?: T
   return makeSpaceQuotaItem({
     quotaId: quota.id,
     code: quota.code,
+    source: quota.source === "custom" ? "custom" : "standard",
     category: quota.category,
     priceScene: quota.priceScene,
     name: quota.name,
@@ -787,6 +790,7 @@ export function normalizeSpaceQuotaItem(value: any, index: number): TemplateSpac
     id: String(value?.id || `space-quota-${Date.now()}-${index}`),
     quotaId: String(value?.quotaId || value?.quota_id || ""),
     code: String(value?.code || ""),
+    source: value?.source === "custom" ? "custom" : value?.source === "standard" ? "standard" : undefined,
     category: String(value?.category || ""),
     priceScene: String(value?.priceScene || value?.price_scene || "标准"),
     name: String(value?.name || value?.quotaName || ""),
@@ -887,6 +891,7 @@ export function loadQuotaLibraryItems() {
         return {
           id: String(item.id || ""),
           code: String(item.code || ""),
+          source: item.source === "custom" ? "custom" : "standard",
           scope: String(item.scope || ""),
           category: String(item.category || ""),
           priceScene: String(item.priceScene || item.price_scene || "标准"),

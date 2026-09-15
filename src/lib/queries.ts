@@ -252,6 +252,8 @@ export interface TeamData {
   hire_date: string | null;
   notes: string | null;
   last_login_at: string | null;
+  last_login_ip: string | null;
+  last_login_location: string | null;
   last_seen_at: string | null;
   is_active: number;
   project_count: number;

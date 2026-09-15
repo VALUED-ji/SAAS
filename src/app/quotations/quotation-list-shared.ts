@@ -9,6 +9,11 @@ import { bindStableFeeFormula, normalizeFeeScopeMode, parseFeeScopeValues, type 
 
 export type QuotaTemplateSpaceQuota = {
   id: string;
+  quotaId?: string;
+  code?: string;
+  category?: string;
+  priceScene?: string;
+  source?: "standard" | "custom";
   name: string;
   constructionDescription: string;
   unit: string;
@@ -183,6 +188,11 @@ export function normalizeQuotaTemplate(value: any): QuotaTemplateOption | null {
       quotaItems: Array.isArray(space?.quotaItems)
         ? space.quotaItems.map((item: any, itemIndex: number): QuotaTemplateSpaceQuota => ({
           id: String(item?.id || `quota-${spaceIndex}-${itemIndex}`),
+          quotaId: String(item?.quotaId || item?.quota_id || ""),
+          code: String(item?.code || ""),
+          category: String(item?.category || ""),
+          priceScene: String(item?.priceScene || item?.price_scene || "标准"),
+          source: item?.source === "custom" ? "custom" : "standard",
           name: String(item?.name || "").trim(),
           constructionDescription: String(item?.constructionDescription || "").trim(),
           unit: String(item?.unit || "").trim(),

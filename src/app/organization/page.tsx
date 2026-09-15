@@ -78,6 +78,7 @@ function EnhancedOrgPage() {
         name: user.name,
         avatar: user.avatar || null,
         role: user.role,
+        role_name: user.role_name || null,
         org_unit_id: user.org_unit_id,
         org_unit_name: user.org_unit_name,
         phone: user.phone,

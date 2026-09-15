@@ -56,6 +56,7 @@ type ItemInput = {
   cost_source?: string | null;
   quota_source_id?: string | null;
   quota_source_type?: string | null;
+  quota_source_synced_at?: string | null;
   profit_margin?: number;
   row_color?: string | null;
   fee_calc_method?: string | null;
@@ -115,6 +116,7 @@ function ensureQuotationItemColumns(db: any) {
   if (!names.has("cost_source")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_source TEXT").run();
   if (!names.has("quota_source_id")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_id TEXT").run();
   if (!names.has("quota_source_type")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_type TEXT").run();
+  if (!names.has("quota_source_synced_at")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_synced_at TEXT").run();
   db.exec(`
     CREATE TABLE IF NOT EXISTS standard_quota_items (
       id TEXT PRIMARY KEY,
@@ -135,6 +137,21 @@ function ensureQuotationItemColumns(db: any) {
       ON standard_quota_items(company_id, quota_item_id);
     CREATE INDEX IF NOT EXISTS idx_standard_quota_items_company_status
       ON standard_quota_items(company_id, status, deleted_at);
+    CREATE TABLE IF NOT EXISTS standard_quota_item_change_logs (
+      id TEXT PRIMARY KEY,
+      company_id TEXT NOT NULL REFERENCES companies(id),
+      quota_item_id TEXT NOT NULL,
+      user_id TEXT REFERENCES users(id),
+      user_name TEXT,
+      action TEXT NOT NULL,
+      summary TEXT,
+      changes TEXT NOT NULL DEFAULT '[]',
+      before_payload TEXT,
+      after_payload TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_standard_quota_item_change_logs_item
+      ON standard_quota_item_change_logs(company_id, quota_item_id, created_at);
   `);
   ensureProjectCostControlSchema(db);
 }
@@ -961,6 +978,10 @@ function normalizeComparableText(value: unknown) {
   return String(value ?? "").trim();
 }
 
+function normalizeMultilineText(value: unknown) {
+  return String(value ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+}
+
 function normalizeComparableMoney(value: unknown) {
   return toMoney(Number(value || 0));
 }
@@ -984,8 +1005,25 @@ function normalizeStandardQuotaRow(row: any) {
     unit: String(payload.unit || "").trim(),
     material_price: materialPrice,
     labor_price: laborPrice,
-    construction_description: String(payload.constructionDescription || payload.construction_description || "").trim(),
+    construction_description: normalizeMultilineText(payload.constructionDescription || payload.construction_description || ""),
   };
+}
+
+function hasStandardQuotaChangedAfter(db: any, companyId: string, quotaItemId: string, baseline: string) {
+  const normalizedQuotaItemId = String(quotaItemId || "").trim();
+  if (!normalizedQuotaItemId) return false;
+  const normalizedBaseline = String(baseline || "").trim() || "1970-01-01 00:00:00";
+  const row = db.prepare(`
+    SELECT 1 AS changed
+    FROM standard_quota_item_change_logs
+    WHERE company_id = ?
+      AND quota_item_id = ?
+      AND action = 'updated'
+      AND datetime(created_at) > datetime(?)
+    ORDER BY datetime(created_at) DESC
+    LIMIT 1
+  `).get(companyId, normalizedQuotaItemId, normalizedBaseline) as any;
+  return Boolean(row?.changed);
 }
 
 function getQuotaUpdateCandidates(db: any, quotationId: string, companyId: string, itemIds?: string[]) {
@@ -1027,6 +1065,8 @@ function getQuotaUpdateCandidates(db: any, quotationId: string, companyId: strin
       const quota = normalizeStandardQuotaRow(sourceId ? standardByItemId.get(sourceId, companyId) : null)
         || normalizeStandardQuotaRow(code ? standardByCode.get(companyId, code) : null);
       if (!quota) return null;
+      const baseline = String(item.quota_source_synced_at || item.created_at || "").trim();
+      if (!hasStandardQuotaChangedAfter(db, companyId, quota.id, baseline)) return null;
       const differences = quotaSyncFields
         .map((field) => {
           const current = field.key === "material_cost" || field.key === "labor_cost"
@@ -1260,7 +1300,8 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
           material_cost = ?,
           labor_cost = ?,
           quota_source_id = ?,
-          quota_source_type = 'standard'
+          quota_source_type = 'standard',
+          quota_source_synced_at = datetime('now')
         WHERE id = ? AND quotation_id = ?
       `);
       const tx = (db as any).transaction(() => {
@@ -1725,9 +1766,9 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             category,
             space: inferItemSpace(item),
             name: String(item.name || "").trim(),
-            spec: String(item.spec || "").trim(),
+            spec: normalizeMultilineText(item.spec),
             material_model: String(item.material_model || "").trim(),
-            remark: String(item.remark || "").trim(),
+            remark: normalizeMultilineText(item.remark),
             unit: isCustomCabinet ? String(cabinetArea || item.unit || "") : String(item.unit || "").trim(),
             quantity,
             unit_price: unitPrice,
@@ -1766,8 +1807,8 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
           .get(targetQuotationId) as any;
         let nextSortOrder = Number(maxSortRow?.max_sort || 0);
         const insertItem = db.prepare(`
-          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         sourceItems.forEach((item: any) => {
           nextSortOrder += 1;
@@ -1804,6 +1845,7 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             String(item.cost_source || "").trim() || null,
             isBaseCategory(item.category) ? String(item.quota_source_id || "").trim() || null : null,
             isBaseCategory(item.category) && String(item.quota_source_type || "").trim() ? String(item.quota_source_type || "").trim() : null,
+            isBaseCategory(item.category) ? String(item.quota_source_synced_at || item.created_at || "").trim() || null : null,
             nextSortOrder,
           );
           copiedCount += 1;
@@ -1975,8 +2017,8 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
         );
 
         const insertItem = db.prepare(`
-          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         sourceItems.forEach((item) => {
           const copiedItemId = copiedItemIdBySourceId.get(String(item.id)) || makeId("QITEM");
@@ -2013,6 +2055,7 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             item.cost_source || null,
             item.quota_source_id || null,
             item.quota_source_type || null,
+            item.quota_source_synced_at || item.created_at || null,
             item.sort_order || 0
           );
         });
@@ -2245,6 +2288,7 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
       templatePricing: body.settings?.templatePricing && typeof body.settings.templatePricing === "object"
         ? body.settings.templatePricing
         : existingSettings.templatePricing,
+      quotationValidUntil: String(body.settings?.quotationValidUntil ?? existingSettings.quotationValidUntil ?? "").trim() || null,
     };
 
     let normalizedItems = items
@@ -2282,9 +2326,9 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           material_category_id: String(item.material_category_id || "").trim() || null,
           material_category_name: String(item.material_category_name || "").trim() || null,
           name: String(item.name || "").trim(),
-          spec: String(item.spec || "").trim(),
+          spec: normalizeMultilineText(item.spec),
           material_model: String(item.material_model || "").trim(),
-          remark: String(item.remark || "").trim(),
+          remark: normalizeMultilineText(item.remark),
           unit: isCustomCabinet ? String(cabinetArea) : String(item.unit ?? "").trim(),
           quantity: isOther && (feeMethod === "percent" || feeMethod === "reference" || feeMethod === "area_unit") ? 1 : quantity,
           unit_price: unitPrice,
@@ -2297,6 +2341,7 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           cost_source: String(item.cost_source || "").trim() || null,
           quota_source_id: isBase ? String(item.quota_source_id || "").trim() || null : null,
           quota_source_type: isBase && String(item.quota_source_type || "").trim() ? String(item.quota_source_type || "").trim() : null,
+          quota_source_synced_at: isBase && String(item.quota_source_synced_at || "").trim() ? String(item.quota_source_synced_at || "").trim() : null,
           profit_margin: profitMargin,
           row_color: normalizeRowColor(item.row_color),
           fee_calc_method: isOther ? feeMethod : null,
@@ -2349,8 +2394,8 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
     const tx = (db as any).transaction(() => {
       db.prepare("DELETE FROM quotation_items WHERE quotation_id = ?").run(params.id);
       const insertItem = db.prepare(`
-        INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, sort_order, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, sort_order, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       `);
       normalizedItems.forEach((item) => {
         insertItem.run(
@@ -2386,6 +2431,7 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           item.cost_source || null,
           item.quota_source_id || null,
           item.quota_source_type || null,
+          item.quota_source_synced_at || null,
           item.sort_order
         );
       });

@@ -27,7 +27,7 @@ import {
 
 
 
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent as ReactMouseEvent, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -43,7 +43,7 @@ import ThinScrollArea from "@/components/ui/ThinScrollArea";
 import SystemSelect from "@/components/ui/SystemSelect";
 import NativeImage from "@/components/ui/NativeImage";
 import AddCustomerModal, { AmapLocationPicker, type LocationPick } from "@/components/ui/AddCustomerModal";
-import { createQuotationPrintPreviewUrl, createQuotationShareUrl } from "@/lib/quotationShareClient";
+import { createQuotationPrintPreviewUrl, createQuotationShareUrl, type QuotationShareBaseColumnKey, type QuotationShareCabinetColumnKey, type QuotationShareProductColumnKey } from "@/lib/quotationShareClient";
 import {
   QuotationDialogState,
   QuotationSystemDialogModal,
@@ -230,6 +230,11 @@ function buildRecordProjectInfoForm(record: any): RecordProjectInfoForm {
     areaSize: formatCreateAreaInput(record?.customer_area_size ?? record?.project_area),
     decorationType: String(record?.customer_decoration_type || "").trim(),
   };
+}
+
+function getQuotationListCustomerName(record: any) {
+  const name = String(record?.customer_name || "").trim();
+  return /^(未命名客户|未命名)$/u.test(name) ? "-" : name || "-";
 }
 
 function formatCompareDiff(value: number) {
@@ -443,6 +448,26 @@ const quotationShareExpireOptions = [
   { label: "30天", value: 30, desc: "长期沟通" },
   { label: "永久", value: null, desc: "一直有效" },
 ] as const;
+const quotationShareBaseColumnOptions: { key: QuotationShareBaseColumnKey; label: string }[] = [
+  { key: "materialUnit", label: "材料单价" },
+  { key: "materialTotal", label: "材料合价" },
+  { key: "laborUnit", label: "人工单价" },
+  { key: "laborTotal", label: "人工合价" },
+  { key: "subtotal", label: "小计" },
+  { key: "description", label: "施工说明" },
+];
+const quotationShareProductColumnOptions: { key: QuotationShareProductColumnKey; label: string }[] = [
+  { key: "unitPrice", label: "单价" },
+  { key: "quantity", label: "数量" },
+  { key: "subtotal", label: "小计" },
+  { key: "remark", label: "备注" },
+];
+const quotationShareCabinetColumnOptions: { key: QuotationShareCabinetColumnKey; label: string }[] = [
+  { key: "quantity", label: "数量" },
+  { key: "area", label: "平方" },
+  { key: "unitPrice", label: "单价" },
+  { key: "amount", label: "金额" },
+];
 
 function waitForQuotationSaveCheck(delay = 300) {
   return new Promise((resolve) => window.setTimeout(resolve, delay));
@@ -569,6 +594,10 @@ export default function QuotationsPage() {
   const [copiedLinkId, setCopiedLinkId] = useState("");
   const [shareLinkDialog, setShareLinkDialog] = useState<any | null>(null);
   const [shareExpireDays, setShareExpireDays] = useState<number | "24h" | null>(7);
+  const [shareQuotationValidUntil, setShareQuotationValidUntil] = useState("");
+  const [shareBaseColumns, setShareBaseColumns] = useState<QuotationShareBaseColumnKey[]>(() => quotationShareBaseColumnOptions.map((option) => option.key));
+  const [shareProductColumns, setShareProductColumns] = useState<QuotationShareProductColumnKey[]>(() => quotationShareProductColumnOptions.map((option) => option.key));
+  const [shareCabinetColumns, setShareCabinetColumns] = useState<QuotationShareCabinetColumnKey[]>(() => quotationShareCabinetColumnOptions.map((option) => option.key));
   const [sharingLink, setSharingLink] = useState(false);
   const [promotedFormalRecord, setPromotedFormalRecord] = useState<{ id: string; title: string; reason: "set-formal" | "next-formal" } | null>(null);
   const [compareRecords, setCompareRecords] = useState<any[]>([]);
@@ -1833,7 +1862,15 @@ export default function QuotationsPage() {
   const openShareLinkDialog = (record: any) => {
     setShareLinkDialog(record);
     setShareExpireDays(7);
+    setShareQuotationValidUntil("");
+    setShareBaseColumns(quotationShareBaseColumnOptions.map((option) => option.key));
+    setShareProductColumns(quotationShareProductColumnOptions.map((option) => option.key));
+    setShareCabinetColumns(quotationShareCabinetColumnOptions.map((option) => option.key));
     setMessage("");
+  };
+
+  const toggleShareColumn = <Key extends string>(key: Key, setter: Dispatch<SetStateAction<Key[]>>) => {
+    setter((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
   };
 
   const copyShareLink = async () => {
@@ -1841,7 +1878,12 @@ export default function QuotationsPage() {
     const record = shareLinkDialog;
     try {
       setSharingLink(true);
-      const url = await createQuotationShareUrl(record.id, shareExpireDays);
+      const url = await createQuotationShareUrl(record.id, shareExpireDays, {
+        baseColumns: shareBaseColumns,
+        productColumns: shareProductColumns,
+        cabinetColumns: shareCabinetColumns,
+        quotationValidUntil: shareQuotationValidUntil,
+      });
       if (!navigator.clipboard?.writeText) throw new Error("当前浏览器不支持自动复制，请手动复制链接");
       await navigator.clipboard.writeText(url);
       setMessage("");
@@ -1943,6 +1985,7 @@ export default function QuotationsPage() {
       label: baseRow?.label || "-",
       space: baseRow?.space || "-",
       kind: baseRow?.kind || "base",
+      rows,
       amounts,
       counts,
       diff: maxAmount - minAmount,
@@ -1980,6 +2023,46 @@ export default function QuotationsPage() {
       </div>
     );
   };
+
+  const renderShareFieldGroup = <Key extends string,>(
+    groupName: string,
+    options: { key: Key; label: string }[],
+    selected: Key[],
+    setter: Dispatch<SetStateAction<Key[]>>,
+  ) => (
+    <div className="bg-white py-2">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <span className="inline-flex items-center gap-2 text-[14px] font-bold leading-5 text-[#25364b]">
+          <i className="h-2 w-2 rounded-full bg-[#159a68]" />
+          {groupName}
+        </span>
+        <span className="rounded-full bg-[#f2f6fb] px-2.5 py-1 text-[12px] font-semibold leading-4 text-[#667085]">{selected.length}/{options.length}</span>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {options.map((option) => {
+          const checked = selected.includes(option.key);
+          return (
+            <button
+              key={option.key}
+              type="button"
+              disabled={sharingLink}
+              onClick={() => toggleShareColumn(option.key, setter)}
+              className={`flex h-10 items-center gap-2.5 rounded-[10px] border px-3 text-left text-[13px] font-normal leading-5 transition disabled:opacity-60 ${
+                checked
+                  ? "border-[#7fd7a4] bg-white text-[#173426]"
+                  : "border-[#dbe3ee] bg-white text-[#667085] hover:border-[#b8c7d8] hover:bg-[#f8fafc]"
+              }`}
+            >
+              <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${checked ? "bg-[#18aa67] text-white" : "border border-[#cbd5e1] bg-[#f8fafc] text-transparent"}`}>
+                <Check className="h-3.5 w-3.5" />
+              </span>
+              <span className="truncate">{option.label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
 
   if (authLoading || isLoading) {
     return (
@@ -2108,7 +2191,7 @@ export default function QuotationsPage() {
 	                    </td>
 	                    <td className="quotation-index-td quotation-index-center">
 	                      <span className="inline-flex max-w-full items-center justify-center gap-1.5">
-	                        <span className="truncate">{q.customer_name || "-"}</span>
+	                        <span className="truncate">{getQuotationListCustomerName(q)}</span>
 	                        {q.is_unbound ? <span className="quotation-index-tag border-amber-200 bg-amber-50 text-amber-700">未绑定</span> : null}
 	                      </span>
 	                    </td>
@@ -2489,16 +2572,20 @@ export default function QuotationsPage() {
       )}
 
       {shareLinkDialog && (
-        <div className="fixed inset-0 z-[64] flex items-center justify-center bg-[#0f172a]/32 p-4">
-          <div className="w-full max-w-[560px] overflow-hidden rounded-[18px] border border-[#d8e0eb] bg-white shadow-[0_24px_72px_rgba(15,23,42,0.22)]">
-            <div className="flex items-start justify-between gap-4 px-6 py-5">
+        <div className="fixed inset-0 z-[64] flex items-center justify-center overflow-y-auto bg-[#0f172a]/32 p-4">
+          <div
+            className="max-h-[calc(100dvh-24px)] w-full max-w-[660px] overflow-y-auto rounded-[18px] bg-white p-5 shadow-[0_24px_72px_rgba(15,23,42,0.22)]"
+            onWheel={(event) => event.stopPropagation()}
+            onTouchMove={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-[#e6edf5] pb-4">
               <div className="flex min-w-0 items-start gap-3.5">
                 <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[12px] border border-[#bfe8d2] bg-[#f0fbf6] text-[#159a68]">
                   <LinkIcon className="h-5 w-5" />
                 </span>
                 <div className="min-w-0">
                   <h3 className="text-[18px] font-semibold text-[#172033]">分享报价链接</h3>
-                  <p className="mt-2 text-sm font-semibold text-[#667085]">选择链接有效期，确认后生成并复制。</p>
+                  <p className="mt-2 text-sm font-semibold text-[#667085]">选择链接有效期和客户可见字段，确认后生成并复制。</p>
                 </div>
               </div>
               <button
@@ -2512,17 +2599,22 @@ export default function QuotationsPage() {
               </button>
             </div>
 
-            <div className="bg-white px-6 pb-5 pt-1">
-              <div className="mb-4 flex min-h-[50px] items-center gap-3 rounded-[12px] border border-[#dce6f2] bg-[#fbfcfe] px-3.5" title={getBudgetRecordTitle(shareLinkDialog)}>
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] bg-white text-[#159a68] ring-1 ring-[#d7eee2]">
+            <div className="pt-4">
+              <div className="mb-4 flex min-h-[54px] items-center gap-3 border-b border-[#edf2f7] pb-4" title={getBudgetRecordTitle(shareLinkDialog)}>
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#f4fbf7] text-[#159a68] ring-1 ring-[#d7eee2]">
                   <ReceiptText className="h-4 w-4" />
                 </span>
                 <div className="min-w-0 flex-1">
-                  <span className="block text-[11px] font-semibold leading-4 text-[#98a2b3]">分享对象</span>
-                  <span className="block truncate text-sm font-semibold leading-5 text-[#344054]">{getBudgetRecordTitle(shareLinkDialog)}</span>
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="rounded-full bg-[#f2f6fb] px-2 py-0.5 text-[11px] font-semibold leading-4 text-[#667085]">分享对象</span>
+                    <span className="h-1 w-1 rounded-full bg-[#cbd5e1]" />
+                    <span className="text-[11px] font-medium leading-4 text-[#98a2b3]">报价单</span>
+                  </div>
+                  <span className="block truncate text-[14px] font-semibold leading-5 text-[#25364b]">{getBudgetRecordTitle(shareLinkDialog)}</span>
                 </div>
+                <span className="hidden shrink-0 rounded-full bg-[#ecfdf3] px-2.5 py-1 text-[11px] font-bold leading-4 text-[#149260] sm:inline-flex">客户可见</span>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-3 border-b border-[#edf2f7] pb-4">
                 {quotationShareExpireOptions.map((option) => {
                   const active = shareExpireDays === option.value;
                   return (
@@ -2533,7 +2625,7 @@ export default function QuotationsPage() {
                       disabled={sharingLink}
                       className={`flex min-h-[64px] items-center gap-3 rounded-[12px] border px-4 text-left transition disabled:opacity-60 ${
                         active
-                          ? "border-[#64d795] bg-[#f4fdf8] text-[#143b2b] shadow-[0_10px_24px_rgba(21,154,104,0.08)]"
+                          ? "border-[#64d795] bg-white text-[#143b2b] shadow-[0_10px_24px_rgba(21,154,104,0.08)]"
                           : "border-[#dbe3ee] bg-white text-[#475467] hover:border-[#a9e7c4] hover:bg-[#fbfffd]"
                       }`}
                     >
@@ -2548,12 +2640,56 @@ export default function QuotationsPage() {
                   );
                 })}
               </div>
-              <div className="mt-4 rounded-[12px] border border-[#cdeedc] bg-[#f4fdf8] px-3.5 py-2.5 text-xs leading-5 text-[#47715d]">
+              <div className="border-b border-[#edf2f7] py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[15px] font-semibold leading-5 text-[#26384c]">报价执行有效期</p>
+                    <p className="mt-1 text-[13px] font-medium leading-5 text-[#7a8699]">默认使用当年12月31日，也可以为本次分享指定日期。</p>
+                  </div>
+                  <span className="shrink-0 text-[12px] font-semibold text-[#159a68]">{shareQuotationValidUntil ? "自定义日期" : "默认日期"}</span>
+                </div>
+                <div className="mt-3 flex items-center gap-2">
+                  <input
+                    type="date"
+                    aria-label="报价执行有效期"
+                    value={shareQuotationValidUntil}
+                    onChange={(event) => setShareQuotationValidUntil(event.target.value)}
+                    disabled={sharingLink}
+                    className="h-10 min-w-0 flex-1 rounded-[9px] border border-[#dbe3ee] bg-white px-3 text-sm text-[#344054] outline-none transition focus:border-[#64d795] focus:ring-4 focus:ring-[#64d795]/10 disabled:opacity-60"
+                  />
+                  {shareQuotationValidUntil && (
+                    <button
+                      type="button"
+                      onClick={() => setShareQuotationValidUntil("")}
+                      disabled={sharingLink}
+                      className="h-10 rounded-[9px] border border-[#bfe8d2] bg-[#f3fbf6] px-3 text-xs font-semibold text-[#159a68] transition hover:bg-[#e8f8ee] disabled:opacity-60"
+                    >
+                      默认
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="mt-4 border-b border-[#edf2f7] pb-4">
+                <div className="mb-3 flex items-start justify-between gap-3 px-0.5 py-0.5">
+                  <div>
+                    <p className="text-[15px] font-semibold leading-5 text-[#26384c]">客户可见字段</p>
+                    <p className="mt-1 text-[13px] font-medium leading-5 text-[#7a8699]">配置随本次链接保存，客户只能看到勾选字段。</p>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-[#ecfdf3] px-3 py-1.5 text-[12px] font-bold leading-4 text-[#149260]">链接快照</span>
+                </div>
+                <div className="grid gap-3">
+                  {renderShareFieldGroup("基装", quotationShareBaseColumnOptions, shareBaseColumns, setShareBaseColumns)}
+                  {renderShareFieldGroup("产品", quotationShareProductColumnOptions, shareProductColumns, setShareProductColumns)}
+                  {renderShareFieldGroup("定制柜", quotationShareCabinetColumnOptions, shareCabinetColumns, setShareCabinetColumns)}
+                </div>
+              </div>
+              <div className="mt-4 text-[13px] leading-5 text-[#47715d]">
                 生成后会自动复制到剪贴板；过期后客户再次打开会提示链接已失效。
               </div>
+              <div className="h-2" />
             </div>
 
-            <div className="flex items-center justify-end gap-3 bg-white px-6 pb-4 pt-2">
+            <div className="flex items-center justify-end gap-3 pt-4">
               <button
                 type="button"
                 onClick={() => setShareLinkDialog(null)}
@@ -2866,11 +3002,11 @@ export default function QuotationsPage() {
                                 <p className="font-semibold leading-[18px] text-[#182230]" title={row.label}>{row.label}</p>
                               </div>
                               {row.amounts.map((amount: number, index: number) => {
+                                const missing = !row.rows[index] || Number(row.counts[index] || 0) === 0;
                                 const higher = row.maxAmount > row.minAmount + 0.005 && amount >= row.maxAmount - 0.005;
-                                const missing = amount < 0.005 && row.maxAmount > 0.005;
                                 return (
-                                  <div key={`${row.key}-${index}`} className={`flex h-full items-center justify-end border-r border-[#edf1f5] px-4 py-3 text-right font-semibold tabular-nums ${higher ? "bg-red-50 text-red-600" : missing ? "text-[#a0a8b5]" : "text-[#182230]"}`}>
-                                    {missing ? "-" : formatRecordAmount(amount)}
+                                  <div key={`${row.key}-${index}`} className={`flex h-full items-center justify-end border-r border-[#edf1f5] px-4 py-3 text-right font-semibold tabular-nums ${higher ? "bg-red-50 text-red-600" : missing ? "text-[#98a2b3]" : "text-[#182230]"}`}>
+                                    {missing ? "无此项目" : formatRecordAmount(amount)}
                                   </div>
                                 );
                               })}

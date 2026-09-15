@@ -4,8 +4,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Building2, Building, ChevronRight, Edit3, Globe, Layers, Plus, Power, Search, Store, Trash2, Users, X } from "lucide-react";
+import { ChevronRight, Edit3, Plus, Power, Search, Trash2, X } from "lucide-react";
 import NativeImage from "@/components/ui/NativeImage";
+import { formatUserRoleLabel } from "@/lib/userRoleLabels";
 export interface OrgUnit {
   id: string;
   name: string;
@@ -21,7 +22,7 @@ export interface OrgUnit {
   is_active?: number;
   customer_count?: number;
 }
-export interface UserOption { id: string; name: string; avatar?: string | null; role: string; org_unit_id?: string | null; org_unit_name?: string; phone?: string | null; is_active?: number; }
+export interface UserOption { id: string; name: string; avatar?: string | null; role: string; role_name?: string | null; org_unit_id?: string | null; org_unit_name?: string; phone?: string | null; is_active?: number; }
 
 export const metricTileClass = "org-access-metric rounded-md border border-surface-200 bg-white px-3 py-2";
 
@@ -138,7 +139,11 @@ export function getDeleteImpact(units: OrgUnit[], users: UserOption[], id: strin
 }
 
 export function getRoleLabel(role: string) {
-  return roleLabels[role] || role || "未设置角色";
+  return formatUserRoleLabel(role);
+}
+
+export function getUserRoleLabel(user: Pick<UserOption, "role" | "role_name">) {
+  return formatUserRoleLabel(user.role, user.role_name);
 }
 
 export function getAvatarText(name: string) {
@@ -149,6 +154,61 @@ export function EmployeeAvatar({ user, className }: { user: UserOption; classNam
   return (
     <span className={`flex shrink-0 items-center justify-center overflow-hidden ${className}`}>
       {user.avatar ? <NativeImage src={user.avatar} alt={`${user.name || "员工"}头像`} className="h-full w-full object-cover" /> : getAvatarText(user.name)}
+    </span>
+  );
+}
+
+export function OrgLevelIcon({ type, size = "md" }: { type?: string | null; size?: "md" | "lg" }) {
+  const normalizedType = orgTypeOrder.includes(String(type || "") as any) ? String(type) : "team";
+  return (
+    <span className={`org-level-icon-badge org-level-icon-${normalizedType} ${size === "lg" ? "org-level-icon-lg" : ""}`} aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none">
+        {normalizedType === "group" && (
+          <>
+            <path d="M6.2 19.2V6.8a1.6 1.6 0 0 1 1.6-1.6h8.4a1.6 1.6 0 0 1 1.6 1.6v12.4" />
+            <path d="M4.4 19.2h15.2" />
+            <path d="M9.2 8.5h1.8M13 8.5h1.8M9.2 11.7h1.8M13 11.7h1.8M9.2 15h1.8M13 15h1.8" />
+          </>
+        )}
+        {normalizedType === "region" && (
+          <>
+            <path d="M12 20.2a8.2 8.2 0 1 0 0-16.4 8.2 8.2 0 0 0 0 16.4Z" />
+            <path d="M4.3 12h15.4" />
+            <path d="M12 3.8c2 2.2 3 4.9 3 8.2s-1 6-3 8.2c-2-2.2-3-4.9-3-8.2s1-6 3-8.2Z" />
+          </>
+        )}
+        {normalizedType === "company" && (
+          <>
+            <path d="M6.4 19.2V7a1.5 1.5 0 0 1 1.5-1.5h8.2A1.5 1.5 0 0 1 17.6 7v12.2" />
+            <path d="M4.7 19.2h14.6" />
+            <path d="M9 8.5h2M13 8.5h2M9 11.7h2M13 11.7h2M9 14.9h2M13 14.9h2" />
+            <path d="M10.2 19.2v-2.5h3.6v2.5" />
+          </>
+        )}
+        {normalizedType === "store" && (
+          <>
+            <path d="M5.2 10.1h13.6l-1.1-4.2H6.3l-1.1 4.2Z" />
+            <path d="M6.2 10.1v7.8a1.3 1.3 0 0 0 1.3 1.3h9a1.3 1.3 0 0 0 1.3-1.3v-7.8" />
+            <path d="M8.4 19.2v-5h7.2v5" />
+            <path d="M9.2 14.2h5.6" />
+          </>
+        )}
+        {normalizedType === "dept" && (
+          <>
+            <path d="m12 4.4 7 3.4-7 3.4-7-3.4 7-3.4Z" />
+            <path d="m5 11.4 7 3.4 7-3.4" />
+            <path d="m5 15 7 3.4 7-3.4" />
+          </>
+        )}
+        {normalizedType === "team" && (
+          <>
+            <path d="M9.2 11.2a2.7 2.7 0 1 0 0-5.4 2.7 2.7 0 0 0 0 5.4Z" />
+            <path d="M14.8 10.4a2.1 2.1 0 1 0 0-4.2" />
+            <path d="M4.8 18.2v-.8c0-2.2 1.8-4 4.4-4s4.4 1.8 4.4 4v.8" />
+            <path d="M14.8 13.7c2 .3 3.4 1.7 3.4 3.6v.9" />
+          </>
+        )}
+      </svg>
     </span>
   );
 }
@@ -166,7 +226,6 @@ export function EnhancedOrgNode({ node, depth, expanded, selectedId, onSelect, o
   onDelete: (node: OrgUnit) => void;
 }) {
   const meta = typeMeta[node.type] || typeMeta.team;
-  const Icon = meta.icon;
   const hasChildren = (node.children?.length || 0) > 0;
   const isOpen = expanded.has(node.id);
   const isSelected = selectedId === node.id;
@@ -196,7 +255,7 @@ export function EnhancedOrgNode({ node, depth, expanded, selectedId, onSelect, o
             <span className="h-4 w-4" />
           )}
         </button>
-        <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${meta.color}`}><Icon className="h-4 w-4" /></span>
+        <OrgLevelIcon type={node.type} />
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
             <span className="truncate text-sm font-semibold text-surface-900">
@@ -295,7 +354,7 @@ export function ManagerPicker({ users, value, onChange }: {
   const filteredUsers = useMemo(() => {
     const matched = normalizedQuery
       ? availableUsers.filter((user) => {
-          const searchText = `${user.name} ${user.phone || ""} ${user.org_unit_name || ""} ${getRoleLabel(user.role)}`.toLowerCase();
+          const searchText = `${user.name} ${user.phone || ""} ${user.org_unit_name || ""} ${getUserRoleLabel(user)}`.toLowerCase();
           return searchText.includes(normalizedQuery);
         })
       : availableUsers;
@@ -344,7 +403,7 @@ export function ManagerPicker({ users, value, onChange }: {
                     {index === 0 && <span className="shrink-0 rounded bg-primary-50 px-1.5 py-0.5 text-[11px] font-semibold text-primary-700">主负责人</span>}
                   </span>
                   <span className="mt-0.5 block truncate text-xs text-surface-500">
-                    {getRoleLabel(user.role)}{user.org_unit_name ? ` · ${user.org_unit_name}` : ""}{user.phone ? ` · ${user.phone}` : ""}
+                    {getUserRoleLabel(user)}{user.org_unit_name ? ` · ${user.org_unit_name}` : ""}{user.phone ? ` · ${user.phone}` : ""}
                   </span>
                 </span>
                 {index > 0 && (
@@ -408,7 +467,7 @@ export function ManagerPicker({ users, value, onChange }: {
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-medium text-surface-900">{user.name}</span>
                   <span className="mt-0.5 block truncate text-xs text-surface-500">
-                    {getRoleLabel(user.role)}{user.org_unit_name ? ` · ${user.org_unit_name}` : ""}{user.phone ? ` · ${user.phone}` : ""}
+                    {getUserRoleLabel(user)}{user.org_unit_name ? ` · ${user.org_unit_name}` : ""}{user.phone ? ` · ${user.phone}` : ""}
                   </span>
                 </span>
                 <span className={`shrink-0 rounded-md border px-2 py-1 text-xs font-semibold ${
@@ -448,7 +507,7 @@ export function OrgDetailPanel({ node, units, users, showMembers, onToggleMember
     return (
       <aside className={`${panelClass} organization-detail-panel min-h-0 overflow-y-auto p-6`}>
         <div className="flex min-h-[280px] flex-col items-center justify-center text-center text-surface-400">
-          <Building2 className="mb-3 h-10 w-10 text-surface-300" />
+          <OrgLevelIcon type="group" size="lg" />
           <p className="text-sm font-medium text-surface-600">请选择一个组织</p>
           <p className="mt-1 text-xs">选择左侧组织后，这里会显示完整信息。</p>
         </div>
@@ -457,7 +516,6 @@ export function OrgDetailPanel({ node, units, users, showMembers, onToggleMember
   }
 
   const meta = typeMeta[node.type] || typeMeta.team;
-  const Icon = meta.icon;
   const managerName = getManagerName(node);
   const parent = node.parent_id ? units.find((unit) => unit.id === node.parent_id) : null;
   const children = units.filter((unit) => unit.parent_id === node.id);
@@ -476,9 +534,7 @@ export function OrgDetailPanel({ node, units, users, showMembers, onToggleMember
     <aside className={`${panelClass} organization-detail-panel min-h-0 overflow-y-auto`}>
       <div className={panelHeaderClass}>
         <div className="flex items-start gap-3">
-          <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-md ${meta.color}`}>
-            <Icon className="h-5 w-5" />
-          </span>
+          <OrgLevelIcon type={node.type} size="lg" />
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2">
               <h3 className="truncate text-base font-semibold text-surface-900">{node.name}</h3>
@@ -579,7 +635,6 @@ export function OrgDetailPanel({ node, units, users, showMembers, onToggleMember
             <div className="overflow-hidden rounded-lg border border-surface-200">
               {children.map((child) => {
                 const childMeta = typeMeta[child.type] || typeMeta.team;
-                const ChildIcon = childMeta.icon;
                 const childActive = isOrgActive(child);
                 return (
                   <button
@@ -588,9 +643,7 @@ export function OrgDetailPanel({ node, units, users, showMembers, onToggleMember
                     onClick={() => onSelect(child.id)}
                     className="flex w-full items-center gap-3 border-b border-surface-200/70 px-3 py-2.5 text-left transition last:border-b-0 hover:bg-surface-50"
                   >
-                    <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${childMeta.color}`}>
-                      <ChildIcon className="h-4 w-4" />
-                    </span>
+                    <OrgLevelIcon type={child.type} />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium text-surface-900">{child.name}</span>
                       <span className="mt-0.5 block truncate text-xs text-surface-500">
@@ -611,13 +664,13 @@ export function OrgDetailPanel({ node, units, users, showMembers, onToggleMember
 }
 
 
-export const typeMeta: Record<string, { label: string; icon: React.ElementType; color: string }> = {
-  group: { label: "集团", icon: Building2, color: "text-surface-800 bg-surface-100 ring-1 ring-surface-200" },
-  region: { label: "大区", icon: Globe, color: "text-primary-700 bg-primary-50 ring-1 ring-primary-100" },
-  company: { label: "公司", icon: Building, color: "text-accent-700 bg-accent-50 ring-1 ring-accent-100" },
-  store: { label: "门店", icon: Store, color: "text-amber-700 bg-amber-50 ring-1 ring-amber-100" },
-  dept: { label: "部门", icon: Layers, color: "text-primary-700 bg-primary-50 ring-1 ring-primary-100" },
-  team: { label: "小组", icon: Users, color: "text-surface-700 bg-surface-100 ring-1 ring-surface-200" },
+export const typeMeta: Record<string, { label: string }> = {
+  group: { label: "集团" },
+  region: { label: "大区" },
+  company: { label: "公司" },
+  store: { label: "门店" },
+  dept: { label: "部门" },
+  team: { label: "小组" },
 };
 
 export const orgTypeOrder = ["group", "region", "company", "store", "dept", "team"];

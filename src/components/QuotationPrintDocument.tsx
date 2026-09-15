@@ -98,6 +98,10 @@ export type QuotationOutputMode = "list" | "composition";
 export type QuotationPrintScope = "all" | "all_without_cover" | "base" | "main_material" | "custom_cabinet" | "fees";
 export type QuotationBaseColumnKey = "materialUnit" | "materialTotal" | "laborUnit" | "laborTotal" | "subtotal" | "description";
 export type QuotationBaseColumnOptions = Record<QuotationBaseColumnKey, boolean>;
+export type QuotationProductColumnKey = "unitPrice" | "quantity" | "subtotal" | "remark";
+export type QuotationProductColumnOptions = Record<QuotationProductColumnKey, boolean>;
+export type QuotationCabinetColumnKey = "quantity" | "area" | "unitPrice" | "amount";
+export type QuotationCabinetColumnOptions = Record<QuotationCabinetColumnKey, boolean>;
 
 type Totals = {
   baseAmount: number;
@@ -145,9 +149,54 @@ const defaultBaseColumnOptions: QuotationBaseColumnOptions = {
   subtotal: true,
   description: true,
 };
+const defaultProductColumnOptions: QuotationProductColumnOptions = {
+  unitPrice: true,
+  quantity: true,
+  subtotal: true,
+  remark: true,
+};
+const defaultCabinetColumnOptions: QuotationCabinetColumnOptions = {
+  quantity: true,
+  area: true,
+  unitPrice: true,
+  amount: true,
+};
+const quotationPrintScopes: QuotationPrintScope[] = ["all", "all_without_cover", "base", "main_material", "custom_cabinet", "fees"];
+const configurableBaseColumnScopes: QuotationPrintScope[] = ["all", "all_without_cover", "base"];
+const baseColumnKeys: QuotationBaseColumnKey[] = ["materialUnit", "materialTotal", "laborUnit", "laborTotal", "subtotal", "description"];
+const baseColumnShortCodes: Record<QuotationBaseColumnKey, string> = {
+  materialUnit: "mu",
+  materialTotal: "mt",
+  laborUnit: "lu",
+  laborTotal: "lt",
+  subtotal: "st",
+  description: "ds",
+};
+const productColumnKeys: QuotationProductColumnKey[] = ["unitPrice", "quantity", "subtotal", "remark"];
+const productColumnShortCodes: Record<QuotationProductColumnKey, string> = {
+  unitPrice: "up",
+  quantity: "qt",
+  subtotal: "st",
+  remark: "rm",
+};
+const cabinetColumnKeys: QuotationCabinetColumnKey[] = ["quantity", "area", "unitPrice", "amount"];
+const cabinetColumnShortCodes: Record<QuotationCabinetColumnKey, string> = {
+  quantity: "qt",
+  area: "ar",
+  unitPrice: "up",
+  amount: "am",
+};
+const printScopeShortCodes: Record<QuotationPrintScope, string> = {
+  all: "a",
+  all_without_cover: "n",
+  base: "b",
+  main_material: "m",
+  custom_cabinet: "c",
+  fees: "f",
+};
 const builtInCategoryLabels: Record<string, string> = {
   base: "基装",
-  main_material: "主材",
+  main_material: "产品",
   custom_cabinet: "定制柜",
   other: "综合费用",
 };
@@ -519,10 +568,11 @@ function shouldShowAutoOtherFeeRule(item: PrintableQuotationItem) {
 
 function getOtherFeeRuleDisplay(item: PrintableQuotationItem, total: number, context?: FeeFormulaContext) {
   const remark = String(item.remark || "").trim();
+  if (remark) return remark;
   if (!shouldShowAutoOtherFeeRule(item)) return remark;
 
   const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context);
-  return remark ? `${remark}；${rule}` : rule;
+  return rule;
 }
 
 function calculateQuotationTotals(items: PrintableQuotationItem[], settings?: PrintableQuotationSettings, houseArea = 0): Totals {
@@ -642,10 +692,16 @@ function getPrintSiteTitleText(quotation?: PrintableQuotationDetail | null) {
   return community || projectName || room || "";
 }
 
-function buildQuotationDisplayTitle(quotation?: PrintableQuotationDetail | null) {
+function getPrintCustomerName(quotation?: PrintableQuotationDetail | null) {
   const customerName = String(quotation?.customer_name || "").trim();
+  return /^(未命名客户|未命名)$/u.test(customerName) ? "" : customerName;
+}
+
+function buildQuotationDisplayTitle(quotation?: PrintableQuotationDetail | null) {
+  const customerName = getPrintCustomerName(quotation);
   const siteName = getPrintSiteTitleText(quotation);
   const fallbackTitle = cleanQuotationTitle(quotation?.title);
+  if (!customerName) return siteName || fallbackTitle || "客户工地";
   if (customerName && siteName) {
     return siteName.includes(customerName) ? siteName : `${customerName} · ${siteName}`;
   }
@@ -662,7 +718,7 @@ function printRowStyle(value?: string | null) {
 }
 
 function qrCodeUrl(target: string) {
-  return `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=12&ecc=L&v=2026090603&data=${encodeURIComponent(target)}`;
+  return `https://api.qrserver.com/v1/create-qr-code/?size=360x360&margin=18&ecc=L&v=2026091001&data=${encodeURIComponent(target)}`;
 }
 
 function getCompactQuotationShareUrl(target: string) {
@@ -672,9 +728,69 @@ function getCompactQuotationShareUrl(target: string) {
     const match = url.pathname.match(/^\/quotation-share\/([^/]+)$/);
     if (!match?.[1]) return target;
     const currentOrigin = typeof window !== "undefined" ? window.location.origin : url.origin;
-    return `${currentOrigin}/q/${match[1]}`;
+    return `${currentOrigin}/q/${match[1]}${url.search}`;
   } catch {
     return target;
+  }
+}
+
+function buildConfiguredQuotationShareUrl(
+  target: string,
+  scope: QuotationPrintScope,
+  baseColumns?: Partial<QuotationBaseColumnOptions>,
+  productColumns?: Partial<QuotationProductColumnOptions>,
+  cabinetColumns?: Partial<QuotationCabinetColumnOptions>,
+  includeBudgetCompilation = true,
+  outputMode: QuotationOutputMode = "list",
+  quotationValidUntil?: string,
+) {
+  if (!target) return "";
+  const applyConfig = (url: URL) => {
+    url.searchParams.set("scope", quotationPrintScopes.includes(scope) ? scope : "all");
+    if (outputMode === "composition") {
+      url.searchParams.set("m", "c");
+    } else {
+      url.searchParams.delete("m");
+      url.searchParams.delete("mode");
+    }
+    if (configurableBaseColumnScopes.includes(scope)) {
+      const selected = baseColumnKeys.filter((key) => normalizeBaseColumnOptions(baseColumns)[key]);
+      url.searchParams.set("bc", selected.map((key) => baseColumnShortCodes[key]).join("."));
+    } else {
+      url.searchParams.delete("bc");
+      url.searchParams.delete("baseColumns");
+    }
+    const selectedProductColumns = productColumnKeys.filter((key) => normalizeProductColumnOptions(productColumns)[key]);
+    const selectedCabinetColumns = cabinetColumnKeys.filter((key) => normalizeCabinetColumnOptions(cabinetColumns)[key]);
+    url.searchParams.set("pc", selectedProductColumns.map((key) => productColumnShortCodes[key]).join("."));
+    url.searchParams.set("cc", selectedCabinetColumns.map((key) => cabinetColumnShortCodes[key]).join("."));
+    url.searchParams.set("s", printScopeShortCodes[quotationPrintScopes.includes(scope) ? scope : "all"]);
+    if (!includeBudgetCompilation) {
+      url.searchParams.set("ib", "0");
+    } else {
+      url.searchParams.delete("ib");
+      url.searchParams.delete("includeBudgetCompilation");
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(quotationValidUntil || ""))) {
+      url.searchParams.set("vu", String(quotationValidUntil));
+    } else {
+      url.searchParams.delete("vu");
+      url.searchParams.delete("validUntil");
+    }
+    url.searchParams.delete("scope");
+    url.searchParams.delete("baseColumns");
+    url.searchParams.delete("mode");
+    return url.toString();
+  };
+  try {
+    return applyConfig(new URL(target));
+  } catch {
+    try {
+      const base = typeof window !== "undefined" ? window.location.origin : "http://localhost";
+      return applyConfig(new URL(target, base));
+    } catch {
+      return target;
+    }
   }
 }
 
@@ -702,13 +818,22 @@ function getCurrentYearLastDay() {
   return formatChineseDate(new Date(new Date().getFullYear(), 11, 31));
 }
 
+function getQuotationValidityDate(settings?: PrintableQuotationSettings) {
+  const configured = [settings?.quotationValidUntil, settings?.validUntil, settings?.effectiveUntil, settings?.valid_until]
+    .map((value) => String(value || "").trim())
+    .find((value) => /^\d{4}-\d{2}-\d{2}$/.test(value));
+  return configured ? formatChineseDate(`${configured}T00:00:00`) : getCurrentYearLastDay();
+}
+
 function PrintCoverPage({
   quotation,
+  settings,
 }: {
   quotation?: PrintableQuotationDetail | null;
+  settings?: PrintableQuotationSettings;
 }) {
   const fields = [
-    { label: "客户姓名", value: quotation?.customer_name },
+    { label: "客户姓名", value: getPrintCustomerName(quotation) },
     { label: "楼盘小区", value: getPrintSiteTitleText(quotation) },
     { label: "联系电话", value: maskCustomerPhone(quotation?.customer_phone) },
     { label: "报价人", value: quotation?.creator_name },
@@ -727,7 +852,7 @@ function PrintCoverPage({
           <span>{text(coverCompanyName)}</span>
         </h1>
         <h2>{displayTitle}</h2>
-        <p>报价执行有效期：{getCurrentYearLastDay()}</p>
+        <p>报价执行有效期：{getQuotationValidityDate(settings)}</p>
       </div>
 
       <div className="quotation-print-cover-fields">
@@ -878,11 +1003,102 @@ function isQuotaCodeOnly(value?: string | null) {
 function getBaseRowDescription(item: PrintableQuotationItem) {
   const spec = stripQuotaCodeText(item.spec);
   const remark = isQuotaCodeOnly(item.remark) ? "" : stripQuotaCodeText(item.remark);
-  return uniqueValues([spec, remark]).join("；");
+  return uniqueValues([spec, remark]).join("\n");
 }
 
 function normalizeBaseColumnOptions(columns?: Partial<QuotationBaseColumnOptions>): QuotationBaseColumnOptions {
   return { ...defaultBaseColumnOptions, ...(columns || {}) };
+}
+
+function normalizeProductColumnOptions(columns?: Partial<QuotationProductColumnOptions>): QuotationProductColumnOptions {
+  return { ...defaultProductColumnOptions, ...(columns || {}) };
+}
+
+function normalizeCabinetColumnOptions(columns?: Partial<QuotationCabinetColumnOptions>): QuotationCabinetColumnOptions {
+  return { ...defaultCabinetColumnOptions, ...(columns || {}) };
+}
+
+function getWeightedColumnWidthMap<Key extends string>(columns: { key: Key }[], fullWeights: Record<Key, number>) {
+  const total = columns.reduce((sum, column) => sum + (fullWeights[column.key] || 0), 0) || 1;
+  return columns.reduce((map, column) => {
+    map[column.key] = Number((((fullWeights[column.key] || 0) / total) * 100).toFixed(3));
+    return map;
+  }, {} as Record<Key, number>);
+}
+
+const baseColumnFullWeights: Record<"sequence" | "name" | "quantity" | "unit" | QuotationBaseColumnKey, number> = {
+  sequence: 5,
+  name: 21,
+  quantity: 6,
+  unit: 5,
+  materialUnit: 6,
+  materialTotal: 7.5,
+  laborUnit: 6,
+  laborTotal: 7.5,
+  subtotal: 8.5,
+  description: 27.5,
+};
+
+const productColumnFullWeights: Record<"sequence" | "name" | "spec" | "model" | "unit" | QuotationProductColumnKey, number> = {
+  sequence: 5,
+  name: 20,
+  spec: 14,
+  model: 12,
+  unit: 6,
+  unitPrice: 9,
+  quantity: 7,
+  subtotal: 10,
+  remark: 17,
+};
+
+const cabinetColumnFullWeights: Record<"sequence" | "name" | "size" | "remark" | QuotationCabinetColumnKey, number> = {
+  sequence: 6,
+  name: 24,
+  size: 22,
+  quantity: 8,
+  area: 8,
+  unitPrice: 10,
+  amount: 10,
+  remark: 12,
+};
+
+function getBaseColumnWidthMap(columns: { key: "sequence" | "name" | "quantity" | "unit" | QuotationBaseColumnKey }[]) {
+  type BasePrintColumnKey = "sequence" | "name" | "quantity" | "unit" | QuotationBaseColumnKey;
+  const keys = columns.map((column) => column.key);
+  const widths = keys.reduce((map, key) => {
+    map[key] = baseColumnFullWeights[key];
+    return map;
+  }, {} as Record<BasePrintColumnKey, number>);
+  let remainingWeight = Math.max(0, 100 - keys.reduce((sum, key) => sum + widths[key], 0));
+  const hasDescription = keys.includes("description");
+  const distribute = (targetKeys: BasePrintColumnKey[], weightResolver: (key: BasePrintColumnKey) => number, amount = remainingWeight) => {
+    const targets = targetKeys.filter((key) => keys.includes(key));
+    const targetWeight = targets.reduce((sum, key) => sum + weightResolver(key), 0);
+    if (targetWeight <= 0 || amount <= 0) return 0;
+    targets.forEach((key) => {
+      widths[key] += amount * (weightResolver(key) / targetWeight);
+    });
+    return amount;
+  };
+  if (hasDescription) {
+    distribute(["name", "description"], (key) => baseColumnFullWeights[key]);
+  } else {
+    const nameExtra = Math.min(remainingWeight * 0.45, 19);
+    if (keys.includes("name")) {
+      widths.name += nameExtra;
+      remainingWeight -= nameExtra;
+    }
+    const amountColumns: BasePrintColumnKey[] = ["materialUnit", "materialTotal", "laborUnit", "laborTotal", "subtotal"];
+    const distributedToAmounts = distribute(amountColumns, (key) => baseColumnFullWeights[key]);
+    remainingWeight -= distributedToAmounts;
+    if (remainingWeight > 0) {
+      distribute(["name"], () => 1);
+    }
+  }
+  return columns.reduce((map, column) => {
+    map[column.key] = Number(widths[column.key].toFixed(3));
+    return map;
+  }, {} as Record<BasePrintColumnKey, number>);
 }
 
 function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQuotationItem[]; settings?: PrintableQuotationSettings; baseColumns?: Partial<QuotationBaseColumnOptions> }) {
@@ -915,15 +1131,17 @@ function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQu
   const colSpan = columns.length;
   const materialColumns = columns.filter((column) => column.group === "material");
   const laborColumns = columns.filter((column) => column.group === "labor");
+  const groupedPriceColumns = [...materialColumns, ...laborColumns];
   const hasGroupedPriceColumns = materialColumns.length > 0 || laborColumns.length > 0;
   const headerTopCells = columns.flatMap((column, index) => {
+    const columnClassName = `quotation-print-base-col-${column.key}`;
     if (!column.group) {
-      return [<th key={column.key} rowSpan={hasGroupedPriceColumns ? 2 : undefined} className={column.className}>{column.top}</th>];
+      return [<th key={column.key} rowSpan={hasGroupedPriceColumns ? 2 : undefined} className={`${columnClassName} ${column.className || ""}`.trim()}>{column.top}</th>];
     }
     if (columns[index - 1]?.group === column.group) return [];
     const groupColumns = columns.filter((item) => item.group === column.group);
     return [
-      <th key={column.group} colSpan={groupColumns.length} className={`${column.group === "labor" ? "quotation-print-base-labor-head " : ""}text-center`}>
+      <th key={column.group} colSpan={groupColumns.length} className={`quotation-print-base-group-head ${column.group === "labor" ? "quotation-print-base-labor-head " : ""}text-center`}>
         {column.top}
       </th>,
     ];
@@ -952,11 +1170,12 @@ function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQu
   };
   const firstSummaryColumnIndex = columns.findIndex((column) => column.key === "materialTotal" || column.key === "laborTotal" || column.key === "subtotal");
   const summaryLabelEndIndex = Math.max(0, (firstSummaryColumnIndex >= 0 ? firstSummaryColumnIndex : columns.length) - 1);
+  const columnWidths = getBaseColumnWidthMap(columns);
 
   return (
 	    <table className="quotation-print-table quotation-print-base-table">
         <colgroup>
-          {columns.map((column) => <col key={column.key} />)}
+          {columns.map((column) => <col key={column.key} style={{ width: `${columnWidths[column.key]}%` }} />)}
         </colgroup>
 	      <thead>
 	        <tr>
@@ -964,8 +1183,13 @@ function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQu
 	        </tr>
           {hasGroupedPriceColumns ? (
             <tr>
-              {[...materialColumns, ...laborColumns].map((column) => (
-                <th key={column.key} className="text-center">{column.bottom}</th>
+              {groupedPriceColumns.map((column, index) => (
+                <th
+                  key={column.key}
+                  className={`quotation-print-base-col-${column.key} text-center ${index === groupedPriceColumns.length - 1 ? "quotation-print-base-group-bottom-end" : ""}`}
+                >
+                  {column.bottom}
+                </th>
               ))}
             </tr>
           ) : null}
@@ -992,7 +1216,7 @@ function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQu
                 return (
                   <tr key={item.id || `${group.space}-${rowNumber}`} style={rowStyle}>
                     {columns.map((column) => (
-                      <td key={column.key} className={cellClassName(column)}>{baseCellValue(column, item, parts, rowNumber, description)}</td>
+                      <td key={column.key} className={`quotation-print-base-col-${column.key} ${cellClassName(column)}`.trim()}>{baseCellValue(column, item, parts, rowNumber, description)}</td>
                     ))}
                   </tr>
                 );
@@ -1030,34 +1254,39 @@ function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQu
   );
 }
 
-function MaterialDetailsTable({ items, settings }: { items: PrintableQuotationItem[]; settings?: PrintableQuotationSettings }) {
+function MaterialDetailsTable({ items, settings, productColumns }: { items: PrintableQuotationItem[]; settings?: PrintableQuotationSettings; productColumns?: Partial<QuotationProductColumnOptions> }) {
   const groups = groupItemsBySpace(items, settings);
   let rowNumber = 0;
+  const columnOptions = normalizeProductColumnOptions(productColumns);
+  const columns: {
+    key: "sequence" | "name" | "spec" | "model" | "unit" | QuotationProductColumnKey;
+    label: string;
+    className?: string;
+    value: (item: PrintableQuotationItem, rowIndex: number) => ReactNode;
+  }[] = [
+    { key: "sequence", label: "序号", className: "text-center", value: (_item, rowIndex) => rowIndex },
+    { key: "name", label: "材料名称", className: "quotation-print-item-name", value: (item) => text(item.name) },
+    { key: "spec", label: "规格", className: "quotation-print-item-name", value: (item) => text(item.spec) },
+    { key: "model", label: "型号", className: "quotation-print-item-name", value: (item) => text(item.material_model) },
+    { key: "unit", label: "单位", className: "quotation-print-item-name text-center", value: (item) => text(item.unit) },
+    ...(columnOptions.unitPrice ? [{ key: "unitPrice" as const, label: "单价", className: "quotation-print-item-name text-right", value: (item: PrintableQuotationItem) => formatPrintAmount(getItemUnitPrice(item)) }] : []),
+    ...(columnOptions.quantity ? [{ key: "quantity" as const, label: "数量", className: "quotation-print-item-name text-center", value: (item: PrintableQuotationItem) => formatQuantity(toNumber(item.quantity)) }] : []),
+    ...(columnOptions.subtotal ? [{ key: "subtotal" as const, label: "小计", className: "quotation-print-item-name text-right", value: (item: PrintableQuotationItem) => formatPrintAmount(getItemTotal(item)) }] : []),
+    ...(columnOptions.remark ? [{ key: "remark" as const, label: "备注", className: "quotation-print-item-name", value: (item: PrintableQuotationItem) => text(item.remark) }] : []),
+  ];
+  const colSpan = columns.length;
+  const columnWidths = getWeightedColumnWidthMap(columns, productColumnFullWeights);
+  const summaryAmountColumnIndex = columns.findIndex((column) => column.key === "subtotal");
+  const summaryLabelColSpan = summaryAmountColumnIndex >= 0 ? Math.max(1, summaryAmountColumnIndex) : colSpan;
 
   return (
     <table className="quotation-print-table quotation-print-material-table">
       <colgroup>
-        <col />
-        <col />
-        <col />
-        <col />
-        <col />
-        <col />
-        <col />
-        <col />
-        <col />
+        {columns.map((column) => <col key={column.key} style={{ width: `${columnWidths[column.key]}%` }} />)}
       </colgroup>
       <thead>
 	        <tr>
-	          <th className="w-10 text-center">序号</th>
-	          <th>材料名称</th>
-	          <th>规格</th>
-	          <th>型号</th>
-	          <th className="w-12 text-center">单位</th>
-	          <th className="w-20 text-right">单价</th>
-	          <th className="w-14 text-center">数量</th>
-	          <th className="w-24 text-right">小计</th>
-	          <th>备注</th>
+            {columns.map((column) => <th key={column.key} className={column.className || ""}>{column.label}</th>)}
 	        </tr>
       </thead>
       <tbody>
@@ -1067,7 +1296,7 @@ function MaterialDetailsTable({ items, settings }: { items: PrintableQuotationIt
             return (
             <Fragment key={group.space}>
               <tr className="quotation-print-space-row">
-                <td colSpan={9}>
+                <td colSpan={colSpan}>
                   <span>{group.space}</span>
                 </td>
               </tr>
@@ -1076,65 +1305,77 @@ function MaterialDetailsTable({ items, settings }: { items: PrintableQuotationIt
                 const rowStyle = printRowStyle(item.row_color);
                 return (
                   <tr key={item.id || `${group.space}-${rowNumber}`} style={rowStyle}>
-                    <td className="quotation-print-item-name text-center">{rowNumber}</td>
-                    <td className="quotation-print-item-name">{text(item.name)}</td>
-                    <td className="quotation-print-item-name">{text(item.spec)}</td>
-                    <td className="quotation-print-item-name">{text(item.material_model)}</td>
-                    <td className="quotation-print-item-name text-center">{text(item.unit)}</td>
-                    <td className="quotation-print-item-name text-right">{formatPrintAmount(getItemUnitPrice(item))}</td>
-                    <td className="quotation-print-item-name text-center">{formatQuantity(toNumber(item.quantity))}</td>
-                    <td className="quotation-print-item-name text-right">{formatPrintAmount(getItemTotal(item))}</td>
-                    <td className="quotation-print-item-name">{text(item.remark)}</td>
+                    {columns.map((column) => <td key={column.key} className={column.className || ""}>{column.value(item, rowNumber)}</td>)}
                   </tr>
                 );
               })}
               <tr className="quotation-print-space-total-row">
-                <td colSpan={8} className="text-right">{group.space} 小计</td>
-                <td className="quotation-print-item-name text-right">{formatPrintAmount(groupTotal)}</td>
+                {summaryAmountColumnIndex >= 0 ? (
+                  <>
+                    <td colSpan={summaryLabelColSpan} className="text-right">{group.space} 小计</td>
+                    <td className="quotation-print-item-name text-right">{formatPrintAmount(groupTotal)}</td>
+                    {columns.slice(summaryAmountColumnIndex + 1).map((column) => <td key={column.key}></td>)}
+                  </>
+                ) : (
+                  <td colSpan={colSpan} className="text-right">{group.space} 小计</td>
+                )}
               </tr>
             </Fragment>
             );
           })
         ) : (
           <tr>
-            <td colSpan={9} className="py-8 text-center text-surface-400">暂无主材明细</td>
+            <td colSpan={colSpan} className="py-8 text-center text-surface-400">暂无产品明细</td>
           </tr>
         )}
         <tr className="quotation-print-total-row">
-          <td colSpan={8} className="text-right">主材小计</td>
-          <td className="quotation-print-item-name text-right">{formatPrintAmount(items.reduce((sum, item) => sum + getItemTotal(item), 0))}</td>
+          {summaryAmountColumnIndex >= 0 ? (
+            <>
+              <td colSpan={summaryLabelColSpan} className="text-right">产品小计</td>
+              <td className="quotation-print-item-name text-right">{formatPrintAmount(items.reduce((sum, item) => sum + getItemTotal(item), 0))}</td>
+              {columns.slice(summaryAmountColumnIndex + 1).map((column) => <td key={column.key}></td>)}
+            </>
+          ) : (
+            <td colSpan={colSpan} className="text-right">产品小计</td>
+          )}
         </tr>
       </tbody>
     </table>
   );
 }
 
-function CustomCabinetDetailsTable({ items, settings }: { items: PrintableQuotationItem[]; settings?: PrintableQuotationSettings }) {
+function CustomCabinetDetailsTable({ items, settings, cabinetColumns }: { items: PrintableQuotationItem[]; settings?: PrintableQuotationSettings; cabinetColumns?: Partial<QuotationCabinetColumnOptions> }) {
   const groups = groupItemsBySpace(items, settings);
   let rowNumber = 0;
+  const columnOptions = normalizeCabinetColumnOptions(cabinetColumns);
+  const columns: {
+    key: "sequence" | "name" | "size" | "remark" | QuotationCabinetColumnKey;
+    label: string;
+    className?: string;
+    value: (item: PrintableQuotationItem, rowIndex: number) => ReactNode;
+  }[] = [
+    { key: "sequence", label: "编号", className: "quotation-print-item-name text-center", value: (_item, rowIndex) => rowIndex },
+    { key: "name", label: "名称", className: "quotation-print-item-name", value: (item) => text(item.name) },
+    { key: "size", label: "H高×W宽×D深（mm）", className: "quotation-print-item-name quotation-print-cabinet-size text-center", value: (item) => `${formatQuantity(toNumber(item.material_cost))} × ${formatQuantity(toNumber(item.labor_cost))} × ${formatQuantity(toNumber(item.profit_margin))}` },
+    ...(columnOptions.quantity ? [{ key: "quantity" as const, label: "数量", className: "quotation-print-item-name text-center", value: (item: PrintableQuotationItem) => formatQuantity(toNumber(item.quantity)) }] : []),
+    ...(columnOptions.area ? [{ key: "area" as const, label: "平方", className: "quotation-print-item-name text-center", value: (item: PrintableQuotationItem) => formatPrintAmount(getCustomCabinetArea(item)) }] : []),
+    ...(columnOptions.unitPrice ? [{ key: "unitPrice" as const, label: "单价", className: "quotation-print-item-name text-right", value: (item: PrintableQuotationItem) => formatPrintAmount(toNumber(item.unit_price)) }] : []),
+    ...(columnOptions.amount ? [{ key: "amount" as const, label: "金额", className: "quotation-print-item-name text-right", value: (item: PrintableQuotationItem) => formatPrintAmount(getItemTotal(item)) }] : []),
+    { key: "remark", label: "备注", className: "quotation-print-item-name quotation-print-cabinet-remark", value: (item) => text(item.remark) },
+  ];
+  const colSpan = columns.length;
+  const columnWidths = getWeightedColumnWidthMap(columns, cabinetColumnFullWeights);
+  const summaryAmountColumnIndex = columns.findIndex((column) => column.key === "amount");
+  const summaryLabelColSpan = summaryAmountColumnIndex >= 0 ? Math.max(1, summaryAmountColumnIndex) : colSpan;
 
   return (
     <table className="quotation-print-table quotation-print-cabinet-table">
       <colgroup>
-        <col />
-        <col />
-        <col />
-        <col />
-        <col />
-        <col />
-        <col />
-        <col />
+        {columns.map((column) => <col key={column.key} style={{ width: `${columnWidths[column.key]}%` }} />)}
       </colgroup>
       <thead>
         <tr>
-          <th className="w-10 text-center">编号</th>
-          <th>名称</th>
-          <th className="text-center">H高×W宽×D深（mm）</th>
-          <th className="w-12 text-center">数量</th>
-          <th className="w-16 text-center">平方</th>
-          <th className="w-20 text-right">单价</th>
-          <th className="w-24 text-right">金额</th>
-          <th>备注</th>
+          {columns.map((column) => <th key={column.key} className={column.className || ""}>{column.label}</th>)}
         </tr>
       </thead>
       <tbody>
@@ -1144,45 +1385,48 @@ function CustomCabinetDetailsTable({ items, settings }: { items: PrintableQuotat
             return (
             <Fragment key={group.space}>
               <tr className="quotation-print-space-row">
-                <td colSpan={8}>
+                <td colSpan={colSpan}>
                   <span>{group.space}</span>
                 </td>
               </tr>
               {group.items.map((item) => {
                 rowNumber += 1;
                 const rowStyle = printRowStyle(item.row_color);
-                const sizeText = `${formatQuantity(toNumber(item.material_cost))} × ${formatQuantity(toNumber(item.labor_cost))} × ${formatQuantity(toNumber(item.profit_margin))}`;
-                const area = getCustomCabinetArea(item);
                 return (
                   <tr key={item.id || `${group.space}-${rowNumber}`} style={rowStyle}>
-                    <td className="quotation-print-item-name text-center">{rowNumber}</td>
-                    <td className="quotation-print-item-name">{text(item.name)}</td>
-                    <td className="quotation-print-item-name quotation-print-cabinet-size text-center">{sizeText}</td>
-                    <td className="quotation-print-item-name text-center">{formatQuantity(toNumber(item.quantity))}</td>
-                    <td className="quotation-print-item-name text-center">{formatPrintAmount(area)}</td>
-                    <td className="quotation-print-item-name text-right">{formatPrintAmount(toNumber(item.unit_price))}</td>
-                    <td className="quotation-print-item-name text-right">{formatPrintAmount(getItemTotal(item))}</td>
-                    <td className="quotation-print-item-name quotation-print-cabinet-remark">{text(item.remark)}</td>
+                    {columns.map((column) => <td key={column.key} className={column.className || ""}>{column.value(item, rowNumber)}</td>)}
                   </tr>
                 );
               })}
               <tr className="quotation-print-space-total-row">
-                <td colSpan={6} className="text-right">{group.space} 小计</td>
-                <td className="quotation-print-item-name text-right">{formatPrintAmount(groupTotal)}</td>
-                <td></td>
+                {summaryAmountColumnIndex >= 0 ? (
+                  <>
+                    <td colSpan={summaryLabelColSpan} className="text-right">{group.space} 小计</td>
+                    <td className="quotation-print-item-name text-right">{formatPrintAmount(groupTotal)}</td>
+                    {columns.slice(summaryAmountColumnIndex + 1).map((column) => <td key={column.key}></td>)}
+                  </>
+                ) : (
+                  <td colSpan={colSpan} className="text-right">{group.space} 小计</td>
+                )}
               </tr>
             </Fragment>
             );
           })
         ) : (
           <tr>
-            <td colSpan={8} className="py-8 text-center text-surface-400">暂无定制柜明细</td>
+            <td colSpan={colSpan} className="py-8 text-center text-surface-400">暂无定制柜明细</td>
           </tr>
         )}
         <tr className="quotation-print-total-row">
-          <td colSpan={6} className="text-right">定制柜小计</td>
-          <td className="quotation-print-item-name text-right">{formatPrintAmount(items.reduce((sum, item) => sum + getItemTotal(item), 0))}</td>
-          <td></td>
+          {summaryAmountColumnIndex >= 0 ? (
+            <>
+              <td colSpan={summaryLabelColSpan} className="text-right">定制柜小计</td>
+              <td className="quotation-print-item-name text-right">{formatPrintAmount(items.reduce((sum, item) => sum + getItemTotal(item), 0))}</td>
+              {columns.slice(summaryAmountColumnIndex + 1).map((column) => <td key={column.key}></td>)}
+            </>
+          ) : (
+            <td colSpan={colSpan} className="text-right">定制柜小计</td>
+          )}
         </tr>
       </tbody>
     </table>
@@ -1355,7 +1599,11 @@ export function QuotationPrintDocument({
   outputMode = "list",
   printScope = "all",
   baseColumns,
+  productColumns,
+  cabinetColumns,
   includeBudgetCompilation = true,
+  quotationValidUntil,
+  onQrReadyChange,
 }: {
   quotation?: PrintableQuotationDetail | null;
   items: PrintableQuotationItem[];
@@ -1364,7 +1612,11 @@ export function QuotationPrintDocument({
   outputMode?: QuotationOutputMode;
   printScope?: QuotationPrintScope;
   baseColumns?: Partial<QuotationBaseColumnOptions>;
+  productColumns?: Partial<QuotationProductColumnOptions>;
+  cabinetColumns?: Partial<QuotationCabinetColumnOptions>;
   includeBudgetCompilation?: boolean;
+  quotationValidUntil?: string;
+  onQrReadyChange?: (ready: boolean) => void;
 }) {
   const normalizedItems = items.map((item) => ({ ...item, space: inferItemSpace(item) }));
   const baseItems = normalizedItems.filter((item) => isBaseCategory(item.category));
@@ -1383,8 +1635,33 @@ export function QuotationPrintDocument({
   const targetUrl = shareUrl || "";
   const [qrTargetUrl, setQrTargetUrl] = useState("");
   useEffect(() => {
-    setQrTargetUrl(getCompactQuotationShareUrl(targetUrl));
-  }, [targetUrl]);
+    let cancelled = false;
+    const configuredUrl = getCompactQuotationShareUrl(buildConfiguredQuotationShareUrl(targetUrl, printScope, baseColumns, productColumns, cabinetColumns, includeBudgetCompilation, outputMode, quotationValidUntil));
+    setQrTargetUrl("");
+    onQrReadyChange?.(!configuredUrl);
+    if (!configuredUrl) return () => {
+      cancelled = true;
+    };
+    fetch("/api/quotation-shares/shorten", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: configuredUrl }),
+    })
+      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        if (cancelled) return;
+        setQrTargetUrl(ok && data?.url ? String(data.url) : configuredUrl);
+        onQrReadyChange?.(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setQrTargetUrl(configuredUrl);
+        onQrReadyChange?.(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [targetUrl, printScope, baseColumns, productColumns, cabinetColumns, includeBudgetCompilation, outputMode, quotationValidUntil, onQrReadyChange]);
   const isAllDetailScope = printScope === "all" || printScope === "all_without_cover";
   const shouldShowBase = isAllDetailScope || printScope === "base";
   const shouldShowFees = isAllDetailScope || printScope === "fees";
@@ -1399,7 +1676,7 @@ export function QuotationPrintDocument({
 
   return (
     <article className="quotation-print-document mx-auto w-full max-w-[1040px] bg-white text-surface-900 shadow-[0_18px_50px_rgba(31,41,53,0.08)]">
-      {shouldShowCover && <PrintCoverPage quotation={quotation} />}
+      {shouldShowCover && <PrintCoverPage quotation={quotation} settings={settings} />}
 
       <section className="quotation-print-head-block">
         <div className="quotation-print-head-table" role="table" aria-label="报价单基础信息">
@@ -1419,7 +1696,7 @@ export function QuotationPrintDocument({
             <strong>{text(formatPrintDateTime(quotation?.created_at))}</strong>
           </div>
           <div className="quotation-print-qr" role="cell">
-            {targetUrl ? (
+            {qrTargetUrl ? (
               <NativeImage src={qrCodeUrl(qrTargetUrl)} alt="报价单二维码" loading="eager" />
             ) : (
               <div />
@@ -1439,6 +1716,54 @@ export function QuotationPrintDocument({
             <strong>{text(quotation?.branch_company_phone)}</strong>
           </div>
         </div>
+        <table className="quotation-print-head-table-print" aria-label="报价单基础信息">
+          <colgroup>
+            <col className="quotation-print-head-print-title-col" />
+            <col />
+            <col />
+            <col />
+            <col className="quotation-print-head-print-qr-col" />
+          </colgroup>
+          <tbody>
+            <tr>
+              <td className="quotation-print-head-print-title" rowSpan={2}>{displayTitle}</td>
+              <td>
+                <span>手机号</span>
+                <strong>{maskCustomerPhone(quotation?.customer_phone)}</strong>
+              </td>
+              <td>
+                <span>建筑面积</span>
+                <strong>{quotation?.project_area ? `${quotation.project_area} 平方` : "-"}</strong>
+              </td>
+              <td>
+                <span>预算时间</span>
+                <strong>{text(formatPrintDateTime(quotation?.created_at))}</strong>
+              </td>
+              <td className="quotation-print-head-print-qr" rowSpan={2}>
+                {qrTargetUrl ? (
+                  <NativeImage src={qrCodeUrl(qrTargetUrl)} alt="报价单二维码" loading="eager" />
+                ) : (
+                  <div />
+                )}
+                <p>扫码查看报价单</p>
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <span>设计师</span>
+                <strong>{text(quotation?.designer_name)}</strong>
+              </td>
+              <td>
+                <span>报价人</span>
+                <strong>{text(quotation?.creator_name)}</strong>
+              </td>
+              <td>
+                <span>公司电话</span>
+                <strong>{text(quotation?.branch_company_phone)}</strong>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </section>
 
       {outputMode === "composition" ? (
@@ -1464,8 +1789,8 @@ export function QuotationPrintDocument({
             .map((group) => (
               <Section key={group.category} title={`${group.label}明细`} className={shouldSplitAllSections ? "quotation-print-section-new-page" : ""}>
                 {isCustomCabinetCategory(group.category)
-                  ? <CustomCabinetDetailsTable items={group.items} settings={settings} />
-                  : <MaterialDetailsTable items={group.items} settings={settings} />}
+                  ? <CustomCabinetDetailsTable items={group.items} settings={settings} cabinetColumns={cabinetColumns} />
+                  : <MaterialDetailsTable items={group.items} settings={settings} productColumns={productColumns} />}
               </Section>
             ))}
 
@@ -1487,6 +1812,7 @@ export function QuotationPrintDocument({
 
       <style jsx global>{`
         .quotation-print-document {
+          --quotation-fee-index-col-width: 44px;
           padding: 26px;
           color: #182230;
           background: #ffffff;
@@ -1624,6 +1950,9 @@ export function QuotationPrintDocument({
         .quotation-print-head-block {
           margin-bottom: 16px;
         }
+        .quotation-print-head-table-print {
+          display: none;
+        }
         .quotation-print-head-total {
           display: inline-flex;
           width: fit-content;
@@ -1665,29 +1994,21 @@ export function QuotationPrintDocument({
           display: none;
         }
         .quotation-print-head-table::after {
-          content: "";
-          position: absolute;
-          inset: 0;
-          pointer-events: none;
-          background-image:
-            linear-gradient(var(--quotation-print-head-inner-line-color), var(--quotation-print-head-inner-line-color)),
-            linear-gradient(var(--quotation-print-head-inner-line-color), var(--quotation-print-head-inner-line-color)),
-            linear-gradient(var(--quotation-print-head-inner-line-color), var(--quotation-print-head-inner-line-color)),
-            linear-gradient(var(--quotation-print-head-inner-line-color), var(--quotation-print-head-inner-line-color)),
-            linear-gradient(90deg, transparent 0 34%, var(--quotation-print-head-inner-line-color) 34% 90%, transparent 90% 100%);
-          background-position:
-            34% 0,
-            52.6667% 0,
-            71.3333% 0,
-            90% 0,
-            0 50%;
-          background-repeat: no-repeat;
-          background-size:
-            1px 100%,
-            1px 100%,
-            1px 100%,
-            1px 100%,
-            100% 1px;
+          display: none;
+        }
+        .quotation-print-head-title-cell,
+        .quotation-print-head-field,
+        .quotation-print-qr {
+          border: 0;
+        }
+        .quotation-print-head-field,
+        .quotation-print-qr {
+          border-left: var(--quotation-print-head-inner-line-width) solid var(--quotation-print-head-inner-line-color);
+        }
+        .quotation-print-head-field-designer,
+        .quotation-print-head-field-creator,
+        .quotation-print-head-field-company-phone {
+          border-top: var(--quotation-print-head-inner-line-width) solid var(--quotation-print-head-inner-line-color);
         }
         .quotation-print-head-title-cell {
           position: relative;
@@ -1812,6 +2133,15 @@ export function QuotationPrintDocument({
           grid-column: 4;
           grid-row: 2;
           border-top: 0;
+        }
+        .quotation-print-head-field,
+        .quotation-print-qr {
+          border-left: var(--quotation-print-head-inner-line-width) solid var(--quotation-print-head-inner-line-color);
+        }
+        .quotation-print-head-field-designer,
+        .quotation-print-head-field-creator,
+        .quotation-print-head-field-company-phone {
+          border-top: var(--quotation-print-head-inner-line-width) solid var(--quotation-print-head-inner-line-color);
         }
         .quotation-print-head-field-wide {
           grid-column: span 2;
@@ -1942,7 +2272,7 @@ export function QuotationPrintDocument({
         }
         .quotation-print-appendix-note {
           display: grid;
-          grid-template-columns: 72px minmax(0, 1fr);
+          grid-template-columns: var(--quotation-fee-index-col-width) minmax(0, 1fr);
           margin-top: 14px;
           overflow: hidden;
           border: 1px solid #dce4ef;
@@ -2013,6 +2343,10 @@ export function QuotationPrintDocument({
           border: var(--quotation-print-table-border-width, 1px) solid #111111;
           border-radius: 10px;
           padding: 18px 20px;
+          break-inside: auto;
+          page-break-inside: auto;
+          box-decoration-break: clone;
+          -webkit-box-decoration-break: clone;
           font-size: 12px;
           line-height: 1.9;
           color: #111111;
@@ -2038,20 +2372,10 @@ export function QuotationPrintDocument({
           border: 1px solid #dce4ef;
           border-radius: 10px;
         }
-        .quotation-print-base-table col:nth-child(1),
         .quotation-print-material-table col:nth-child(1),
         .quotation-print-fee-table col:nth-child(1) {
-          width: 44px;
+          width: var(--quotation-fee-index-col-width, 44px);
         }
-        .quotation-print-base-table col:nth-child(2) { width: 150px; }
-        .quotation-print-base-table col:nth-child(3) { width: 58px; }
-        .quotation-print-base-table col:nth-child(4) { width: 58px; }
-        .quotation-print-base-table col:nth-child(5) { width: 62px; }
-        .quotation-print-base-table col:nth-child(6) { width: 72px; }
-        .quotation-print-base-table col:nth-child(7) { width: 62px; }
-        .quotation-print-base-table col:nth-child(8) { width: 72px; }
-        .quotation-print-base-table col:nth-child(9) { width: 78px; }
-        .quotation-print-base-table col:nth-child(10) { width: auto; }
         .quotation-print-material-table col:nth-child(2) {
           width: auto;
         }
@@ -2231,12 +2555,12 @@ export function QuotationPrintDocument({
         .quotation-print-base-table th {
           text-align: center;
         }
-        .quotation-print-base-labor-total-head {
+        .quotation-print-base-group-head {
+          border-left: 0 !important;
           border-right: 1px solid #e4eaf2 !important;
         }
-        .quotation-print-base-labor-head {
-          border-left: 0 !important;
-          border-right: 0 !important;
+        .quotation-print-base-group-bottom-end {
+          border-right: 1px solid #e4eaf2 !important;
         }
         .quotation-print-base-subtotal-boundary-head {
           border-right: 0 !important;
@@ -2262,6 +2586,52 @@ export function QuotationPrintDocument({
         .quotation-print-cabinet-table tbody tr:last-child td,
         .quotation-print-composition-table tbody tr:last-child td {
           border-bottom: 0;
+        }
+        .quotation-print-base-table {
+          --quotation-base-grid-line-width: 1px;
+          --quotation-base-grid-line-color: #111111;
+          border-collapse: separate !important;
+          border-spacing: 0 !important;
+          border: var(--quotation-base-grid-line-width) solid var(--quotation-base-grid-line-color) !important;
+          border-radius: 10px !important;
+          overflow: hidden !important;
+        }
+        .quotation-print-base-table th,
+        .quotation-print-base-table td,
+        .quotation-print-base-table .quotation-print-base-group-head,
+        .quotation-print-base-table .quotation-print-base-group-bottom-end,
+        .quotation-print-base-table .quotation-print-base-subtotal-head,
+        .quotation-print-base-table .quotation-print-base-subtotal-boundary-head {
+          border: 0 !important;
+          border-right: var(--quotation-base-grid-line-width) solid var(--quotation-base-grid-line-color) !important;
+          border-bottom: var(--quotation-base-grid-line-width) solid var(--quotation-base-grid-line-color) !important;
+        }
+        .quotation-print-base-table th:last-child,
+        .quotation-print-base-table td:last-child {
+          border-right: 0 !important;
+        }
+        .quotation-print-base-table .quotation-print-base-subtotal-head {
+          border-left: var(--quotation-base-grid-line-width) solid var(--quotation-base-grid-line-color) !important;
+        }
+        .quotation-print-base-table tbody tr:last-child td {
+          border-bottom: 0 !important;
+        }
+        .quotation-print-base-table th,
+        .quotation-print-base-table td,
+        .quotation-print-base-table .quotation-print-base-group-head,
+        .quotation-print-base-table .quotation-print-base-group-bottom-end,
+        .quotation-print-base-table .quotation-print-base-subtotal-head,
+        .quotation-print-base-table .quotation-print-base-subtotal-boundary-head {
+          border: 0 !important;
+          border-left: var(--quotation-base-grid-line-width) solid var(--quotation-base-grid-line-color) !important;
+          border-top: var(--quotation-base-grid-line-width) solid var(--quotation-base-grid-line-color) !important;
+        }
+        .quotation-print-base-table thead tr:first-child th {
+          border-top: 0 !important;
+        }
+        .quotation-print-base-table thead tr:first-child .quotation-print-base-col-sequence,
+        .quotation-print-base-table tbody tr > td:first-child {
+          border-left: 0 !important;
         }
         .quotation-print-base-table .quotation-print-space-row td,
         .quotation-print-base-table .quotation-print-space-total-row td,
@@ -2291,6 +2661,7 @@ export function QuotationPrintDocument({
         .quotation-print-base-description {
           color: #475467;
           line-height: 1.42;
+          white-space: pre-wrap;
           word-break: normal;
           overflow-wrap: anywhere;
         }
@@ -2558,6 +2929,87 @@ export function QuotationPrintDocument({
             grid-template-columns: 34% repeat(3, minmax(0, 1fr)) 10% !important;
             grid-template-rows: repeat(2, 44px) !important;
           }
+          .quotation-print-head-table {
+            display: none !important;
+          }
+          .quotation-print-head-table-print {
+            display: table !important;
+            width: 100% !important;
+            table-layout: fixed !important;
+            border-collapse: separate !important;
+            border-spacing: 0 !important;
+            border: 0 !important;
+            border-radius: 0 !important;
+            overflow: visible !important;
+            margin: 0 !important;
+            background: #ffffff !important;
+          }
+          .quotation-print-head-table-print col.quotation-print-head-print-title-col {
+            width: 34% !important;
+          }
+          .quotation-print-head-table-print col.quotation-print-head-print-qr-col {
+            width: 10% !important;
+          }
+          .quotation-print-head-table-print td {
+            height: 44px !important;
+            border: 0.75px solid #555555 !important;
+            padding: 7px 12px !important;
+            vertical-align: middle !important;
+            background: #ffffff !important;
+            color: #242424 !important;
+            font-family: SimSun, STSong, "Songti SC", serif !important;
+            font-size: 10px !important;
+            line-height: 1.2 !important;
+            font-weight: 400 !important;
+          }
+          .quotation-print-head-table-print span {
+            display: block !important;
+            margin-bottom: 4px !important;
+            color: #242424 !important;
+            font-size: 8px !important;
+            line-height: 1.1 !important;
+            font-weight: 400 !important;
+          }
+          .quotation-print-head-table-print strong {
+            display: block !important;
+            color: #242424 !important;
+            font-size: 12px !important;
+            line-height: 1.2 !important;
+            font-weight: 500 !important;
+          }
+          .quotation-print-head-table-print .quotation-print-head-print-title {
+            padding: 8px 14px !important;
+            font-size: 15px !important;
+            line-height: 1.22 !important;
+            font-weight: 500 !important;
+            color: #242424 !important;
+            overflow-wrap: anywhere !important;
+            word-break: break-word !important;
+          }
+          .quotation-print-head-table-print .quotation-print-head-print-qr {
+            padding: 8px 6px !important;
+            text-align: center !important;
+            border-right-width: 1px !important;
+          }
+          .quotation-print-head-table-print .quotation-print-head-print-qr img {
+            display: block !important;
+            width: 50px !important;
+            height: 50px !important;
+            margin: 0 auto !important;
+            background: #ffffff !important;
+          }
+          .quotation-print-head-table-print .quotation-print-head-print-qr > div {
+            width: 50px !important;
+            height: 50px !important;
+            margin: 0 auto !important;
+          }
+          .quotation-print-head-table-print .quotation-print-head-print-qr p {
+            margin: 6px 0 0 !important;
+            color: #242424 !important;
+            font-size: 7px !important;
+            line-height: 1.1 !important;
+            font-weight: 400 !important;
+          }
           .quotation-print-composition {
             grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
           }
@@ -2589,13 +3041,19 @@ export function QuotationPrintDocument({
 	          .quotation-print-fee-table,
 	          .quotation-print-cabinet-table,
 	          .quotation-print-composition-table,
-	          .quotation-print-appendix-note,
-	          .quotation-print-budget-compilation-content {
-	            border-collapse: collapse !important;
-	            border-spacing: 0 !important;
-	            border: 1px solid #111111 !important;
+          .quotation-print-appendix-note,
+          .quotation-print-budget-compilation-content {
+            border-collapse: collapse !important;
+            border-spacing: 0 !important;
+            border: 1px solid #111111 !important;
             border-radius: 0 !important;
-            overflow: hidden !important;
+            overflow: visible !important;
+          }
+          .quotation-print-budget-compilation-content {
+            break-inside: auto !important;
+            page-break-inside: auto !important;
+            box-decoration-break: clone !important;
+            -webkit-box-decoration-break: clone !important;
           }
           .quotation-print-appendix-note-label {
             border-right-color: #111111 !important;
@@ -2613,39 +3071,30 @@ export function QuotationPrintDocument({
           .quotation-print-composition-table th,
           .quotation-print-composition-table td {
             border: 1px solid #111111 !important;
-            font-size: 11px !important;
-            line-height: 1.48 !important;
+            font-size: 12.5px !important;
+            line-height: 1.52 !important;
             padding: 7px 8px !important;
             vertical-align: middle !important;
           }
-          .quotation-print-base-table col:nth-child(1) { width: 5% !important; }
-          .quotation-print-base-table col:nth-child(2) { width: 21% !important; }
-          .quotation-print-base-table col:nth-child(3) { width: 6% !important; }
-          .quotation-print-base-table col:nth-child(4) { width: 5% !important; }
-          .quotation-print-base-table col:nth-child(5),
-          .quotation-print-base-table col:nth-child(7) { width: 6% !important; }
-          .quotation-print-base-table col:nth-child(6),
-          .quotation-print-base-table col:nth-child(8) { width: 7.5% !important; }
-          .quotation-print-base-table col:nth-child(9) { width: 8.5% !important; }
-          .quotation-print-base-table col:nth-child(10) { width: 27.5% !important; }
           .quotation-print-base-table th,
           .quotation-print-base-table td {
-            font-size: 10.5px !important;
-            line-height: 1.42 !important;
+            font-size: 13px !important;
+            line-height: 1.5 !important;
             padding: 6px 5px !important;
           }
           .quotation-print-base-description {
-            font-size: 9.5px !important;
-            line-height: 1.34 !important;
+            font-size: 10.5px !important;
+            line-height: 1.48 !important;
+            white-space: pre-wrap !important;
             overflow-wrap: break-word !important;
             word-break: normal !important;
           }
-          .quotation-print-base-labor-total-head {
+          .quotation-print-base-group-head {
+            border-left: 0 !important;
             border-right: 1px solid #111111 !important;
           }
-          .quotation-print-base-labor-head {
-            border-left: 0 !important;
-            border-right: 0 !important;
+          .quotation-print-base-group-bottom-end {
+            border-right: 1px solid #111111 !important;
           }
           .quotation-print-base-subtotal-boundary-head {
             border-right: 0 !important;
@@ -2721,8 +3170,16 @@ export function QuotationPrintDocument({
           }
           .quotation-print-document {
             --quotation-print-ink: #242424;
-            --quotation-print-line: #2f2f2f;
+            --quotation-print-line: #5a5a5a;
+            --quotation-print-line-width: 0.6px;
+            --quotation-print-outer-line-width: 0.75px;
+            --quotation-print-right-edge-width: 1px;
+            --quotation-print-header-fill: #d6d6d6;
+            --quotation-print-section-fill: #f3f3f3;
+            --quotation-print-total-fill: #f6f6f6;
             color: var(--quotation-print-ink) !important;
+            print-color-adjust: exact !important;
+            -webkit-print-color-adjust: exact !important;
           }
           .quotation-print-document,
           .quotation-print-document :where(h1, h2, h3, p, span, strong, small, em, th, td, footer, div) {
@@ -2766,7 +3223,7 @@ export function QuotationPrintDocument({
           .quotation-print-budget-compilation-content,
           .quotation-print-head-table {
             border-color: var(--quotation-print-line) !important;
-            border-width: 0.75px !important;
+            border-width: var(--quotation-print-line-width) !important;
           }
           .quotation-print-document th,
           .quotation-print-document td,
@@ -2784,7 +3241,60 @@ export function QuotationPrintDocument({
           .quotation-print-qr,
           .quotation-print-appendix-note-label {
             border-color: var(--quotation-print-line) !important;
-            border-width: 0.75px !important;
+            border-width: var(--quotation-print-line-width) !important;
+          }
+          .quotation-print-base-table {
+            --quotation-base-grid-line-width: var(--quotation-print-line-width);
+            --quotation-base-grid-line-color: var(--quotation-print-line);
+            border-collapse: separate !important;
+            border-spacing: 0 !important;
+            border: var(--quotation-print-outer-line-width) solid var(--quotation-base-grid-line-color) !important;
+            border-radius: 10px !important;
+            box-shadow:
+              inset 0 0 0 var(--quotation-print-line-width) var(--quotation-base-grid-line-color),
+              inset calc(-1 * var(--quotation-print-right-edge-width)) 0 0 var(--quotation-base-grid-line-color) !important;
+            overflow: hidden !important;
+          }
+          .quotation-print-base-table th,
+          .quotation-print-base-table td,
+          .quotation-print-base-table .quotation-print-base-group-head,
+          .quotation-print-base-table .quotation-print-base-group-bottom-end,
+          .quotation-print-base-table .quotation-print-base-subtotal-head,
+          .quotation-print-base-table .quotation-print-base-subtotal-boundary-head {
+            border: 0 !important;
+            border-right: var(--quotation-base-grid-line-width) solid var(--quotation-base-grid-line-color) !important;
+            border-bottom: var(--quotation-base-grid-line-width) solid var(--quotation-base-grid-line-color) !important;
+          }
+          .quotation-print-base-table th:last-child,
+          .quotation-print-base-table td:last-child {
+            border-right: 0 !important;
+          }
+          .quotation-print-base-table .quotation-print-base-subtotal-head {
+            border-left: var(--quotation-base-grid-line-width) solid var(--quotation-base-grid-line-color) !important;
+          }
+          .quotation-print-base-table tbody tr:last-child td {
+            border-bottom: 0 !important;
+          }
+          .quotation-print-base-table th,
+          .quotation-print-base-table td,
+          .quotation-print-base-table .quotation-print-base-group-head,
+          .quotation-print-base-table .quotation-print-base-group-bottom-end,
+          .quotation-print-base-table .quotation-print-base-subtotal-head,
+          .quotation-print-base-table .quotation-print-base-subtotal-boundary-head {
+            border: 0 !important;
+            border-left: var(--quotation-base-grid-line-width) solid var(--quotation-base-grid-line-color) !important;
+            border-top: var(--quotation-base-grid-line-width) solid var(--quotation-base-grid-line-color) !important;
+          }
+          .quotation-print-base-table thead tr:first-child th {
+            border-top: 0 !important;
+          }
+          .quotation-print-base-table thead tr:first-child .quotation-print-base-col-sequence,
+          .quotation-print-base-table tbody tr > td:first-child {
+            border-left: 0 !important;
+          }
+          .quotation-print-base-table th:last-child,
+          .quotation-print-base-table td:last-child {
+            border-right: var(--quotation-print-right-edge-width) solid var(--quotation-base-grid-line-color) !important;
           }
           .quotation-print-fee-table th,
           .quotation-print-fee-table td {
@@ -2807,42 +3317,333 @@ export function QuotationPrintDocument({
           }
           .quotation-print-cover-field strong {
             border: 0 !important;
-            border-bottom: 0.75px solid var(--quotation-print-line) !important;
+            border-bottom: var(--quotation-print-line-width) solid var(--quotation-print-line) !important;
           }
           .quotation-print-signature-card {
             border: 0 !important;
-            border-bottom: 0.75px solid var(--quotation-print-line) !important;
+            border-bottom: var(--quotation-print-line-width) solid var(--quotation-print-line) !important;
           }
           .quotation-print-head-table {
             --quotation-print-head-line-color: var(--quotation-print-line) !important;
             --quotation-print-head-inner-line-color: var(--quotation-print-line) !important;
-            --quotation-print-head-line-width: 1px !important;
-            --quotation-print-head-inner-line-width: 1px !important;
-            border: 1px solid var(--quotation-print-head-line-color) !important;
+            --quotation-print-head-line-width: var(--quotation-print-outer-line-width) !important;
+            --quotation-print-head-inner-line-width: var(--quotation-print-line-width) !important;
+            border: var(--quotation-print-head-line-width) solid var(--quotation-print-head-line-color) !important;
+            box-shadow:
+              inset 0 0 0 var(--quotation-print-line-width) var(--quotation-print-head-line-color),
+              inset calc(-1 * var(--quotation-print-right-edge-width)) 0 0 var(--quotation-print-head-line-color) !important;
           }
-          .quotation-print-head-field {
+          .quotation-print-head-table::after {
+            display: none !important;
+          }
+          .quotation-print-head-title-cell,
+          .quotation-print-head-field,
+          .quotation-print-qr {
             border: 0 !important;
           }
           .quotation-print-head-field-phone,
           .quotation-print-head-field-area,
           .quotation-print-head-field-date {
+            border-left: var(--quotation-print-head-inner-line-width) solid var(--quotation-print-head-inner-line-color) !important;
             border-top: 0 !important;
           }
           .quotation-print-head-field-designer,
           .quotation-print-head-field-creator,
           .quotation-print-head-field-company-phone {
-            border-top: 0 !important;
+            border-left: var(--quotation-print-head-inner-line-width) solid var(--quotation-print-head-inner-line-color) !important;
+            border-top: var(--quotation-print-head-inner-line-width) solid var(--quotation-print-head-inner-line-color) !important;
           }
+          .quotation-print-qr {
+            border-left: var(--quotation-print-head-inner-line-width) solid var(--quotation-print-head-inner-line-color) !important;
+            border-top: 0 !important;
+            border-right: var(--quotation-print-right-edge-width) solid var(--quotation-print-head-inner-line-color) !important;
+          }
+          .quotation-print-document {
+            --quotation-print-grid-line: #555555;
+            --quotation-print-grid-width: 0.65px;
+            --quotation-print-grid-edge-width: 0.75px;
+          }
+          .quotation-print-head-table {
+            border: 0 !important;
+            border-radius: 0 !important;
+            box-shadow: none !important;
+            overflow: hidden !important;
+          }
+          .quotation-print-head-table::before {
+            content: "" !important;
+            position: absolute !important;
+            inset: 0.5px !important;
+            z-index: 3 !important;
+            display: block !important;
+            border: var(--quotation-print-grid-edge-width) solid var(--quotation-print-grid-line) !important;
+            border-radius: 0 !important;
+            pointer-events: none !important;
+          }
+          .quotation-print-head-table::after {
+            display: none !important;
+          }
+          .quotation-print-head-title-cell,
+          .quotation-print-head-field,
           .quotation-print-qr {
             border: 0 !important;
           }
+          .quotation-print-head-title-cell {
+            border: 0 !important;
+          }
+          .quotation-print-head-field-phone,
+          .quotation-print-head-field-area,
+          .quotation-print-head-field-date {
+            border-left: var(--quotation-print-grid-width) solid var(--quotation-print-grid-line) !important;
+            border-top: 0 !important;
+          }
+          .quotation-print-head-field-designer,
+          .quotation-print-head-field-creator,
+          .quotation-print-head-field-company-phone {
+            border-top: var(--quotation-print-grid-width) solid var(--quotation-print-grid-line) !important;
+            border-left: var(--quotation-print-grid-width) solid var(--quotation-print-grid-line) !important;
+          }
+          .quotation-print-qr {
+            border-left: var(--quotation-print-grid-width) solid var(--quotation-print-grid-line) !important;
+            box-shadow: none !important;
+          }
+          .quotation-print-base-table,
+          .quotation-print-material-table,
+          .quotation-print-fee-table,
+          .quotation-print-cabinet-table,
+          .quotation-print-composition-table {
+            border: 0 !important;
+            border-collapse: separate !important;
+            border-spacing: 0 !important;
+            border-radius: 10px !important;
+            box-shadow: none !important;
+            overflow: hidden !important;
+          }
+          .quotation-print-base-table th,
+          .quotation-print-base-table td,
+          .quotation-print-material-table th,
+          .quotation-print-material-table td,
+          .quotation-print-fee-table th,
+          .quotation-print-fee-table td,
+          .quotation-print-cabinet-table th,
+          .quotation-print-cabinet-table td,
+          .quotation-print-composition-table th,
+          .quotation-print-composition-table td {
+            border: 0 !important;
+            border-top: var(--quotation-print-grid-width) solid var(--quotation-print-grid-line) !important;
+            border-left: var(--quotation-print-grid-width) solid var(--quotation-print-grid-line) !important;
+          }
+          .quotation-print-base-table thead tr:first-child > th,
+          .quotation-print-material-table thead tr:first-child > th,
+          .quotation-print-fee-table thead tr:first-child > th,
+          .quotation-print-cabinet-table thead tr:first-child > th,
+          .quotation-print-composition-table thead tr:first-child > th {
+            border-top-width: var(--quotation-print-grid-edge-width) !important;
+          }
+          .quotation-print-base-table tr > :first-child,
+          .quotation-print-material-table tr > :first-child,
+          .quotation-print-fee-table tr > :first-child,
+          .quotation-print-cabinet-table tr > :first-child,
+          .quotation-print-composition-table tr > :first-child {
+            border-left-width: var(--quotation-print-grid-edge-width) !important;
+          }
+          .quotation-print-base-table tr > :last-child,
+          .quotation-print-material-table tr > :last-child,
+          .quotation-print-fee-table tr > :last-child,
+          .quotation-print-cabinet-table tr > :last-child,
+          .quotation-print-composition-table tr > :last-child {
+            border-right: 0 !important;
+            box-shadow: inset -1px 0 0 var(--quotation-print-grid-line) !important;
+          }
+          .quotation-print-base-table tbody tr:last-child > td,
+          .quotation-print-material-table tbody tr:last-child > td,
+          .quotation-print-fee-table tbody tr:last-child > td,
+          .quotation-print-cabinet-table tbody tr:last-child > td,
+          .quotation-print-composition-table tbody tr:last-child > td {
+            border-bottom: var(--quotation-print-grid-edge-width) solid var(--quotation-print-grid-line) !important;
+          }
           .quotation-print-appendix-note {
-            border: 0.75px solid var(--quotation-print-line) !important;
+            border: var(--quotation-print-line-width) solid var(--quotation-print-line) !important;
             border-collapse: initial !important;
           }
           .quotation-print-appendix-note-label {
             border: 0 !important;
-            border-right: 0.75px solid var(--quotation-print-line) !important;
+            border-right: var(--quotation-print-line-width) solid var(--quotation-print-line) !important;
+          }
+          .quotation-print-document th,
+          .quotation-print-base-table th,
+          .quotation-print-material-table th,
+          .quotation-print-fee-table th,
+          .quotation-print-cabinet-table th,
+          .quotation-print-composition-table th {
+            background: var(--quotation-print-header-fill) !important;
+          }
+          .quotation-print-space-row td,
+          .quotation-print-base-table .quotation-print-space-row td,
+          .quotation-print-cabinet-table .quotation-print-space-row td {
+            background: var(--quotation-print-header-fill) !important;
+          }
+          .quotation-print-space-total-row td,
+          .quotation-print-base-table .quotation-print-space-total-row td,
+          .quotation-print-cabinet-table .quotation-print-space-total-row td {
+            background: var(--quotation-print-section-fill) !important;
+          }
+          .quotation-print-total-row td,
+          .quotation-print-base-table .quotation-print-total-row td,
+          .quotation-print-cabinet-table .quotation-print-total-row td {
+            background: var(--quotation-print-total-fill) !important;
+          }
+          .quotation-print-head-table {
+            display: none !important;
+          }
+          .quotation-print-head-table-print {
+            display: table !important;
+            width: 100% !important;
+            table-layout: fixed !important;
+            border-collapse: separate !important;
+            border-spacing: 0 !important;
+            border: 0 !important;
+            border-radius: 0 !important;
+            box-shadow: inset -1.75px 0 0 var(--quotation-print-grid-line) !important;
+            overflow: visible !important;
+            margin: 0 !important;
+            background: #ffffff !important;
+          }
+          .quotation-print-head-table-print col.quotation-print-head-print-title-col {
+            width: 34% !important;
+          }
+          .quotation-print-head-table-print col.quotation-print-head-print-qr-col {
+            width: 10% !important;
+          }
+          .quotation-print-head-table-print td {
+            height: 44px !important;
+            border: 0 !important;
+            border-top: 0.75px solid var(--quotation-print-grid-line) !important;
+            border-left: 0.75px solid var(--quotation-print-grid-line) !important;
+            padding: 7px 12px !important;
+            vertical-align: middle !important;
+            background: #ffffff !important;
+            color: var(--quotation-print-ink) !important;
+            font-family: SimSun, STSong, "Songti SC", serif !important;
+            font-size: 10px !important;
+            line-height: 1.2 !important;
+            font-weight: 400 !important;
+            box-shadow: none !important;
+          }
+          .quotation-print-head-table-print tr:last-child td {
+            border-bottom: 0.75px solid var(--quotation-print-grid-line) !important;
+          }
+          .quotation-print-head-table-print .quotation-print-head-print-title,
+          .quotation-print-head-table-print .quotation-print-head-print-qr {
+            border-bottom: 0.75px solid var(--quotation-print-grid-line) !important;
+          }
+          .quotation-print-head-table-print span,
+          .quotation-print-head-table-print strong {
+            display: block !important;
+            color: var(--quotation-print-ink) !important;
+            font-family: SimSun, STSong, "Songti SC", serif !important;
+          }
+          .quotation-print-head-table-print span {
+            margin-bottom: 4px !important;
+            font-size: 8px !important;
+            line-height: 1.1 !important;
+            font-weight: 400 !important;
+          }
+          .quotation-print-head-table-print strong {
+            font-size: 12px !important;
+            line-height: 1.2 !important;
+            font-weight: 500 !important;
+          }
+          .quotation-print-head-table-print .quotation-print-head-print-title {
+            padding: 8px 14px !important;
+            font-size: 15px !important;
+            line-height: 1.22 !important;
+            font-weight: 500 !important;
+            overflow-wrap: anywhere !important;
+            word-break: break-word !important;
+          }
+          .quotation-print-head-table-print .quotation-print-head-print-qr {
+            padding: 5px 6px !important;
+            text-align: center !important;
+            border-right: 0 !important;
+            box-shadow: none !important;
+          }
+          .quotation-print-head-table-print .quotation-print-head-print-qr img {
+            display: block !important;
+            width: 60px !important;
+            height: 60px !important;
+            margin: 0 auto !important;
+            background: #ffffff !important;
+          }
+          .quotation-print-head-table-print .quotation-print-head-print-qr > div {
+            width: 60px !important;
+            height: 60px !important;
+            margin: 0 auto !important;
+          }
+          .quotation-print-head-table-print .quotation-print-head-print-qr p {
+            margin: 4px 0 0 !important;
+            color: var(--quotation-print-ink) !important;
+            font-size: 7px !important;
+            line-height: 1.1 !important;
+            font-weight: 400 !important;
+          }
+
+          .quotation-print-head-table-print,
+          .quotation-print-base-table,
+          .quotation-print-material-table,
+          .quotation-print-fee-table,
+          .quotation-print-cabinet-table,
+          .quotation-print-composition-table {
+            border: 1px solid var(--quotation-print-grid-line) !important;
+            border-collapse: separate !important;
+            border-spacing: 0 !important;
+            border-radius: 0 !important;
+            box-shadow: none !important;
+            overflow: visible !important;
+          }
+          .quotation-print-head-table-print td,
+          .quotation-print-base-table th,
+          .quotation-print-base-table td,
+          .quotation-print-material-table th,
+          .quotation-print-material-table td,
+          .quotation-print-fee-table th,
+          .quotation-print-fee-table td,
+          .quotation-print-cabinet-table th,
+          .quotation-print-cabinet-table td,
+          .quotation-print-composition-table th,
+          .quotation-print-composition-table td {
+            border: 0 !important;
+            border-top: 1px solid var(--quotation-print-grid-line) !important;
+            border-left: 1px solid var(--quotation-print-grid-line) !important;
+            box-shadow: none !important;
+          }
+          .quotation-print-head-table-print tr:first-child > td,
+          .quotation-print-base-table thead tr:first-child > th,
+          .quotation-print-material-table thead tr:first-child > th,
+          .quotation-print-fee-table thead tr:first-child > th,
+          .quotation-print-cabinet-table thead tr:first-child > th,
+          .quotation-print-composition-table thead tr:first-child > th {
+            border-top: 0 !important;
+          }
+          .quotation-print-head-table-print tr > :first-child,
+          .quotation-print-base-table tr > :first-child,
+          .quotation-print-material-table tr > :first-child,
+          .quotation-print-fee-table tr > :first-child,
+          .quotation-print-cabinet-table tr > :first-child,
+          .quotation-print-composition-table tr > :first-child {
+            border-left: 0 !important;
+          }
+          .quotation-print-head-table-print tr > :last-child,
+          .quotation-print-base-table tr > :last-child,
+          .quotation-print-material-table tr > :last-child,
+          .quotation-print-fee-table tr > :last-child,
+          .quotation-print-cabinet-table tr > :last-child,
+          .quotation-print-composition-table tr > :last-child {
+            border-right: 0 !important;
+            box-shadow: none !important;
+          }
+          .quotation-print-head-table-print tr:nth-child(2) > :first-child,
+          .quotation-print-base-table thead tr:nth-child(2) > :first-child {
+            border-left: 1px solid var(--quotation-print-grid-line) !important;
           }
         }
         @media print and (orientation: landscape) {

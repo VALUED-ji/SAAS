@@ -44,6 +44,8 @@ function ensureStandardQuotaItemsTable(db: Db) {
       ON standard_quota_items(company_id, quota_item_id);
     CREATE INDEX IF NOT EXISTS idx_standard_quota_items_company_status
       ON standard_quota_items(company_id, status, deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_standard_quota_items_company_scope
+      ON standard_quota_items(company_id, scope, deleted_at, updated_at);
     CREATE TABLE IF NOT EXISTS standard_quota_item_change_logs (
       id TEXT PRIMARY KEY,
       company_id TEXT NOT NULL REFERENCES companies(id),
@@ -298,15 +300,6 @@ export async function GET(req: NextRequest) {
     }));
     return NextResponse.json({ logs });
   }
-  const rows = db.prepare(`
-    SELECT payload
-    FROM standard_quota_items
-    WHERE company_id = ? AND deleted_at IS NULL
-    ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC, quota_item_id DESC
-  `).all(auth.companyId) as Array<{ payload?: string | null }>;
-  const items = rows
-    .map((row) => safeJsonParse(row.payload, null))
-    .filter(Boolean);
   const branchOrgUnitId = cleanText(
     req.nextUrl.searchParams.get("branchOrgUnitId")
       || req.nextUrl.searchParams.get("branch_org_unit_id"),
@@ -314,6 +307,23 @@ export async function GET(req: NextRequest) {
   const scoped = getScopedStores(db, auth, branchOrgUnitId);
   if (scoped.error) return NextResponse.json({ message: scoped.error }, { status: 403 });
   const storeNames = new Set(scoped.stores.map((store) => store.name));
+  if (storeNames.size === 0) {
+    return NextResponse.json({
+      items: [],
+      branch: scoped.branch ? { id: scoped.branch.id, name: scoped.branch.name } : null,
+      storeOptions: [],
+    });
+  }
+  const storePlaceholders = Array.from(storeNames).map(() => "?").join(",");
+  const rows = db.prepare(`
+    SELECT payload
+    FROM standard_quota_items
+    WHERE company_id = ? AND deleted_at IS NULL AND scope IN (${storePlaceholders})
+    ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC, quota_item_id DESC
+  `).all(auth.companyId, ...storeNames) as Array<{ payload?: string | null }>;
+  const items = rows
+    .map((row) => safeJsonParse(row.payload, null))
+    .filter(Boolean);
   const scopedItems = filterItemsByManageableStore(items, storeNames);
   const itemCountByStore = scopedItems.reduce((counts, item) => {
     const storeName = cleanText(item?.scope);

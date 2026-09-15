@@ -14,5 +14,6 @@ export function formatUserRoleLabel(role?: string | null, roleName?: string | nu
   if (configuredName && configuredName.toUpperCase() !== rawRole.toUpperCase()) {
     return defaultUserRoleLabels[configuredName.toUpperCase()] || configuredName;
   }
+  if (/^CUSTOM_ROLE_/i.test(rawRole)) return "自定义角色";
   return defaultUserRoleLabels[rawRole.toUpperCase()] || rawRole || "未设置角色";
 }

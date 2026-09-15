@@ -333,7 +333,7 @@ export async function GET(req: NextRequest) {
   const auth = getAuthContext(req);
   if (!auth) return NextResponse.json({ message: "请先登录" }, { status: 401 });
   const view = req.nextUrl.searchParams.get("view") || "workspace";
-  if (!canManageMaterials(auth) && !(view === "categories" && hasPermission(auth, "quotations.manage"))) return NextResponse.json({ message: "没有材料查看权限" }, { status: 403 });
+  if (!canManageMaterials(auth) && !((view === "categories" || view === "library") && hasPermission(auth, "quotations.manage"))) return NextResponse.json({ message: "没有材料查看权限" }, { status: 403 });
   const db = getDb();
   ensureMaterialSystemSchema(db);
   const includeMaterials = view !== "categories";

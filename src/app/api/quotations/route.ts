@@ -63,6 +63,9 @@ function ensureQuotationItemColumns(db: any) {
   if (!names.has("cost_labor_unit")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_labor_unit REAL").run();
   if (!names.has("cost_loss_rate")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_loss_rate REAL").run();
   if (!names.has("cost_source")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_source TEXT").run();
+  if (!names.has("quota_source_id")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_id TEXT").run();
+  if (!names.has("quota_source_type")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_type TEXT").run();
+  if (!names.has("quota_source_synced_at")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_synced_at TEXT").run();
   ensureProjectCostControlSchema(db);
 }
 
@@ -431,13 +434,17 @@ function buildTemplateQuotationItems(template: any) {
         const unitPrice = totalPrice || laborPrice + materialPrice;
         const isBase = isBaseCategory(category);
         const constructionDescription = String(quota?.constructionDescription || "").trim();
+        const quotaSourceType = String(quota?.quotaSourceType || quota?.quota_source_type || quota?.source || "").trim();
+        const quotaSourceId = String(quota?.quotaId || quota?.quota_id || "").trim();
+        const quotaCode = String(quota?.code || "").trim();
+        const isStandardQuotaSource = isBase && quotaSourceType !== "custom" && Boolean(quotaSourceId || quotaCode);
         rows.push({
           category,
           space: spaceName,
           name,
           spec: isBase ? constructionDescription : "",
           material_model: "",
-          remark: isBase ? "" : constructionDescription,
+          remark: isBase && quotaCode ? `定额编号：${quotaCode}` : isBase ? "" : constructionDescription,
           unit: String(quota?.unit || "").trim(),
           quantity: 0,
           unit_price: toMoney(isBase ? (materialPrice || laborPrice ? materialPrice + laborPrice : unitPrice) : unitPrice),
@@ -452,6 +459,10 @@ function buildTemplateQuotationItems(template: any) {
           fee_scope_mode: "all",
           fee_scope_space_ids: [],
           fee_scope_space_names: [],
+          cost_source: isStandardQuotaSource ? (quotaCode ? `quota:${quotaCode}` : "quota") : null,
+          quota_source_id: isStandardQuotaSource ? quotaSourceId || null : null,
+          quota_source_type: isStandardQuotaSource ? "standard" : null,
+          quota_source_synced_at: isStandardQuotaSource ? new Date().toISOString() : null,
           sort_order: sortOrder++,
         });
       });
@@ -1033,8 +1044,8 @@ export async function POST(req: NextRequest) {
 
       if (normalizedTemplateItems.length > 0) {
         const insertItem = db.prepare(`
-          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         normalizedTemplateItems.forEach((item) => {
           insertItem.run(
@@ -1068,6 +1079,9 @@ export async function POST(req: NextRequest) {
             Number((item as any).cost_labor_unit || 0),
             Number((item as any).cost_loss_rate || 0),
             (item as any).cost_source || null,
+            isBaseCategory(item.category) ? String((item as any).quota_source_id || "").trim() || null : null,
+            isBaseCategory(item.category) && String((item as any).quota_source_type || "").trim() ? String((item as any).quota_source_type || "").trim() : null,
+            isBaseCategory(item.category) ? String((item as any).quota_source_synced_at || "").trim() || null : null,
             item.sort_order
           );
         });

@@ -60,6 +60,27 @@ function ensureCustomQuotaItemsTable(db: Db) {
   if (!names.has("material_category_name")) db.prepare("ALTER TABLE custom_quota_items ADD COLUMN material_category_name TEXT").run();
 }
 
+function ensureQuotationItemSourceColumns(db: Db) {
+  const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'quotation_items' LIMIT 1").get() as any;
+  if (!table?.name) return;
+  const columns = db.prepare("PRAGMA table_info(quotation_items)").all() as { name: string }[];
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has("cost_source")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_source TEXT").run();
+  if (!names.has("quota_source_id")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_id TEXT").run();
+  if (!names.has("quota_source_type")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_type TEXT").run();
+}
+
+function isStandardQuotaSourceRow(row: any) {
+  if (!row) return false;
+  const sourceType = normalizeText(row.quota_source_type);
+  if (sourceType === "custom") return false;
+  if (sourceType === "standard") return true;
+  if (normalizeText(row.quota_source_id)) return true;
+  const costSource = normalizeText(row.cost_source);
+  if (costSource === "quota" || costSource.startsWith("quota:")) return true;
+  return /定额编号[:：]/.test(normalizeText(row.remark));
+}
+
 function canManageQuota(auth: NonNullable<ReturnType<typeof getAuthContext>>) {
   return hasPermission(auth, "quotations.manage") || hasPermission(auth, "settings.manage");
 }
@@ -259,6 +280,7 @@ export async function POST(req: NextRequest) {
     const materialPrice = toAmount(body.materialPrice ?? body.material_price);
     const totalPrice = toAmount(body.totalPrice ?? body.total_price) || laborPrice + materialPrice;
     const sourceQuotationId = normalizeText(body.sourceQuotationId || body.source_quotation_id) || null;
+    const sourceQuotationItemId = normalizeText(body.sourceQuotationItemId || body.source_quotation_item_id || body.itemId) || null;
     const sourceStoreName = getQuotationStoreName(db, auth.companyId, sourceQuotationId);
     if (sourceQuotationId) {
       const quotation = db.prepare(`
@@ -268,6 +290,22 @@ export async function POST(req: NextRequest) {
         LIMIT 1
       `).get(sourceQuotationId, auth.companyId) as any;
       if (!quotation?.id) return NextResponse.json({ message: "来源报价不存在" }, { status: 404 });
+    }
+    if (sourceQuotationId && sourceQuotationItemId) {
+      ensureQuotationItemSourceColumns(db);
+      const sourceItem = db.prepare(`
+        SELECT qi.*
+        FROM quotation_items qi
+        INNER JOIN quotations q ON q.id = qi.quotation_id
+        WHERE qi.id = ?
+          AND qi.quotation_id = ?
+          AND q.company_id = ?
+          AND q.deleted_at IS NULL
+        LIMIT 1
+      `).get(sourceQuotationItemId, sourceQuotationId, auth.companyId) as any;
+      if (isStandardQuotaSourceRow(sourceItem)) {
+        return NextResponse.json({ message: "该项目来源于基装定额库，不能重复保存到自定义库。" }, { status: 400 });
+      }
     }
     const store = findNearestStore(db, auth.companyId, auth.orgUnitId);
     const storeName = normalizeText(body.storeName || body.store_name) || sourceStoreName || normalizeText(store?.name);
@@ -316,7 +354,7 @@ export async function POST(req: NextRequest) {
       totalPrice,
       body.isSpecialPrice || body.is_special_price ? 1 : 0,
       sourceQuotationId,
-      normalizeText(body.sourceQuotationItemId || body.source_quotation_item_id || body.itemId) || null,
+      sourceQuotationItemId,
       auth.userId,
     );
 

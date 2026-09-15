@@ -1118,7 +1118,7 @@ export function AmapLocationPicker({
   }
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/24 px-4 py-6 backdrop-blur-[1px]">
+    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-900/24 px-4 py-6 backdrop-blur-[1px]">
       <div className="customer-entry-map-modal-shell flex max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-none border border-[#DCE4EF] bg-white">
         <div className="flex items-center justify-between border-b border-[#E5EAF2] bg-white px-5 py-4">
           <div>

@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS users (
   hire_date TEXT,
   notes TEXT,
   last_login_at TEXT,
+  last_login_ip TEXT,
+  last_login_location TEXT,
   last_seen_at TEXT,
   is_active INTEGER DEFAULT 1,
   created_at TEXT DEFAULT (datetime('now')),
@@ -769,6 +771,29 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS system_update_announcements (
+  id TEXT PRIMARY KEY,
+  company_id TEXT REFERENCES companies(id),
+  version TEXT NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT,
+  details_json TEXT DEFAULT '[]',
+  status TEXT DEFAULT 'draft',
+  published_at TEXT,
+  expires_at TEXT,
+  created_by_id TEXT REFERENCES users(id),
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  deleted_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS system_update_reads (
+  id TEXT PRIMARY KEY,
+  announcement_id TEXT NOT NULL REFERENCES system_update_announcements(id),
+  user_id TEXT NOT NULL REFERENCES users(id),
+  read_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS org_units (
   id TEXT PRIMARY KEY,
   company_id TEXT NOT NULL REFERENCES companies(id),
@@ -893,6 +918,9 @@ CREATE INDEX IF NOT EXISTS idx_site_node_events_project_time ON site_node_events
 CREATE INDEX IF NOT EXISTS idx_site_node_events_node ON site_node_events(project_id, stage_id, node_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_site_node_events_source ON site_node_events(source_type, source_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_system_update_announcements_scope ON system_update_announcements(company_id, status, published_at, deleted_at);
+CREATE INDEX IF NOT EXISTS idx_system_update_reads_user ON system_update_reads(user_id, announcement_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_system_update_reads_unique ON system_update_reads(announcement_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_org_unit_managers_org ON org_unit_managers(org_unit_id, deleted_at);
 CREATE INDEX IF NOT EXISTS idx_org_unit_managers_user ON org_unit_managers(user_id, deleted_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_org_unit_managers_active_unique
@@ -922,8 +950,7 @@ export function initializeDatabase(): void {
 function ensureDatabaseSchema(database: Database.Database): void {
   database.exec(SCHEMA_SQL);
   ensureColumn(database, "users", "avatar", "TEXT");
-  ensureColumn(database, "users", "last_login_at", "TEXT");
-  ensureColumn(database, "users", "last_seen_at", "TEXT");
+  ensureUserLoginColumns(database);
   ensureColumn(database, "customers", "inviter_id", "TEXT REFERENCES users(id)");
   ensureColumn(database, "customers", "house_address", "TEXT");
   ensureColumn(database, "customers", "address_location_name", "TEXT");
@@ -1015,6 +1042,14 @@ function ensureDatabaseSchema(database: Database.Database): void {
   ensureColumn(database, "daily_logs", "deleted_at", "TEXT");
   ensureMaterialSystemSchema(database);
   ensureDefaultRoles(database);
+}
+
+// Keep login metadata compatible when a dev server survives a schema change through HMR.
+export function ensureUserLoginColumns(database: Database.Database): void {
+  ensureColumn(database, "users", "last_login_at", "TEXT");
+  ensureColumn(database, "users", "last_login_ip", "TEXT");
+  ensureColumn(database, "users", "last_login_location", "TEXT");
+  ensureColumn(database, "users", "last_seen_at", "TEXT");
 }
 
 function ensureColumn(database: Database.Database, table: string, column: string, definition: string): void {

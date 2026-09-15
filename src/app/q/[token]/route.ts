@@ -8,5 +8,7 @@ export async function GET(_req: NextRequest, { params: paramsPromise }: { params
   const claims = verifyQuotationShareToken(token);
   if (!claims) return NextResponse.json({ message: "报价分享链接无效或已过期" }, { status: 404 });
 
-  return NextResponse.redirect(`${getPublicAppOrigin(_req)}/quotation-share/${encodeURIComponent(token)}`, 307);
+  const target = new URL(`${getPublicAppOrigin(_req)}/quotation-share/${encodeURIComponent(token)}`);
+  _req.nextUrl.searchParams.forEach((value, key) => target.searchParams.set(key, value));
+  return NextResponse.redirect(target, 307);
 }

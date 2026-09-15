@@ -291,6 +291,7 @@ export default function QuotaTemplatesPage() {
   const currentCreatorName = user?.name?.trim() || DEFAULT_TEMPLATE_CREATOR;
   const [templates, setTemplates] = useState<QuotaTemplate[]>(initialTemplates);
   const [templatesLoaded, setTemplatesLoaded] = useState(false);
+  const [templatesLoading, setTemplatesLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [pricingModeFilter, setPricingModeFilter] = useState<PricingMode | "">("");
   const [statusFilter, setStatusFilter] = useState<TemplateStatus | "">("");
@@ -354,6 +355,7 @@ export default function QuotaTemplatesPage() {
   const templateSaveStatusTimerRef = useRef<number | null>(null);
   const spaceAutoSaveRunRef = useRef(0);
   const lastSpaceAutoSavePayloadRef = useRef("");
+  const constructionTemplateLoadForRef = useRef("");
   const budgetCompilationEditorRef = useRef<HTMLDivElement | null>(null);
   const [hasMoreProjectItemsBelow, setHasMoreProjectItemsBelow] = useState(false);
 
@@ -568,7 +570,7 @@ export default function QuotaTemplatesPage() {
 	        if (cancelled) return;
         setTemplateScopeOptions(nextScopeOptions);
         if (nextScopeOptions.length === 0) void loadTemplateScopeOptionsFallback();
-	        setTemplates(loadedTemplates);
+        setTemplates(loadedTemplates);
         setSelectedId(loadedTemplates[0]?.id || "");
         setTemplatesLoaded(true);
       } catch {
@@ -577,7 +579,9 @@ export default function QuotaTemplatesPage() {
 	        setTemplates(fallbackTemplates);
 	        setSelectedId(fallbackTemplates[0]?.id || "");
         void loadTemplateScopeOptionsFallback();
-	        setTemplatesLoaded(true);
+        setTemplatesLoaded(true);
+      } finally {
+        if (!cancelled) setTemplatesLoading(false);
       }
     };
     loadTemplates();
@@ -587,8 +591,11 @@ export default function QuotaTemplatesPage() {
   }, [loadQuotaLibraryOptions, loadTemplateScopeOptionsFallback, saveTemplatesToServer]);
 
   useEffect(() => {
-    loadConstructionTemplateOptions();
-  }, [loadConstructionTemplateOptions, user?.id]);
+    const templateId = editingTemplate?.id || "";
+    if (!templateId || constructionTemplateOptions.length > 0 || constructionTemplateLoading || constructionTemplateLoadForRef.current === templateId) return;
+    constructionTemplateLoadForRef.current = templateId;
+    void loadConstructionTemplateOptions();
+  }, [constructionTemplateLoading, constructionTemplateOptions.length, editingTemplate?.id, loadConstructionTemplateOptions]);
 
   useEffect(() => {
     if (!templatesLoaded) return;
@@ -2222,7 +2229,13 @@ export default function QuotaTemplatesPage() {
             <Search className="h-4 w-4" />
             <input value={search} onChange={(event) => setSearch(event.target.value)} className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-surface-400" placeholder="搜索模板名称、报价模式、备注说明" />
           </div>
-          <div className="quota-toolbar-compact flex flex-wrap items-center gap-2">
+              <div className="quota-toolbar-compact flex flex-wrap items-center gap-2">
+            {templatesLoading && (
+              <span className="inline-flex h-8 items-center gap-1.5 px-1 text-xs font-medium text-surface-500" role="status" aria-live="polite">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                正在加载
+              </span>
+            )}
             <div className="quota-template-filter-group flex items-center gap-2">
               <span className="quota-template-filter-label inline-flex items-center gap-1.5 text-xs font-semibold text-surface-500"><SlidersHorizontal className="h-3.5 w-3.5" />筛选</span>
               <SystemSelect value={pricingModeFilter} onChange={(event) => setPricingModeFilter(event.target.value as PricingMode | "")} className="input-field h-10 w-44 py-0">
@@ -2285,7 +2298,16 @@ export default function QuotaTemplatesPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-surface-200">
-              {pagination.pageItems.length === 0 ? (
+              {templatesLoading && pagination.pageItems.length === 0 ? (
+                <tr>
+                  <td colSpan={10} className="px-3 py-10 text-center">
+                    <div className="inline-flex items-center gap-2 text-sm font-medium text-surface-500" role="status" aria-live="polite">
+                      <Loader2 className="h-4 w-4 animate-spin text-primary-600" aria-hidden="true" />
+                      正在读取预算模板
+                    </div>
+                  </td>
+                </tr>
+              ) : pagination.pageItems.length === 0 ? (
                 <tr>
 	                  <td colSpan={10} className="quota-template-empty-cell px-3 py-10 text-center">
                     <div className="quota-template-empty-state mx-auto flex max-w-sm flex-col items-center text-center">

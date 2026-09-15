@@ -4,6 +4,7 @@ import { useAuth } from "@/lib/auth";
 import Sidebar from "./Sidebar";
 import TopBar from "./TopBar";
 import RouteLoading from "./RouteLoading";
+import SystemUpdateAnnouncementModal from "./SystemUpdateAnnouncementModal";
 import { Loader2 } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -85,6 +86,7 @@ function DashboardInner({ children }: { children: React.ReactNode }) {
           </main>
         </div>
       </div>
+      <SystemUpdateAnnouncementModal />
     </div>
   );
 }

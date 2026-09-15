@@ -55,6 +55,7 @@ const navItems: SidebarNavItem[] = [
   { href: "/quota", label: "定额管理", menuKey: "quota", icon: Calculator, children: [
     { href: "/quota/library", label: "基装定额", menuKey: "quota_library" },
     { href: "/quota/templates", label: "预算模版", menuKey: "quota_templates" },
+    { href: "/quota/personalized-templates", label: "个性化模板", menuKey: "quota_personalized_templates" },
   ] },
   { href: "/orders", label: "订单管理", menuKey: "orders", icon: ShoppingCart, children: [
     { href: "/orders/auxiliary", label: "辅材订单", menuKey: "orders_auxiliary" },
@@ -93,6 +94,7 @@ const legacyMenuPermissionMap: Record<string, string[]> = {
   finance_labor_settlement: ["finance.view"],
   quota_library: ["quotations.manage", "settings.manage"],
   quota_templates: ["quotations.manage", "settings.manage"],
+  quota_personalized_templates: ["quotations.manage", "settings.manage"],
   orders_auxiliary: ["materials.manage"],
   materials_library: ["materials.manage"],
   materials_products: ["materials.manage"],

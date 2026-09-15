@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
-import { DEFAULT_ROLES, ensureDefaultRoles, getDb } from "@/lib/db";
+import { DEFAULT_ROLES, ensureDefaultRoles, ensureUserLoginColumns, getDb } from "@/lib/db";
 import { getCustomerBranchScope } from "@/lib/branchSettingsLookup";
 import { ensureQuotationAccessColumns, serializeQuotationAccessOrgUnitIds } from "@/lib/quotationOrgAccess";
 import { canManageTeam, getAuthContext } from "@/lib/security/authorization";
@@ -28,6 +28,7 @@ export async function GET(req: NextRequest) {
   const auth = getAuthContext(req);
   if (!auth) return NextResponse.json({ message: "请先登录" }, { status: 401 });
   const db = getDb();
+  ensureUserLoginColumns(db);
   ensureQuotationAccessColumns(db);
   const url = new URL(req.url);
   const pickerMode = url.searchParams.get("picker") === "1";
@@ -167,7 +168,7 @@ export async function GET(req: NextRequest) {
       COALESCE((SELECT r.name FROM roles r WHERE r.company_id = u.company_id AND r.code = u.role AND r.deleted_at IS NULL LIMIT 1), u.role) as role_name,
       u.org_unit_id,
       u.quotation_access_org_unit_ids,
-      u.employee_no, u.hire_date, u.notes, u.last_login_at, u.last_seen_at,
+      u.employee_no, u.hire_date, u.notes, u.last_login_at, u.last_login_ip, u.last_login_location, u.last_seen_at,
       COALESCE(u.is_active, 1) as is_active,
       o.name as org_unit_name,
       (SELECT COUNT(*) FROM projects WHERE manager_id = u.id AND company_id = ? AND deleted_at IS NULL AND status IN ('CONSTRUCTION','SIGNED')) as project_count
@@ -363,7 +364,7 @@ export async function POST(req: NextRequest) {
       SELECT u.id, u.name, u.phone, u.avatar, u.role,
         COALESCE((SELECT r.name FROM roles r WHERE r.company_id = u.company_id AND r.code = u.role AND r.deleted_at IS NULL LIMIT 1), u.role) as role_name,
         u.org_unit_id, u.quotation_access_org_unit_ids, u.employee_no,
-        u.hire_date, u.notes, u.last_login_at, u.last_seen_at, COALESCE(u.is_active, 1) as is_active,
+        u.hire_date, u.notes, u.last_login_at, u.last_login_ip, u.last_login_location, u.last_seen_at, COALESCE(u.is_active, 1) as is_active,
         o.name as org_unit_name, 0 as project_count
       FROM users u
       LEFT JOIN org_units o ON u.org_unit_id = o.id AND o.company_id = ?
@@ -480,7 +481,7 @@ export async function PATCH(req: NextRequest) {
       SELECT u.id, u.name, u.phone, u.avatar, u.role,
         COALESCE((SELECT r.name FROM roles r WHERE r.company_id = u.company_id AND r.code = u.role AND r.deleted_at IS NULL LIMIT 1), u.role) as role_name,
         u.org_unit_id, u.quotation_access_org_unit_ids, u.employee_no,
-        u.hire_date, u.notes, u.last_login_at, u.last_seen_at, COALESCE(u.is_active, 1) as is_active,
+        u.hire_date, u.notes, u.last_login_at, u.last_login_ip, u.last_login_location, u.last_seen_at, COALESCE(u.is_active, 1) as is_active,
         o.name as org_unit_name,
         (SELECT COUNT(*) FROM projects WHERE manager_id = u.id AND company_id = ? AND deleted_at IS NULL AND status IN ('CONSTRUCTION','SIGNED')) as project_count
       FROM users u

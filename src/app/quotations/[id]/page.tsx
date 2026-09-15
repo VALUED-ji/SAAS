@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { BookmarkPlus, Calculator, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Eraser, FileText, GripVertical, Home, LayoutGrid, List, Loader2, MapPin, Maximize2, Minimize2, Palette, Pencil, Phone, Plus, RefreshCw, Replace, Ruler, Search, Tags, Trash2, X } from "lucide-react";
+import { BookmarkPlus, Calculator, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Eraser, Eye, FileText, GripVertical, Home, LayoutGrid, List, Loader2, MapPin, Maximize2, Minimize2, Palette, Pencil, Phone, Plus, RefreshCw, Replace, Ruler, Search, Tags, Trash2, X } from "lucide-react";
 import {
   bindStableFeeFormula,
   calculateChargeableOtherFeeTotals,
@@ -40,8 +40,9 @@ import ThinScrollArea from "@/components/ui/ThinScrollArea";
 import SystemSelect from "@/components/ui/SystemSelect";
 import NativeImage from "@/components/ui/NativeImage";
 import { AmapLocationPicker, type LocationPick } from "@/components/ui/AddCustomerModal";
-import { createQuotationShareUrl } from "@/lib/quotationShareClient";
+import { createQuotationPrintPreviewUrl, createQuotationShareUrl } from "@/lib/quotationShareClient";
 import { parseProductAttributes } from "@/app/materials/library/material-editor-shared";
+import { getPersonalizedTemplateCategoryLabel, normalizePersonalizedTemplate, type PersonalizedQuotationTemplate } from "@/lib/personalizedQuotationTemplate";
 import {
   FeeFormulaHelp,
   QuoteNameDialogModal,
@@ -477,6 +478,10 @@ type QuotationDetail = {
     quoteCategories?: string[];
     templatePricing?: Record<string, unknown>;
     signatureLabels?: string[];
+    validUntil?: string | null;
+    quotationValidUntil?: string | null;
+    effectiveUntil?: string | null;
+    valid_until?: string | null;
   };
   items: QuotationItem[];
   legacyManagementFeeMigrated?: boolean;
@@ -1244,11 +1249,13 @@ function newItem(category: QuotationItem["category"], space?: string): Quotation
 
 function isStandardQuotaSourceItem(item?: QuotationItem | null) {
   if (!item || isOtherCategory(item.category)) return false;
-  if (item.source === "standard") return true;
   const sourceType = String(item.quota_source_type || "").trim();
-  if (sourceType === "custom") return false;
+  if (item.source === "custom" || sourceType === "custom") return false;
+  if (item.source === "standard") return true;
   if (sourceType === "standard") return true;
   if (String(item.quota_source_id || "").trim()) return true;
+  const costSource = String(item.cost_source || "").trim();
+  if (costSource === "quota" || costSource.startsWith("quota:")) return true;
   return /定额编号[:：]/.test(String(item.remark || ""));
 }
 
@@ -1282,6 +1289,7 @@ function createQuotationItemFromQuota(quota: QuotaLibraryItem, category: Quotati
     cost_source: quota.code ? `quota:${quota.code}` : "quota",
     quota_source_id: quota.id,
     quota_source_type: quota.source === "custom" ? "custom" : "standard",
+    quota_source_synced_at: new Date().toISOString(),
     profit_margin: 0,
     row_color: quota.isSpecialPrice ? "special" : null,
   };
@@ -1631,10 +1639,11 @@ function shouldShowAutoOtherFeeRule(item: QuotationItem) {
 
 function getOtherFeeRuleDisplay(item: QuotationItem, total: number, context?: FeeFormulaContext) {
   const remark = String(item.remark || "").trim();
+  if (remark) return remark;
   if (!shouldShowAutoOtherFeeRule(item)) return remark;
 
   const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context);
-  return remark ? `${remark}；${rule}` : rule;
+  return rule;
 }
 
 function calculate(items: QuotationItem[], settings: QuotationDetail["settings"], houseArea = 0) {
@@ -1920,7 +1929,8 @@ export default function QuotationDetailPage() {
   const [packageDetailVisible, setPackageDetailVisible] = useState(false);
   const [packageDetailHeight, setPackageDetailHeight] = useState(0);
 	  const [packageAreaText, setPackageAreaText] = useState("");
-	  const [discountPanelOpen, setDiscountPanelOpen] = useState(false);
+  const [discountPanelOpen, setDiscountPanelOpen] = useState(false);
+  const [quotationTotalBreakdownOpen, setQuotationTotalBreakdownOpen] = useState(false);
   const [discountDraftSettings, setDiscountDraftSettings] = useState<QuotationDetail["settings"] | null>(null);
 	  const [discountRateText, setDiscountRateText] = useState("1");
   const [quotaLibraryItems, setQuotaLibraryItems] = useState<QuotaLibraryItem[]>([]);
@@ -1952,6 +1962,13 @@ export default function QuotationDetailPage() {
   const [findReplaceMessage, setFindReplaceMessage] = useState("");
   const [findReplaceLocated, setFindReplaceLocated] = useState(false);
   const [customSpaces, setCustomSpaces] = useState<string[]>([]);
+  const [personalizedTemplates, setPersonalizedTemplates] = useState<PersonalizedQuotationTemplate[]>([]);
+  const [personalizedTemplateDialogOpen, setPersonalizedTemplateDialogOpen] = useState(false);
+  const [personalizedTemplateLoading, setPersonalizedTemplateLoading] = useState(false);
+  const [selectedPersonalizedTemplateId, setSelectedPersonalizedTemplateId] = useState("");
+  const [selectedPersonalizedTemplateIds, setSelectedPersonalizedTemplateIds] = useState<string[]>([]);
+  const [personalizedTemplateSearch, setPersonalizedTemplateSearch] = useState("");
+  const [personalizedTemplateCategoryFilter, setPersonalizedTemplateCategoryFilter] = useState<"base" | "main_material" | "custom_cabinet">("base");
   const [spaceMenu, setSpaceMenu] = useState<{ space: string; x: number; y: number } | null>(null);
   const [spaceCopyMenu, setSpaceCopyMenu] = useState<{ source: string; x: number; y: number } | null>(null);
   const [copySpaceCategoryDialog, setCopySpaceCategoryDialog] = useState<CopySpaceCategoryDialogState | null>(null);
@@ -1973,6 +1990,7 @@ export default function QuotationDetailPage() {
   const [projectInfoOpen, setProjectInfoOpen] = useState(false);
   const [projectInfoMapPickerOpen, setProjectInfoMapPickerOpen] = useState(false);
   const [projectInfoSaving, setProjectInfoSaving] = useState(false);
+  const [quotationPreviewOpening, setQuotationPreviewOpening] = useState(false);
   const [projectInfoForm, setProjectInfoForm] = useState<QuoteProjectInfoForm>({
     customerName: "",
     designerName: "",
@@ -2025,8 +2043,22 @@ export default function QuotationDetailPage() {
   const hiddenSpaceFrameRef = useRef<number | null>(null);
   const hiddenSpaceIdleTimerRef = useRef<number | null>(null);
   const findReplaceResultListRef = useRef<HTMLDivElement | null>(null);
+  const quotationTotalButtonRef = useRef<HTMLButtonElement | null>(null);
+  const quotationTotalBreakdownRef = useRef<HTMLDivElement | null>(null);
   const isReadonly = !!data?.readonly;
   const readonlyNoticeText = data?.readonlyMessage || "该报价已锁定，仅支持查看、打印和导出，不能修改报价内容。";
+
+  useEffect(() => {
+    if (!quotationTotalBreakdownOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (quotationTotalButtonRef.current?.contains(target) || quotationTotalBreakdownRef.current?.contains(target)) return;
+      setQuotationTotalBreakdownOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [quotationTotalBreakdownOpen]);
 
   const updateHiddenSpaceCount = useCallback(() => {
     const container = spaceTabsRef.current;
@@ -2570,25 +2602,23 @@ export default function QuotationDetailPage() {
     return orderQuoteCategories([...categoriesWithItems, ...manualCategories]).filter((category) => !isOtherCategory(category));
   }, [activeSpace, items, manualSpaceCategories, quoteCategories]);
   const getFirstProjectCategoryForSpace = useCallback((space: string) => {
-    if (space === allSpacesValue) return projectQuoteCategories[0] || noQuoteCategoryValue;
-    const spaceCategorySet = new Set(
-      items
-        .filter((item) => !isOtherCategory(item.category) && inferItemSpace(item) === space)
-        .map((item) => getCategoryKey(item.category)),
-    );
+    const categoriesWithItems = quoteCategories.filter((category) => {
+      if (isOtherCategory(category)) return false;
+      return items.some((item) => {
+        if (isOtherCategory(item.category) || !sameQuoteCategory(item.category, category)) return false;
+        return space === allSpacesValue || inferItemSpace(item) === space;
+      });
+    });
     const manualCategories = manualSpaceCategories[space] || [];
     return orderQuoteCategories([
-      ...quoteCategories.filter((category) => spaceCategorySet.has(getCategoryKey(category)) || manualCategories.some((item) => sameQuoteCategory(item, category))),
+      ...categoriesWithItems,
       ...manualCategories,
-    ]).find((category) => !isOtherCategory(category)) || projectQuoteCategories[0] || noQuoteCategoryValue;
-  }, [items, manualSpaceCategories, projectQuoteCategories, quoteCategories]);
+    ]).find((category) => !isOtherCategory(category)) || noQuoteCategoryValue;
+  }, [items, manualSpaceCategories, quoteCategories]);
   const switchToProjectSpace = useCallback((space: string) => {
     setActiveSpace(space);
-    if (isOtherCategory(activeCategory)) {
-      const nextCategory = getFirstProjectCategoryForSpace(space);
-      if (nextCategory !== noQuoteCategoryValue) setActiveCategory(nextCategory);
-    }
-  }, [activeCategory, getFirstProjectCategoryForSpace]);
+    setActiveCategory(getFirstProjectCategoryForSpace(space));
+  }, [getFirstProjectCategoryForSpace]);
   const feeFormulaContext = useMemo(
     () => buildFeeFormulaContext(items, quoteCategories, quotationHouseArea),
     [items, quotationHouseArea, quoteCategories],
@@ -2817,17 +2847,21 @@ export default function QuotationDetailPage() {
   };
 
   useEffect(() => {
+    if (loading || activeCategory !== "base") return;
+    const nextCategory = getFirstProjectCategoryForSpace(activeSpace);
+    if (nextCategory !== noQuoteCategoryValue && !sameQuoteCategory(nextCategory, "base")) {
+      setActiveCategory(nextCategory);
+      return;
+    }
     if (!visibleQuoteCategories.some((category) => sameQuoteCategory(category, activeCategory))) {
       setActiveCategory(visibleQuoteCategories.find((category) => !isOtherCategory(category)) || noQuoteCategoryValue);
       return;
     }
-    if (activeCategory === noQuoteCategoryValue) return;
-    if (isOtherCategory(activeCategory)) return;
     if (activeSpace === allSpacesValue) return;
     if (activeSpaces.length && !activeSpaces.includes(activeSpace)) {
       setActiveSpace(activeSpaces[0]);
     }
-  }, [activeCategory, activeSpace, activeSpaces, visibleQuoteCategories]);
+  }, [activeCategory, activeSpace, activeSpaces, getFirstProjectCategoryForSpace, loading, visibleQuoteCategories]);
 
   useEffect(() => {
     itemsRef.current = items;
@@ -3577,6 +3611,21 @@ export default function QuotationDetailPage() {
     setProjectInfoOpen(true);
   };
 
+  const openQuotationPreview = async () => {
+    if (quotationPreviewOpening) return;
+    setQuotationPreviewOpening(true);
+    try {
+      await waitForLatestAutoSave();
+      const previewUrl = await createQuotationPrintPreviewUrl(quotationId);
+      const previewWindow = window.open(previewUrl, "_blank");
+      if (!previewWindow) window.location.href = previewUrl;
+    } catch (error: any) {
+      showAlert("预览失败", error?.message || "生成报价预览失败，请稍后重试。", "danger");
+    } finally {
+      setQuotationPreviewOpening(false);
+    }
+  };
+
   useEffect(() => {
     if (loading || !data || isReadonly || projectInfoOpen || autoOpenProjectInfoRef.current) return;
     if (searchParams.get("editProjectInfo") !== "1") return;
@@ -3831,6 +3880,110 @@ export default function QuotationDetailPage() {
     commitSpaceName(nextName);
     setEditingSpaceName(nextName);
     setEditingSpaceValue(nextName);
+  };
+
+  const openPersonalizedTemplateDialog = async () => {
+    if (isReadonly) return;
+    setSpaceMenu(null);
+    setSpaceCopyMenu(null);
+    setPersonalizedTemplateDialogOpen(true);
+    setPersonalizedTemplateSearch("");
+    setPersonalizedTemplateCategoryFilter("base");
+    setPersonalizedTemplateLoading(true);
+    try {
+      const response = await fetch("/api/quota/personalized-templates", { headers: authHeaders(), cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data?.message || "个性化模板加载失败");
+      const templates = Array.isArray(data?.templates)
+        ? data.templates.map(normalizePersonalizedTemplate).filter(Boolean) as PersonalizedQuotationTemplate[]
+        : [];
+      const enabledTemplates = templates.filter((template) => template.status === "enabled");
+      setPersonalizedTemplates(enabledTemplates);
+      // Opening the dialog should not implicitly select or preview a template.
+      // The user must explicitly choose one before the right-hand preview is shown.
+      setSelectedPersonalizedTemplateId("");
+      setSelectedPersonalizedTemplateIds([]);
+      setPersonalizedTemplateCategoryFilter("base");
+    } catch (error: any) {
+      setPersonalizedTemplateDialogOpen(false);
+      showAlert("加载失败", error?.message || "个性化模板加载失败，请稍后再试。", "danger");
+    } finally {
+      setPersonalizedTemplateLoading(false);
+    }
+  };
+
+  const importPersonalizedTemplate = () => {
+    if (isReadonly) return;
+    const templates = personalizedTemplates.filter((item) => selectedPersonalizedTemplateIds.includes(item.id));
+    if (!templates.length) {
+      showAlert("请选择模板", "请至少勾选一个要导入的个性化模板。");
+      return;
+    }
+    const existingSpaceNames = new Set(uniqueValues([...customSpaces, ...activeSpaces]));
+    const selectedSpaceNames = new Set<string>();
+    const duplicatedTemplate = templates.find((template) => {
+      if (existingSpaceNames.has(template.name) || selectedSpaceNames.has(template.name)) return true;
+      selectedSpaceNames.add(template.name);
+      return false;
+    });
+    if (duplicatedTemplate) {
+      showAlert("空间/类别名称已存在", `报价中或本次选择中已经有「${duplicatedTemplate.name}」。请先修改模板名称或重命名现有空间/类别，再导入，避免内容被混在一起。`, "danger");
+      return;
+    }
+    const templateNames = templates.map((template) => template.name);
+    const itemCount = templates.reduce((total, template) => total + template.items.length, 0);
+    const templateSummary = templateNames.length > 3
+      ? `${templateNames.slice(0, 3).join("、")} 等 ${templateNames.length} 个模板`
+      : templateNames.join("、");
+    showConfirm({
+      title: "确认导入个性化模板",
+      message: `即将导入 ${templates.length} 个模板，并新增对应的空间/类别。\n\n模板：${templateSummary}\n项目：${itemCount} 个\n\n确认后会把内容加入当前报价，模板本身不会被修改。`,
+      tone: "info",
+      confirmText: "确认导入",
+      cancelText: "取消",
+      onConfirm: () => {
+        const importedItems: QuotationItem[] = templates.flatMap((template) => template.items.map((item) => {
+          const itemId = makeClientItemId();
+          return {
+            id: itemId,
+            client_key: itemId,
+            category: item.category,
+            space: template.name,
+            source: item.source === "standard" || item.source === "custom" ? item.source : undefined,
+            quota_source_id: item.quota_source_id || null,
+            quota_source_type: item.quota_source_type || null,
+            work_type_id: item.work_type_id || null,
+            work_type_name: item.work_type_name || null,
+            material_category_id: item.material_category_id || null,
+            material_category_name: item.material_category_name || null,
+            name: item.name,
+            spec: item.spec || "",
+            material_model: item.material_model || "",
+            remark: item.remark || "",
+            unit: item.unit || "",
+            quantity: toNumber(item.quantity),
+            unit_price: toMoney(item.unit_price),
+            total_price: toMoney(item.total_price || toNumber(item.quantity) * toMoney(item.unit_price)),
+            material_cost: toMoney(item.material_cost),
+            labor_cost: toMoney(item.labor_cost),
+            profit_margin: 0,
+          };
+        }));
+        setCustomSpaces((current) => uniqueValues([...current, ...templateNames]));
+        setSettings((current) => ({
+          ...current,
+          quoteSpaces: uniqueValues([
+            ...(current?.quoteSpaces || []),
+            ...templateNames,
+          ]),
+        }));
+        setItems((current) => [...current, ...importedItems]);
+        setActiveSpace(templateNames[0] || "");
+        setActiveCategory(importedItems[0]?.category || "base");
+        setPersonalizedTemplateDialogOpen(false);
+        showAlert("导入成功", `已新增 ${templates.length} 个空间/类别，共导入 ${importedItems.length} 个项目。`);
+      },
+    });
   };
 
   const openSpaceMenu = (event: MouseEvent<HTMLButtonElement>, space: string) => {
@@ -4463,6 +4616,25 @@ export default function QuotationDetailPage() {
       && !crossQuotationCopyLoading
       && (!selectedCrossQuotationTargetHasSameSpace || crossQuotationCopyMode),
   );
+  const searchedPersonalizedTemplates = personalizedTemplates.filter((template) => (
+    template.name.toLowerCase().includes(personalizedTemplateSearch.trim().toLowerCase())
+  ));
+  const selectedPersonalizedTemplateCount = selectedPersonalizedTemplateIds.length;
+  const selectedPersonalizedTemplates = personalizedTemplates.filter((template) => selectedPersonalizedTemplateIds.includes(template.id));
+  const selectedPersonalizedTemplate = selectedPersonalizedTemplates.length > 0 ? selectedPersonalizedTemplates[0] : null;
+  const personalizedTemplateCategoryOptions = (["base", "main_material", "custom_cabinet"] as const).map((category) => ({
+      key: category,
+      label: getPersonalizedTemplateCategoryLabel(category),
+      count: selectedPersonalizedTemplates.reduce(
+        (total, template) => total + template.items.filter((item) => item.category === category).length,
+        0,
+      ),
+    }));
+  const visiblePersonalizedTemplateItems = selectedPersonalizedTemplates.flatMap((template) => (
+    template.items
+      .filter((item) => item.category === personalizedTemplateCategoryFilter)
+      .map((item) => ({ item, templateId: template.id }))
+  ));
 
   return (
     <div className="quotation-detail-ui quote-workbench-shell -m-5 min-h-[calc(100vh-72px)] w-[calc(100%+2.5rem)] max-w-none bg-[#f4f7fb] px-4 pb-4 pt-2 text-[#162033] lg:-m-7 lg:w-[calc(100%+3.5rem)] lg:px-5 lg:pb-5 lg:pt-3" onClick={handlePageClick}>
@@ -4477,6 +4649,155 @@ export default function QuotationDetailPage() {
           dialog={systemDialog}
           onClose={() => setSystemDialog(null)}
         />
+      )}
+      {personalizedTemplateDialogOpen && (
+        <div
+          className="fixed inset-0 z-[10000] flex items-center justify-center bg-[#0b1220]/45 px-4 py-4 backdrop-blur-[3px] no-print"
+          onClick={() => setPersonalizedTemplateDialogOpen(false)}
+        >
+          <div
+            className="flex h-[min(820px,calc(100vh-32px))] w-full max-w-[1360px] flex-col overflow-hidden rounded-[18px] border border-[#d6e0ec] bg-white shadow-[0_30px_90px_rgba(15,35,70,0.28)]"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="导入个性化模板"
+          >
+            <div className="flex shrink-0 items-center justify-between gap-4 border-b border-[#e5ebf3] px-7 py-5">
+              <div className="flex min-w-0 items-center gap-3.5">
+                <span className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[12px] border border-[#c9d9ff] bg-[#eef4ff] text-[#407aff]">
+                  <LayoutGrid className="h-5 w-5" />
+                </span>
+                <div className="min-w-0">
+                  <div className="text-[16px] font-semibold leading-5 text-[#172033]">导入个性化模板</div>
+                  <div className="mt-0.5 text-[12px] leading-5 text-[#667085]">勾选一个或多个预设内容，导入后会分别作为新的空间/类别添加到当前报价。</div>
+                </div>
+              </div>
+              <button type="button" onClick={() => setPersonalizedTemplateDialogOpen(false)} className="inline-flex h-9 w-9 items-center justify-center rounded-[9px] text-[#7b8797] transition hover:bg-[#f3f6fa] hover:text-[#172033]" aria-label="关闭"><X className="h-5 w-5" /></button>
+            </div>
+            <div className="grid min-h-0 flex-1 grid-cols-[270px_minmax(0,1fr)]">
+              <aside className="flex min-h-0 flex-col border-r border-[#e5ebf3] bg-[#f8fafc] px-5 py-5 text-[12px]">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[12px] font-semibold text-[#25364b]">模板库</div>
+                    <div className="mt-1 text-[12px] text-[#8a98aa]">{personalizedTemplates.length} 个可用模板</div>
+                  </div>
+                  <span className="rounded-full bg-white px-2.5 py-1 text-[12px] font-semibold text-[#667085] ring-1 ring-[#e1e8f1]">{selectedPersonalizedTemplateCount ? `已选 ${selectedPersonalizedTemplateCount} 个` : "可多选"}</span>
+                </div>
+                <div className="relative mb-4">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#98a2b3]" />
+                  <input
+                    value={personalizedTemplateSearch}
+                    onChange={(event) => setPersonalizedTemplateSearch(event.target.value)}
+                    className="h-11 w-full rounded-[10px] border border-[#d8e1ee] bg-white pl-9 pr-3 text-[12px] text-[#344054] outline-none transition placeholder:text-[#a4afbd] focus:border-[#8bb0ff] focus:ring-4 focus:ring-[#407aff]/10"
+                    placeholder="搜索模板名称..."
+                  />
+                </div>
+                <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+                  {personalizedTemplateLoading ? (
+                    <div className="flex flex-col items-center justify-center py-16 text-[12px] text-[#8a98aa]"><Loader2 className="mb-3 h-5 w-5 animate-spin text-[#407aff]" />正在加载模板</div>
+                  ) : searchedPersonalizedTemplates.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center px-4 py-16 text-center text-[12px] leading-6 text-[#8a98aa]"><LayoutGrid className="mb-3 h-7 w-7 text-[#c4cedb]" />暂无可导入的个性化模板<span className="text-[12px]">请先到定额管理中维护</span></div>
+                  ) : searchedPersonalizedTemplates.map((template) => {
+                    const previewing = template.id === selectedPersonalizedTemplateId;
+                    const selected = selectedPersonalizedTemplateIds.includes(template.id);
+                    return (
+                      <button
+                        key={template.id}
+                        type="button"
+                        aria-pressed={selected}
+                        onClick={() => {
+                          const isSelected = selectedPersonalizedTemplateIds.includes(template.id);
+                          const nextSelectedIds = isSelected
+                            ? selectedPersonalizedTemplateIds.filter((id) => id !== template.id)
+                            : [...selectedPersonalizedTemplateIds, template.id];
+                          setSelectedPersonalizedTemplateIds(nextSelectedIds);
+
+                          if (isSelected && selectedPersonalizedTemplateId === template.id) {
+                            const nextPreviewId = nextSelectedIds[0] || "";
+                            setSelectedPersonalizedTemplateId(nextPreviewId);
+                            const nextPreviewTemplate = personalizedTemplates.find((item) => item.id === nextPreviewId);
+                            const nextCategory = (["base", "main_material", "custom_cabinet"] as const).find((category) => nextPreviewTemplate?.items.some((item) => item.category === category));
+                            setPersonalizedTemplateCategoryFilter(nextCategory || "base");
+                          } else {
+                            setSelectedPersonalizedTemplateId(template.id);
+                            const firstCategory = (["base", "main_material", "custom_cabinet"] as const).find((category) => template.items.some((item) => item.category === category));
+                            setPersonalizedTemplateCategoryFilter(firstCategory || "base");
+                          }
+                        }}
+                        className={`group relative flex min-h-[76px] w-full items-center justify-between gap-3 rounded-[11px] border px-4 py-3 text-left transition ${selected ? "border-[#a9c2ff] bg-[#eef4ff] shadow-[0_5px_14px_rgba(64,122,255,0.08)]" : previewing ? "border-[#cddcff] bg-[#f8fbff]" : "border-[#e4eaf2] bg-white hover:border-[#c5d5ed] hover:bg-white"}`}
+                      >
+                        <span className="min-w-0">
+                          <span className={`block truncate text-[12px] font-semibold ${selected ? "text-[#2459c7]" : "text-[#344054]"}`}>{template.name}</span>
+                          <span className="mt-1.5 block text-[12px] text-[#8a98aa]">{template.items.length} 个项目</span>
+                        </span>
+                        <span className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${selected ? "bg-[#407aff] text-white" : "border border-[#d5deea] bg-white text-transparent group-hover:border-[#9bb8f4] group-hover:text-[#9aabc0]"}`}><Check className="h-4 w-4" /></span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </aside>
+              <section className="personalized-template-preview-panel flex min-h-0 min-w-0 flex-col bg-white px-7">
+                {!selectedPersonalizedTemplate ? (
+                  <div className="flex min-h-0 flex-1 flex-col items-center justify-center text-[12px] text-[#8a98aa]"><LayoutGrid className="mb-3 h-9 w-9 text-[#c4cedb]" />请选择左侧模板查看内容</div>
+                ) : (
+                  <>
+                    <div className="flex min-h-[64px] shrink-0 items-center justify-between gap-4 border-b border-[#edf1f6]">
+                      <div className="min-w-0">
+                        <div className="flex w-fit max-w-full items-center gap-1 rounded-[9px] border border-[#e1e8f1] bg-[#f7f9fc] p-1" role="tablist" aria-label="项目分类">
+                          {personalizedTemplateCategoryOptions.map((option) => {
+                            const active = personalizedTemplateCategoryFilter === option.key;
+                            return (
+                              <button
+                                key={option.key}
+                                type="button"
+                                role="tab"
+                                aria-selected={active}
+                                onClick={() => setPersonalizedTemplateCategoryFilter(option.key)}
+                                className={`inline-flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-[6px] border px-3 text-[12px] font-semibold transition ${active ? "border-[#b9cdfc] bg-white text-[#2459c7] shadow-[0_1px_4px_rgba(64,122,255,0.12)]" : "border-transparent text-[#667085] hover:bg-white hover:text-[#344054]"}`}
+                              >
+                                <span>{option.label}</span>
+                                <span className={`min-w-[18px] text-center text-[11px] font-semibold tabular-nums ${active ? "text-[#407aff]" : "text-[#a4afbd]"}`}>{option.count}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <span className="shrink-0 text-[12px] text-[#98a2b3]">当前显示 <strong className="font-semibold text-[#52647b]">{visiblePersonalizedTemplateItems.length}</strong> 项</span>
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-hidden pt-4">
+                      {visiblePersonalizedTemplateItems.length === 0 ? (
+                        <div className="flex h-full min-h-[220px] items-center justify-center text-[12px] text-[#98a2b3]">该分类暂无项目</div>
+                      ) : (
+                        <div className="personalized-template-preview-scroll h-full min-h-0 w-full overflow-auto rounded-[11px] border border-[#dfe7f1]">
+                          {personalizedTemplateCategoryFilter === "base" ? (
+                            <table className="personalized-template-preview-table w-full min-w-[1320px] table-fixed border-collapse text-[12px]">
+                              <colgroup><col className="w-[5%]" /><col className="w-[22%]" /><col className="w-[7%]" /><col className="w-[8%]" /><col className="w-[9%]" /><col className="w-[9%]" /><col className="w-[8%]" /><col className="w-[32%]" /></colgroup>
+                              <thead className="bg-[#f7f9fc] text-[#667085]"><tr><th className="px-2 py-3 text-center font-semibold">序号</th><th className="px-4 py-3 text-left font-semibold">项目名称</th><th className="px-2 py-3 text-center font-semibold">单位</th><th className="px-2 py-3 text-right font-semibold">数量</th><th className="px-2 py-3 text-right font-semibold">人工单价</th><th className="px-2 py-3 text-right font-semibold">材料单价</th><th className="px-2 py-3 text-right font-semibold">单价</th><th className="px-4 py-3 text-left font-semibold">施工说明</th></tr></thead>
+                              <tbody>{visiblePersonalizedTemplateItems.map(({ item, templateId }, index) => <tr key={`${templateId}-${item.id}`} className="h-[52px] border-t border-[#edf1f6] transition hover:bg-[#fbfdff]"><td className="px-2 py-3 text-center tabular-nums text-[#98a2b3]">{index + 1}</td><td className="max-w-0 px-4 py-3 font-medium text-[#344054]"><div className="truncate whitespace-nowrap" title={item.name}>{item.name}</div></td><td className="px-2 py-3 text-center text-[#344054]">{item.unit || "-"}</td><td className="px-2 py-3 text-right tabular-nums text-[#344054]">{item.quantity || 0}</td><td className="px-2 py-3 text-right tabular-nums text-[#344054]">{toMoney(item.labor_cost).toFixed(2)}</td><td className="px-2 py-3 text-right tabular-nums text-[#344054]">{toMoney(item.material_cost).toFixed(2)}</td><td className="px-2 py-3 text-right tabular-nums font-semibold text-[#344054]">{toMoney(item.unit_price).toFixed(2)}</td><td className="max-w-0 px-4 py-3 text-[#344054]"><div className="truncate whitespace-nowrap" title={item.spec || "-"}>{item.spec || "-"}</div></td></tr>)}</tbody>
+                            </table>
+                          ) : (
+                            <table className="personalized-template-preview-table w-full min-w-[760px] table-fixed border-collapse text-[12px]">
+                              <colgroup><col className="w-[5%]" /><col className="w-[23%]" /><col className="w-[35%]" /><col className="w-[9%]" /><col className="w-[10%]" /><col className="w-[9%]" /><col className="w-[9%]" /></colgroup>
+                              <thead className="bg-[#f7f9fc] text-[#667085]"><tr><th className="px-2 py-3 text-center font-semibold">序号</th><th className="px-4 py-3 text-left font-semibold">{personalizedTemplateCategoryFilter === "main_material" ? "材料名称" : "项目名称"}</th><th className="px-4 py-3 text-left font-semibold">规格 / 型号</th><th className="px-2 py-3 text-center font-semibold">单位</th><th className="px-2 py-3 text-right font-semibold">数量</th><th className="px-2 py-3 text-right font-semibold">单价</th><th className="px-4 py-3 text-left font-semibold">备注</th></tr></thead>
+                              <tbody>{visiblePersonalizedTemplateItems.map(({ item, templateId }, index) => { const detailText = [item.spec, item.material_model].filter(Boolean).join(" / ") || "-"; return <tr key={`${templateId}-${item.id}`} className="h-[52px] border-t border-[#edf1f6] transition hover:bg-[#fbfdff]"><td className="px-2 py-3 text-center tabular-nums text-[#98a2b3]">{index + 1}</td><td className="max-w-0 px-4 py-3 font-medium text-[#344054]"><div className="truncate whitespace-nowrap" title={item.name}>{item.name}</div></td><td className="max-w-0 px-4 py-3 text-[#667085]"><div className="truncate whitespace-nowrap" title={detailText}>{detailText}</div></td><td className="px-2 py-3 text-center text-[#667085]">{item.unit || "-"}</td><td className="px-2 py-3 text-right tabular-nums text-[#52647b]">{item.quantity || 0}</td><td className="px-2 py-3 text-right tabular-nums text-[#52647b]">{toMoney(item.unit_price).toFixed(2)}</td><td className="max-w-0 px-4 py-3 text-[#667085]"><div className="truncate whitespace-nowrap" title={item.remark || "-"}>{item.remark || "-"}</div></td></tr>; })}</tbody>
+                            </table>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </section>
+            </div>
+            <div className="flex shrink-0 items-center justify-between gap-4 border-t border-[#e5ebf3] bg-[#fbfcfe] px-7 py-4">
+              <div className="flex min-w-0 items-center gap-2 text-[12px] text-[#7a8699]"><span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#edf4ff] text-[#407aff]">i</span><span className="truncate">导入后内容与模板相互独立，不会修改模板。</span></div>
+              <div className="flex shrink-0 gap-2.5">
+                <button type="button" onClick={() => setPersonalizedTemplateDialogOpen(false)} className="h-10 rounded-[9px] border border-[#d5deea] bg-white px-5 text-[12px] font-semibold text-[#52647b] transition hover:bg-[#f6f8fb]">取消</button>
+                <button type="button" onClick={importPersonalizedTemplate} disabled={personalizedTemplateLoading || selectedPersonalizedTemplateCount === 0} className="inline-flex h-10 items-center justify-center rounded-[9px] bg-[#407aff] px-6 text-[12px] font-semibold text-white shadow-[0_7px_16px_rgba(64,122,255,0.2)] transition hover:bg-[#326ae6] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none">导入已选 {selectedPersonalizedTemplateCount} 个模板</button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
       {copySpaceCategoryDialog && (
         <div
@@ -5891,7 +6212,7 @@ export default function QuotationDetailPage() {
         <section className={`quote-space-navigation quote-compact-navigation no-print ${
           !showCategoryNavigation ? "quote-compact-navigation-single-row" : ""
         }`}>
-          <div className="quote-record-breadcrumb">
+          <div className="quote-record-breadcrumb relative">
             <div className="quote-record-breadcrumb-path">
               <button type="button" onClick={returnToBudgetRecords} title="返回客户预算记录">
                 <ChevronLeft className="h-3.5 w-3.5" />
@@ -5901,6 +6222,17 @@ export default function QuotationDetailPage() {
               <strong>{data?.customer_name || data?.project_name || "当前报价"}</strong>
             </div>
             <div className="quote-navigation-actions">
+              <div className="quote-action-group quote-action-group-primary">
+              <button
+                type="button"
+                onClick={() => void openQuotationPreview()}
+                disabled={quotationPreviewOpening || loading}
+                className="quote-preview-action quote-project-info-edit inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md border px-3 font-semibold transition disabled:cursor-wait disabled:opacity-60"
+                title="打开报价打印预览"
+              >
+                {quotationPreviewOpening ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />}
+                <span>预览报价</span>
+              </button>
               {!isReadonly && (
                 <button
                   type="button"
@@ -5912,6 +6244,19 @@ export default function QuotationDetailPage() {
                   编辑资料
                 </button>
               )}
+              {!isReadonly && (
+                <button
+                  type="button"
+                  onClick={() => void openPersonalizedTemplateDialog()}
+                  className="quote-personalized-template-action quote-project-info-edit inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md border px-3 font-semibold transition"
+                  title="从个性化模板导入空间和项目"
+                >
+                  <LayoutGrid className="h-3.5 w-3.5" />
+                  <span>导入个性化模板</span>
+                </button>
+              )}
+              </div>
+              <div className="quote-action-group quote-action-group-metrics">
               <button
                 type="button"
                 onClick={(event) => {
@@ -5939,7 +6284,36 @@ export default function QuotationDetailPage() {
                 <span>综合费用</span>
                 <span className="quote-comprehensive-fee-amount tabular-nums">{formatQuoteAmount(totals.otherAmount)}</span>
               </button>
+              <button
+                type="button"
+                ref={quotationTotalButtonRef}
+                className={`quote-site-total inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md border px-3 font-semibold transition ${quotationTotalBreakdownOpen ? "quote-site-total-active" : ""}`}
+                onClick={() => setQuotationTotalBreakdownOpen((current) => !current)}
+                aria-expanded={quotationTotalBreakdownOpen}
+                aria-controls="quotation-total-breakdown"
+                title="查看工地总费用构成"
+              >
+                <Calculator className="h-3.5 w-3.5" />
+                <span>工地总费用</span>
+                <strong className="quote-site-total-amount tabular-nums">{formatQuoteAmount(totals.directAmount)}</strong>
+                <ChevronDown className={`h-3.5 w-3.5 transition-transform ${quotationTotalBreakdownOpen ? "rotate-180" : ""}`} />
+              </button>
+              </div>
             </div>
+            {quotationTotalBreakdownOpen && (
+              <div ref={quotationTotalBreakdownRef} id="quotation-total-breakdown" className="quote-total-breakdown" role="dialog" aria-label="工地总费用构成">
+                <div className="quote-total-breakdown-head">
+                  <span>工地总费用</span>
+                  <strong className="tabular-nums">¥{formatQuoteAmount(totals.directAmount)}</strong>
+                </div>
+                <div className="quote-total-breakdown-list">
+                  <div><span>基装</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.baseAmount)}</strong></div>
+                  <div><span>产品</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.mainMaterialAmount)}</strong></div>
+                  <div><span>定制柜</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.customCategoryAmount)}</strong></div>
+                  <div><span>综合费用</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.otherAmount)}</strong></div>
+                </div>
+              </div>
+            )}
           </div>
           <div className="quote-compact-navigation-row quote-space-navigation-row flex min-w-0 items-center gap-2">
             <button
@@ -6503,6 +6877,21 @@ export default function QuotationDetailPage() {
           --quote-primary-soft: #edf4ff;
           --quote-command-height: 0px;
           color: var(--quote-text);
+        }
+        .quotation-detail-ui .personalized-template-preview-table th:not(:last-child),
+        .quotation-detail-ui .personalized-template-preview-table td:not(:last-child) {
+          border-right: 1px solid #e4eaf2;
+        }
+        .quotation-detail-ui .personalized-template-preview-table tbody tr:last-child td {
+          border-bottom: 1px solid #edf1f6;
+        }
+        .quotation-detail-ui .personalized-template-preview-panel {
+          border-bottom: 1px solid #dfe7f1;
+          padding-bottom: 10px;
+        }
+        .quotation-detail-ui .personalized-template-preview-scroll {
+          border-color: #dfe7f1 !important;
+          box-shadow: inset 0 -1px 0 #dfe7f1;
         }
         .quotation-detail-ui .quote-command-bar,
         .quotation-detail-ui .quote-space-navigation,
@@ -7995,7 +8384,7 @@ export default function QuotationDetailPage() {
         }
         .quote-name-textarea {
           min-height: 34px !important;
-          max-height: 72px !important;
+          max-height: none !important;
           resize: none !important;
           overflow: hidden !important;
           padding-top: 6px !important;
@@ -8113,7 +8502,7 @@ export default function QuotationDetailPage() {
         }
         .quotation-detail-ui .quote-name-highlight-layer-multiline {
           align-items: center;
-          max-height: 72px;
+          max-height: none;
         }
         .quotation-detail-ui .quote-find-replace-text-hit {
           border-radius: 4px;
@@ -8130,11 +8519,18 @@ export default function QuotationDetailPage() {
           box-shadow: inset 0 -2px 0 rgba(64, 122, 255, 0.95) !important;
         }
         .quotation-detail-ui .quote-row-index-inner {
+          position: relative;
           display: flex;
           align-items: center;
           justify-content: center;
-          gap: 4px;
+          width: 100%;
           min-height: 28px;
+        }
+        .quotation-detail-ui .quote-row-drag-handle {
+          position: absolute;
+          left: 4px;
+          top: 50%;
+          transform: translateY(-50%);
         }
         .quotation-detail-ui .quote-row-number-wrap {
           position: relative;
@@ -8355,6 +8751,17 @@ export default function QuotationDetailPage() {
           overflow-y: hidden !important;
           padding: 6px 10px !important;
           line-height: 20px !important;
+        }
+        .quotation-detail-ui .quote-name-textarea {
+          box-sizing: border-box !important;
+          height: auto;
+          max-height: none !important;
+          min-width: 0 !important;
+          flex: 1 1 auto;
+          overflow: hidden !important;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+          white-space: pre-wrap;
         }
         .quotation-detail-ui .quote-name-cell-input {
           box-sizing: border-box !important;
@@ -10369,6 +10776,198 @@ export default function QuotationDetailPage() {
           background: #ffffff !important;
           color: #b45309 !important;
         }
+        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-site-total {
+          height: 36px !important;
+          min-height: 36px !important;
+          border-color: #a9dfc1 !important;
+          background: #eaf9f1 !important;
+          padding: 0 11px !important;
+          color: #087447 !important;
+          box-shadow: inset 0 0 0 1px rgba(21, 148, 102, 0.04) !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-site-total:hover,
+        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-site-total-active {
+          border-color: #159a68 !important;
+          background: #dff5e9 !important;
+          color: #05633c !important;
+          box-shadow: 0 5px 12px rgba(21, 148, 102, 0.14) !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions .quote-site-total-amount {
+          color: #dc2626 !important;
+          font-size: 13px !important;
+          font-weight: 800 !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions {
+          gap: 12px !important;
+          border: 0 !important;
+          border-radius: 0 !important;
+          background: transparent !important;
+          padding: 0 !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group {
+          display: inline-flex;
+          min-width: max-content;
+          align-items: center;
+          gap: 4px;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-metrics {
+          gap: 2px;
+          border-left: 1px solid #dce4ee;
+          padding-left: 12px;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-project-info-edit,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-discount-action,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-comprehensive-fee,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-site-total {
+          height: 34px !important;
+          min-height: 34px !important;
+          border-radius: 9px !important;
+          padding: 0 10px !important;
+          font-size: 12px !important;
+          line-height: 1 !important;
+          white-space: nowrap;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-primary .quote-project-info-edit {
+          border: 1px solid #07885c !important;
+          background: #07885c !important;
+          color: #ffffff !important;
+          box-shadow: 0 4px 10px rgba(0, 135, 90, 0.14) !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-primary .quote-project-info-edit:hover {
+          border-color: #006f4a !important;
+          background: #006f4a !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-primary .quote-personalized-template-action {
+          border-color: #b8e2cc !important;
+          background: #f4fcf7 !important;
+          color: #087447 !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-primary .quote-personalized-template-action:hover {
+          border-color: #79c99d !important;
+          background: #e8f8ef !important;
+          color: #05633c !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-metrics .quote-discount-action,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-metrics .quote-comprehensive-fee {
+          border: 1px solid transparent !important;
+          background: transparent !important;
+          color: #667085 !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-metrics .quote-discount-action:hover,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-metrics .quote-comprehensive-fee:hover {
+          border-color: #d8e1ee !important;
+          background: #ffffff !important;
+          color: #344054 !important;
+          box-shadow: 0 4px 10px rgba(15, 23, 42, 0.05) !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-metrics .quote-site-total {
+          margin-left: 5px;
+          border-color: #8ed2ac !important;
+          background: #effaf4 !important;
+          color: #087447 !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-metrics .quote-site-total:hover,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-metrics .quote-site-total-active {
+          border-color: #159a68 !important;
+          background: #e1f6ea !important;
+          color: #05633c !important;
+          box-shadow: 0 4px 10px rgba(21, 148, 102, 0.12) !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-metrics .quote-discount-action-amount,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group-metrics .quote-comprehensive-fee-amount {
+          height: auto !important;
+          border-radius: 0 !important;
+          background: transparent !important;
+          padding: 0 !important;
+          color: #344054 !important;
+          font-size: 12px !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-project-info-edit,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-discount-action,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-comprehensive-fee,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-site-total {
+          border-color: #d8e1ee !important;
+          background: #ffffff !important;
+          color: #475467 !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-project-info-edit:hover,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-discount-action:hover,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-comprehensive-fee:hover,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-site-total:hover,
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-site-total-active {
+          border-color: #9eb3ca !important;
+          background: #f7f9fc !important;
+          color: #1f2a3d !important;
+          box-shadow: 0 4px 10px rgba(15, 23, 42, 0.06) !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-site-total-amount {
+          color: #dc2626 !important;
+        }
+        @media screen and (max-width: 1120px) {
+          .quotation-detail-ui.quote-workbench-shell .quote-navigation-actions {
+            gap: 6px !important;
+          }
+          .quotation-detail-ui.quote-workbench-shell .quote-action-group-metrics {
+            padding-left: 6px;
+          }
+          .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-project-info-edit,
+          .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-discount-action,
+          .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-comprehensive-fee,
+          .quotation-detail-ui.quote-workbench-shell .quote-action-group .quote-site-total {
+            padding: 0 7px !important;
+          }
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown {
+          position: absolute;
+          top: calc(100% + 10px);
+          right: 0;
+          z-index: 20;
+          width: 258px;
+          overflow: hidden;
+          border: 1px solid #cfe6d9;
+          border-radius: 12px;
+          background: #ffffff;
+          box-shadow: 0 18px 38px rgba(15, 23, 42, 0.16);
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          border-bottom: 1px solid #e7f1eb;
+          background: #f5fcf8;
+          padding: 12px 14px;
+          color: #176b49;
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-head strong {
+          color: #05633c;
+          font-size: 15px;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-list {
+          display: grid;
+          gap: 1px;
+          padding: 7px 14px 9px;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-list div {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          min-height: 30px;
+          color: #667085;
+          font-size: 12px;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-list strong {
+          color: #344054;
+          font-weight: 700;
+        }
         .quotation-detail-ui.quote-workbench-shell .screen-quote-sections > section.quote-compact-navigation-single-row {
           position: sticky !important;
           padding-bottom: 0 !important;
@@ -10941,33 +11540,45 @@ function QuoteNameTextarea({
 }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const measureRef = useRef<HTMLSpanElement | null>(null);
-  const [multiline, setMultiline] = useState(false);
-
-  useEffect(() => {
-    const updateMultiline = () => {
-      setMultiline(value.includes("\n"));
-    };
-    const frame = window.requestAnimationFrame(updateMultiline);
-    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(updateMultiline) : null;
-    if (wrapperRef.current && observer) observer.observe(wrapperRef.current);
-    window.addEventListener("resize", updateMultiline);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      observer?.disconnect();
-      window.removeEventListener("resize", updateMultiline);
-    };
-  }, [value]);
-
-  useEffect(() => {
+  const resizeTextarea = useCallback(() => {
     const textarea = textareaRef.current;
-    if (!textarea || !multiline) return;
-    textarea.style.height = "0px";
-    textarea.style.height = `${textarea.scrollHeight}px`;
-  }, [multiline, value]);
+    const wrapper = wrapperRef.current;
+    if (!textarea || !wrapper) return;
+
+    const computed = window.getComputedStyle(textarea);
+    const lineHeight = Number.parseFloat(computed.lineHeight) || 20;
+    const row = wrapper.closest("tr");
+    textarea.style.setProperty("height", "auto", "important");
+    textarea.style.setProperty("min-height", "0px", "important");
+    textarea.style.setProperty("padding-top", "0px", "important");
+    textarea.style.setProperty("padding-bottom", "0px", "important");
+    const contentHeight = Math.max(lineHeight, textarea.scrollHeight);
+    const rowHeight = row?.getBoundingClientRect().height || wrapper.getBoundingClientRect().height;
+    const targetHeight = Math.max(rowHeight, contentHeight + 16, 34);
+    const verticalInset = Math.max(0, (targetHeight - contentHeight) / 2);
+    textarea.style.setProperty("height", `${targetHeight}px`, "important");
+    textarea.style.setProperty("min-height", "34px", "important");
+    textarea.style.setProperty("padding-top", `${verticalInset}px`, "important");
+    textarea.style.setProperty("padding-bottom", `${verticalInset}px`, "important");
+  }, []);
+
+  useLayoutEffect(() => {
+    resizeTextarea();
+    const wrapper = wrapperRef.current;
+    const row = wrapper?.closest("tr");
+    const observer = typeof ResizeObserver !== "undefined" && row
+      ? new ResizeObserver(resizeTextarea)
+      : null;
+    if (row && observer) observer.observe(row);
+    window.addEventListener("resize", resizeTextarea);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", resizeTextarea);
+    };
+  }, [resizeTextarea, value]);
 
 		  return (
-		    <div ref={wrapperRef} className="quote-name-cell-wrap relative flex min-h-[56px] w-full items-center">
+		    <div ref={wrapperRef} className="quote-name-cell-wrap relative flex h-full min-h-[56px] w-full items-center">
         {onQuickReplace && !readOnly ? (
           <button
             type="button"
@@ -10988,14 +11599,12 @@ function QuoteNameTextarea({
           </button>
         ) : null}
 	      {special && <span className="quote-special-mark" title="特价项目">特</span>}
-	      <span ref={measureRef} className={`quote-name-measure ${className}`}>{value || " "}</span>
 	      {highlight && value ? (
-	        <span className={`quote-name-highlight-layer ${multiline ? "quote-name-highlight-layer-multiline" : ""} ${className}`} aria-hidden="true">
+	        <span className={`quote-name-highlight-layer quote-name-highlight-layer-multiline ${className}`} aria-hidden="true">
 	          {renderFindReplaceHighlightedText(value, highlight)}
 	        </span>
 	      ) : null}
-	      {multiline ? (
-	        <textarea
+	      <textarea
           ref={textareaRef}
           rows={1}
           value={value}
@@ -11004,15 +11613,6 @@ function QuoteNameTextarea({
           onKeyDown={handleQuoteCellKeyDown}
 	          className={`quote-cell-editable quote-cell-textarea quote-name-textarea ${highlight ? "quote-cell-find-highlighted" : ""} ${className}`}
 	        />
-	      ) : (
-        <input
-          value={value}
-          readOnly={readOnly}
-          onChange={(event) => onChange(event.target.value)}
-          onKeyDown={handleQuoteCellKeyDown}
-	          className={`quote-cell-editable quote-cell-input quote-name-cell-input ${highlight ? "quote-cell-find-highlighted" : ""} ${className}`}
-	        />
-	      )}
     </div>
   );
 }
@@ -11425,7 +12025,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
         <SimpleQuoteTable
           items={items}
           otherFeeRows={otherFeeRows}
-          showSpace={!isOther}
+          showSpace={!isOther && !!isAllSpaceView}
           editableSpace={false}
           spaceOptions={spaceOptions}
           feeScopeOptions={feeScopeOptions}
@@ -12429,7 +13029,7 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
         <QuoteNameTextarea
           value={item.name}
           onChange={(value) => handleChange({ name: value })}
-          className="text-center font-medium"
+          className="text-left font-medium"
           readOnly={readOnly}
           special={isSpecialQuoteItem(item)}
           highlight={findReplaceHighlight?.field === "name" ? findReplaceHighlight : null}
@@ -12618,22 +13218,13 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
           onItemPointerDown={(event) => onItemPointerDown(event, index)}
         />
       </td>
-      <td className="border border-surface-200 p-0" style={cellStyle}>
-        {showSpace ? (
+      {showSpace && (
+        <td className="border border-surface-200 p-0" style={cellStyle}>
           <SpaceSelectCell value={inferItemSpace(item)} options={spaceOptions} onChange={(space) => handleChange({ space })} readOnly={readOnly} />
-        ) : (
-          <input
-            value={inferItemSpace(item)}
-            readOnly={readOnly}
-            onChange={(event) => handleChange({ space: event.target.value })}
-            onKeyDown={handleQuoteCellKeyDown}
-            className="quote-cell-editable quote-cell-input text-center font-medium"
-            placeholder="类别"
-          />
-        )}
-      </td>
+        </td>
+      )}
       <td className="border border-surface-200 p-0 align-middle" style={cellStyle}>
-        <QuoteNameTextarea value={item.name} onChange={(value) => handleChange({ name: value })} className="text-center font-medium" readOnly={readOnly} special={isSpecialQuoteItem(item)} highlight={findReplaceHighlight?.field === "name" ? findReplaceHighlight : null} />
+        <QuoteNameTextarea value={item.name} onChange={(value) => handleChange({ name: value })} className="text-left font-medium" readOnly={readOnly} special={isSpecialQuoteItem(item)} highlight={findReplaceHighlight?.field === "name" ? findReplaceHighlight : null} />
       </td>
       <td className="border border-surface-200 p-0" style={cellStyle}>
         <QuoteNumberInput value={item.material_cost || 0} onChange={(value) => handleChange({ material_cost: value })} className="text-center" disabled={readOnly} />
@@ -12692,11 +13283,11 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
 
   return (
     <ThinScrollArea className="quote-table-shell" scrollClassName="quote-table-freeze-scroll">
-      <table className="w-full min-w-[1430px] border-collapse text-sm">
+      <table className={`w-full border-collapse text-sm ${showSpace ? "min-w-[1430px]" : "min-w-[1320px]"}`}>
         <thead className="bg-surface-50 text-center text-xs font-semibold text-surface-600">
           <tr>
             <QuoteIndexHeaderCell rowSpan={2} itemKeys={itemKeys} selectedItemKeys={selectedItemKeys} readOnly={readOnly} onToggleAll={onToggleAllItemSelection} />
-            <th rowSpan={2} className="w-28 border border-surface-200 px-3 py-1.5">类别</th>
+            {showSpace && <th rowSpan={2} className="w-28 border border-surface-200 px-3 py-1.5">空间/类别</th>}
             <th rowSpan={2} className="w-52 border border-surface-200 px-3 py-1.5">名称</th>
             <th colSpan={5} className="border border-surface-200 px-2 py-1.5">H高×W宽×D深（mm）</th>
             <th rowSpan={2} className="w-36 border border-surface-200 px-2 py-1.5">数量</th>
@@ -12740,7 +13331,7 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
           })}
           {items.length === 0 && (
             <tr className="quote-empty-row">
-              <td colSpan={13} className="quote-empty-cell border border-surface-200 px-4 py-0 text-center">
+              <td colSpan={showSpace ? 13 : 12} className="quote-empty-cell border border-surface-200 px-4 py-0 text-center">
                 <div className="quote-empty-state">
                   <p className="text-sm font-semibold text-[#34445a]">{emptyText}</p>
                   <p className="mt-1 text-xs leading-5 text-[#7c8aa0]">添加项目后，将在这里显示尺寸、数量、单价和备注。</p>
@@ -12750,7 +13341,7 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
           )}
           {items.length > 0 && (
             <tr className="bg-surface-50 font-semibold text-surface-900">
-              <td className="border border-surface-200 px-2 py-3 text-center" colSpan={11}>小计</td>
+              <td className="border border-surface-200 px-2 py-3 text-center" colSpan={showSpace ? 11 : 10}>小计</td>
               <td className="border border-surface-200 px-2 py-3 text-center text-red-600">{formatQuoteAmount(total)}</td>
               <td className="border border-surface-200 px-2 py-3"></td>
             </tr>
@@ -13041,6 +13632,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
             const feeTotal = isOtherFees ? feeMeta?.total || 0 : getItemTotal(item, baseAmount, materialAmount, feeFormulaContext);
             const feeBaseError = isOtherFees ? feeMeta?.error || "" : "";
             const displayItem = feeFormulaDrafts[itemKey] !== undefined ? { ...item, fee_calc_base: feeFormulaDrafts[itemKey] } : item;
+            const otherFeeRuleText = isOtherFees ? getOtherFeeRuleDisplay(item, feeTotal, feeFormulaContext) : "";
             return (
               <tr
                 key={itemKey}
@@ -13070,7 +13662,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                   </td>
                 )}
                 <td className={`${isOtherFees ? "h-14 w-36 border border-surface-200" : "border border-surface-200"} px-0 py-0 align-middle`} style={cellStyle}>
-                  <QuoteNameTextarea value={item.name} onChange={(value) => onChange(index, { name: value })} className="px-4 text-center font-medium" readOnly={readOnly} special={isSpecialQuoteItem(item)} highlight={findReplaceHighlight?.field === "name" ? findReplaceHighlight : null} />
+                  <QuoteNameTextarea value={item.name} onChange={(value) => onChange(index, { name: value })} className="px-4 text-left font-medium" readOnly={readOnly} special={isSpecialQuoteItem(item)} highlight={findReplaceHighlight?.field === "name" ? findReplaceHighlight : null} />
                 </td>
                 {!isOtherFees && (
                   <>
@@ -13168,8 +13760,15 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                   </td>
                 )}
                 {isOtherFees && (
-                  <td className="border border-surface-200 px-3 py-1 text-xs font-medium leading-5 text-surface-500" style={cellStyle}>
-                    {feeBaseError || getOtherFeeRuleDisplay(item, feeTotal, feeFormulaContext)}
+                  <td className="border border-surface-200 p-0 align-middle" style={cellStyle}>
+                    <QuoteDescriptionCell
+                      value={item.remark || ""}
+                      readOnly={readOnly}
+                      label="规则/说明"
+                      emptyText={feeBaseError || otherFeeRuleText || "点击填写规则/说明"}
+                      placeholder="填写费用计算规则、特殊说明或对客户展示的备注..."
+                      onChange={(value) => onChange(index, { remark: value })}
+                    />
                   </td>
                 )}
               </tr>

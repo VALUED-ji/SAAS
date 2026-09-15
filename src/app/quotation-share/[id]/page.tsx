@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { Check, Columns3, Download, Loader2, Printer, X } from "lucide-react";
-import { QuotationPrintDocument, type PrintableQuotationDetail, type PrintableQuotationItem, type PrintableQuotationSettings, type QuotationBaseColumnKey, type QuotationBaseColumnOptions, type QuotationOutputMode, type QuotationPrintScope } from "@/components/QuotationPrintDocument";
+import { QuotationPrintDocument, type PrintableQuotationDetail, type PrintableQuotationItem, type PrintableQuotationSettings, type QuotationBaseColumnKey, type QuotationBaseColumnOptions, type QuotationCabinetColumnKey, type QuotationCabinetColumnOptions, type QuotationOutputMode, type QuotationPrintScope, type QuotationProductColumnKey, type QuotationProductColumnOptions } from "@/components/QuotationPrintDocument";
 import type { CSSProperties } from "react";
 
 type SharedQuotation = PrintableQuotationDetail & {
@@ -11,6 +11,8 @@ type SharedQuotation = PrintableQuotationDetail & {
   items?: PrintableQuotationItem[];
 };
 type BaseExportColumnKey = QuotationBaseColumnKey;
+type ProductShareColumnKey = QuotationProductColumnKey;
+type CabinetShareColumnKey = QuotationCabinetColumnKey;
 
 const baseExportColumnOptions: { key: BaseExportColumnKey; label: string }[] = [
   { key: "materialUnit", label: "材料单价" },
@@ -21,6 +23,94 @@ const baseExportColumnOptions: { key: BaseExportColumnKey; label: string }[] = [
   { key: "description", label: "施工工艺及材料说明" },
 ];
 const configurableExportScopes: QuotationPrintScope[] = ["all", "all_without_cover", "base"];
+const quotationPrintScopes: QuotationPrintScope[] = ["all", "all_without_cover", "base", "main_material", "custom_cabinet", "fees"];
+const printScopeShortCodes: Record<string, QuotationPrintScope> = {
+  a: "all",
+  n: "all_without_cover",
+  b: "base",
+  m: "main_material",
+  c: "custom_cabinet",
+  f: "fees",
+};
+const baseColumnShortCodes: Record<string, BaseExportColumnKey> = {
+  mu: "materialUnit",
+  mt: "materialTotal",
+  lu: "laborUnit",
+  lt: "laborTotal",
+  st: "subtotal",
+  ds: "description",
+};
+const productShareColumnOptions: { key: ProductShareColumnKey; label: string }[] = [
+  { key: "unitPrice", label: "单价" },
+  { key: "quantity", label: "数量" },
+  { key: "subtotal", label: "小计" },
+  { key: "remark", label: "备注" },
+];
+const cabinetShareColumnOptions: { key: CabinetShareColumnKey; label: string }[] = [
+  { key: "quantity", label: "数量" },
+  { key: "area", label: "平方" },
+  { key: "unitPrice", label: "单价" },
+  { key: "amount", label: "金额" },
+];
+const productColumnShortCodes: Record<string, ProductShareColumnKey> = {
+  up: "unitPrice",
+  qt: "quantity",
+  st: "subtotal",
+  rm: "remark",
+};
+const cabinetColumnShortCodes: Record<string, CabinetShareColumnKey> = {
+  qt: "quantity",
+  ar: "area",
+  up: "unitPrice",
+  am: "amount",
+};
+
+function makeBaseColumnOptions(selected: BaseExportColumnKey[]): QuotationBaseColumnOptions {
+  return Object.fromEntries(baseExportColumnOptions.map((option) => [option.key, selected.includes(option.key)])) as QuotationBaseColumnOptions;
+}
+
+function makeProductColumnOptions(selected: ProductShareColumnKey[]): QuotationProductColumnOptions {
+  return Object.fromEntries(productShareColumnOptions.map((option) => [option.key, selected.includes(option.key)])) as QuotationProductColumnOptions;
+}
+
+function makeCabinetColumnOptions(selected: CabinetShareColumnKey[]): QuotationCabinetColumnOptions {
+  return Object.fromEntries(cabinetShareColumnOptions.map((option) => [option.key, selected.includes(option.key)])) as QuotationCabinetColumnOptions;
+}
+
+function parsePrintScope(value: string | null): QuotationPrintScope {
+  if (value && printScopeShortCodes[value]) return printScopeShortCodes[value];
+  return quotationPrintScopes.includes(value as QuotationPrintScope) ? value as QuotationPrintScope : "all";
+}
+
+function parseBaseColumnKeys(value: string | null): BaseExportColumnKey[] | null {
+  if (value === null) return null;
+  const allowed = new Set(baseExportColumnOptions.map((option) => option.key));
+  return value
+    .split(/[,.]/)
+    .map((item) => item.trim())
+    .map((item) => baseColumnShortCodes[item] || item)
+    .filter((item): item is BaseExportColumnKey => allowed.has(item as BaseExportColumnKey));
+}
+
+function parseProductColumnKeys(value: string | null): ProductShareColumnKey[] | null {
+  if (value === null) return null;
+  const allowed = new Set(productShareColumnOptions.map((option) => option.key));
+  return value
+    .split(/[,.]/)
+    .map((item) => item.trim())
+    .map((item) => productColumnShortCodes[item] || item)
+    .filter((item): item is ProductShareColumnKey => allowed.has(item as ProductShareColumnKey));
+}
+
+function parseCabinetColumnKeys(value: string | null): CabinetShareColumnKey[] | null {
+  if (value === null) return null;
+  const allowed = new Set(cabinetShareColumnOptions.map((option) => option.key));
+  return value
+    .split(/[,.]/)
+    .map((item) => item.trim())
+    .map((item) => cabinetColumnShortCodes[item] || item)
+    .filter((item): item is CabinetShareColumnKey => allowed.has(item as CabinetShareColumnKey));
+}
 
 function hasReadableRichText(value: unknown) {
   return String(value || "")
@@ -28,6 +118,12 @@ function hasReadableRichText(value: unknown) {
     .replace(/<[^>]+>/g, "")
     .replace(/&nbsp;/gi, " ")
     .trim().length > 0;
+}
+
+function getStoredQuotationValidUntil(settings?: PrintableQuotationSettings) {
+  return [settings?.quotationValidUntil, settings?.validUntil, settings?.effectiveUntil, settings?.valid_until]
+    .map((value) => String(value || "").trim())
+    .find((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)) || "";
 }
 
 export default function QuotationSharePage() {
@@ -42,13 +138,27 @@ export default function QuotationSharePage() {
   const [printScope, setPrintScope] = useState<QuotationPrintScope>("all");
   const [exportColumnDialog, setExportColumnDialog] = useState<{ scope: QuotationPrintScope; selected: BaseExportColumnKey[]; action: "print" | "export"; includeBudgetCompilation: boolean } | null>(null);
   const [printBaseColumns, setPrintBaseColumns] = useState<QuotationBaseColumnOptions | undefined>(undefined);
+  const [printProductColumns, setPrintProductColumns] = useState<QuotationProductColumnOptions | undefined>(undefined);
+  const [printCabinetColumns, setPrintCabinetColumns] = useState<QuotationCabinetColumnOptions | undefined>(undefined);
   const [includeBudgetCompilation, setIncludeBudgetCompilation] = useState(true);
+  const [quotationValidUntil, setQuotationValidUntil] = useState("");
+  const [hasShareDisplayConfig, setHasShareDisplayConfig] = useState(false);
   const [mobileDocumentScale, setMobileDocumentScale] = useState(1);
+  const [qrReady, setQrReady] = useState(false);
+  const [pendingPrint, setPendingPrint] = useState(false);
+  const [printRequest, setPrintRequest] = useState<{
+    scope: QuotationPrintScope;
+    baseColumns?: QuotationBaseColumnOptions;
+    productColumns?: QuotationProductColumnOptions;
+    cabinetColumns?: QuotationCabinetColumnOptions;
+    includeBudgetCompilation: boolean;
+    outputMode: QuotationOutputMode;
+  } | null>(null);
   const printScopes: { value: QuotationPrintScope; label: string }[] = [
     { value: "all", label: "全部明细（带封面）" },
     { value: "all_without_cover", label: "全部明细（不带封面）" },
     { value: "base", label: "基装明细" },
-    { value: "main_material", label: "主材明细" },
+    { value: "main_material", label: "产品明细" },
     { value: "custom_cabinet", label: "定制柜明细" },
     { value: "fees", label: "综合费用和总费用" },
   ];
@@ -56,15 +166,28 @@ export default function QuotationSharePage() {
     setOutputMode("list");
     setPrintScope(scope);
   };
+  const updateQuotationValidity = (value: string) => {
+    const nextValue = /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : "";
+    setQuotationValidUntil(nextValue);
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (nextValue) url.searchParams.set("vu", nextValue);
+    else {
+      url.searchParams.delete("vu");
+      url.searchParams.delete("validUntil");
+    }
+    window.history.replaceState(null, "", url.toString());
+  };
   const hasBudgetCompilation = hasReadableRichText(data?.settings?.budgetCompilationHtml || data?.settings?.budgetCompilation);
   const supportsBudgetCompilation = (scope: QuotationPrintScope) => scope === "all" || scope === "all_without_cover" || scope === "fees";
   const printWithScope = (scope: QuotationPrintScope, nextIncludeBudgetCompilation = includeBudgetCompilation) => {
-    setOutputMode("list");
-    setPrintScope(scope);
-    setIncludeBudgetCompilation(nextIncludeBudgetCompilation);
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => window.print());
+    setPrintRequest({
+      scope,
+      includeBudgetCompilation: nextIncludeBudgetCompilation,
+      outputMode: "list",
     });
+    setQrReady(false);
+    setPendingPrint(true);
   };
   const exportWithScope = (scope: QuotationPrintScope, columns?: BaseExportColumnKey[], nextIncludeBudgetCompilation = includeBudgetCompilation) => {
     if (!data?.id) {
@@ -75,6 +198,7 @@ export default function QuotationSharePage() {
     url.searchParams.set("scope", scope);
     url.searchParams.set("share", shareToken);
     if (columns) url.searchParams.set("baseColumns", columns.join(","));
+    if (/^\d{4}-\d{2}-\d{2}$/.test(quotationValidUntil)) url.searchParams.set("validUntil", quotationValidUntil);
     if (hasBudgetCompilation && supportsBudgetCompilation(scope) && !nextIncludeBudgetCompilation) {
       url.searchParams.set("includeBudgetCompilation", "0");
     }
@@ -89,12 +213,10 @@ export default function QuotationSharePage() {
   };
   const openPrintColumnDialog = (scope: QuotationPrintScope) => {
     if (configurableExportScopes.includes(scope) || supportsBudgetCompilation(scope)) {
-      setOutputMode("list");
-      setPrintScope(scope);
-      setExportColumnDialog({ scope, selected: baseExportColumnOptions.map((option) => option.key), action: "print", includeBudgetCompilation: true });
+      const initialColumns = baseExportColumnOptions.map((option) => option.key);
+      setExportColumnDialog({ scope, selected: initialColumns, action: "print", includeBudgetCompilation: true });
       return;
     }
-    setPrintBaseColumns(undefined);
     printWithScope(scope);
   };
   const toggleExportColumn = (key: BaseExportColumnKey) => {
@@ -109,25 +231,74 @@ export default function QuotationSharePage() {
   const confirmExportColumns = () => {
     if (!exportColumnDialog) return;
     if (exportColumnDialog.action === "print") {
-      const nextColumns = Object.fromEntries(baseExportColumnOptions.map((option) => [option.key, exportColumnDialog.selected.includes(option.key)])) as QuotationBaseColumnOptions;
-      setPrintBaseColumns(nextColumns);
-      setOutputMode("list");
-      setPrintScope(exportColumnDialog.scope);
-      setIncludeBudgetCompilation(exportColumnDialog.includeBudgetCompilation);
-      setExportColumnDialog(null);
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => window.print());
+      const nextColumns = makeBaseColumnOptions(exportColumnDialog.selected);
+      setPrintRequest({
+        scope: exportColumnDialog.scope,
+        baseColumns: nextColumns,
+        includeBudgetCompilation: exportColumnDialog.includeBudgetCompilation,
+        outputMode: "list",
       });
+      setExportColumnDialog(null);
+      setQrReady(false);
+      setPendingPrint(true);
       return;
     }
     exportWithScope(exportColumnDialog.scope, exportColumnDialog.selected, exportColumnDialog.includeBudgetCompilation);
     setExportColumnDialog(null);
   };
+  const handleQrReadyChange = useCallback((ready: boolean) => {
+    setQrReady(ready);
+  }, []);
+
+  useEffect(() => {
+    if (!pendingPrint || !qrReady) return;
+    setPendingPrint(false);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => window.print());
+    });
+  }, [pendingPrint, qrReady]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const restoreWebPreviewAfterPrint = () => {
+      setPrintRequest(null);
+      setPendingPrint(false);
+    };
+    window.addEventListener("afterprint", restoreWebPreviewAfterPrint);
+    return () => window.removeEventListener("afterprint", restoreWebPreviewAfterPrint);
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
     setCanUsePrintTools(url.searchParams.get("print") === "1");
+    const nextHasShareDisplayConfig = url.searchParams.has("scope")
+      || url.searchParams.has("s")
+      || url.searchParams.has("baseColumns")
+      || url.searchParams.has("bc")
+      || url.searchParams.has("pc")
+      || url.searchParams.has("cc")
+      || url.searchParams.has("includeBudgetCompilation")
+      || url.searchParams.has("ib")
+      || url.searchParams.has("mode")
+      || url.searchParams.has("m")
+      || url.searchParams.has("vu")
+      || url.searchParams.has("validUntil");
+    setHasShareDisplayConfig(nextHasShareDisplayConfig);
+    if (nextHasShareDisplayConfig) {
+      const nextScope = parsePrintScope(url.searchParams.get("s") || url.searchParams.get("scope"));
+      const nextBaseColumns = parseBaseColumnKeys(url.searchParams.get("bc") || url.searchParams.get("baseColumns"));
+      const nextProductColumns = parseProductColumnKeys(url.searchParams.get("pc") || url.searchParams.get("productColumns"));
+      const nextCabinetColumns = parseCabinetColumnKeys(url.searchParams.get("cc") || url.searchParams.get("cabinetColumns"));
+      setOutputMode(url.searchParams.get("m") === "c" || url.searchParams.get("mode") === "composition" ? "composition" : "list");
+      setPrintScope(nextScope);
+      setPrintBaseColumns(nextBaseColumns ? makeBaseColumnOptions(nextBaseColumns) : undefined);
+      setPrintProductColumns(nextProductColumns ? makeProductColumnOptions(nextProductColumns) : undefined);
+      setPrintCabinetColumns(nextCabinetColumns ? makeCabinetColumnOptions(nextCabinetColumns) : undefined);
+      setIncludeBudgetCompilation((url.searchParams.get("ib") || url.searchParams.get("includeBudgetCompilation")) !== "0");
+    }
+    const configuredValidUntil = url.searchParams.get("vu") || url.searchParams.get("validUntil") || "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(configuredValidUntil)) setQuotationValidUntil(configuredValidUntil);
     url.searchParams.delete("print");
     setShareUrl(url.toString());
     fetch("/api/quotation-shares/compact", {
@@ -138,10 +309,16 @@ export default function QuotationSharePage() {
       .then((res) => res.json().then((next) => ({ ok: res.ok, next })))
       .then(({ ok, next }) => {
         if (!ok || !next?.url) return;
-        setShareUrl(new URL(String(next.url), window.location.origin).toString());
+        const compactUrl = new URL(String(next.url), window.location.origin);
+        url.searchParams.forEach((value, key) => compactUrl.searchParams.set(key, value));
+        setShareUrl(compactUrl.toString());
       })
       .catch(() => undefined);
   }, [shareToken]);
+
+  useEffect(() => {
+    if (data && !quotationValidUntil) setQuotationValidUntil(getStoredQuotationValidUntil(data.settings));
+  }, [data, quotationValidUntil]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -195,6 +372,11 @@ export default function QuotationSharePage() {
       </main>
     );
   }
+  const shouldApplyDisplayConfig = canUsePrintTools || hasShareDisplayConfig;
+  const printableSettings: PrintableQuotationSettings = {
+    ...(data.settings || {}),
+    quotationValidUntil: quotationValidUntil || undefined,
+  };
 
   return (
     <main
@@ -264,7 +446,10 @@ export default function QuotationSharePage() {
                 className="quotation-export-budget-option"
                 data-checked={hasBudgetCompilation && exportColumnDialog.includeBudgetCompilation || undefined}
                 disabled={!hasBudgetCompilation}
-                onClick={() => setExportColumnDialog((current) => current ? { ...current, includeBudgetCompilation: !current.includeBudgetCompilation } : current)}
+                onClick={() => setExportColumnDialog((current) => {
+                  if (!current) return current;
+                  return { ...current, includeBudgetCompilation: !current.includeBudgetCompilation };
+                })}
               >
                 <i><Check className="h-3.5 w-3.5" /></i>
                 <span>预算编制</span>
@@ -281,6 +466,23 @@ export default function QuotationSharePage() {
 
       {canUsePrintTools && outputMode === "list" && (
         <aside className="quotation-print-scope-panel no-print" aria-label="打印范围">
+          <div className="quotation-validity-setting">
+            <div className="quotation-validity-label">
+              <span>报价执行有效期</span>
+              <small>{quotationValidUntil ? "自定义日期" : "默认：当年12月31日"}</small>
+            </div>
+            <div className="quotation-validity-controls">
+              <input
+                type="date"
+                aria-label="报价执行有效期"
+                value={quotationValidUntil}
+                onChange={(event) => updateQuotationValidity(event.target.value)}
+              />
+              {quotationValidUntil && (
+                <button type="button" className="quotation-validity-reset" onClick={() => updateQuotationValidity("")}>默认</button>
+              )}
+            </div>
+          </div>
           <p>打印 / 导出范围</p>
           <div className="quotation-print-scope-list">
             {printScopes.map((scope) => (
@@ -329,20 +531,53 @@ export default function QuotationSharePage() {
         </aside>
       )}
 
-      <div className="quotation-share-document-viewer">
+      <div className="quotation-share-document-viewer quotation-share-web-document">
         <QuotationPrintDocument
           quotation={data}
           items={data.items || []}
-          settings={data.settings}
+          settings={printableSettings}
           shareUrl={shareUrl}
-          outputMode={canUsePrintTools ? outputMode : "list"}
-          printScope={canUsePrintTools ? printScope : "all"}
-          baseColumns={printBaseColumns}
-          includeBudgetCompilation={includeBudgetCompilation}
+          outputMode={shouldApplyDisplayConfig ? outputMode : "list"}
+          printScope={shouldApplyDisplayConfig ? printScope : "all"}
+          baseColumns={shouldApplyDisplayConfig ? printBaseColumns : undefined}
+          productColumns={shouldApplyDisplayConfig ? printProductColumns : undefined}
+          cabinetColumns={shouldApplyDisplayConfig ? printCabinetColumns : undefined}
+          includeBudgetCompilation={shouldApplyDisplayConfig ? includeBudgetCompilation : true}
+          quotationValidUntil={quotationValidUntil}
         />
       </div>
 
+      {printRequest && (
+        <div className="quotation-share-document-viewer quotation-share-print-only">
+          <QuotationPrintDocument
+            quotation={data}
+            items={data.items || []}
+            settings={printableSettings}
+            shareUrl={shareUrl}
+            outputMode={printRequest.outputMode}
+            printScope={printRequest.scope}
+            baseColumns={printRequest.baseColumns}
+            productColumns={printRequest.productColumns}
+            cabinetColumns={printRequest.cabinetColumns}
+            includeBudgetCompilation={printRequest.includeBudgetCompilation}
+            quotationValidUntil={quotationValidUntil}
+            onQrReadyChange={handleQrReadyChange}
+          />
+        </div>
+      )}
+
       <style jsx global>{`
+        .quotation-share-print-only {
+          display: none !important;
+        }
+        @media print {
+          .quotation-share-web-document {
+            display: none !important;
+          }
+          .quotation-share-print-only {
+            display: block !important;
+          }
+        }
         .quotation-output-mode-switch {
           position: fixed;
           top: 18px;
@@ -646,6 +881,60 @@ export default function QuotationSharePage() {
           color: #475569;
           letter-spacing: 0;
         }
+        .quotation-validity-setting {
+          display: grid;
+          gap: 8px;
+          margin: 0 0 10px;
+          padding: 3px 3px 11px;
+          border-bottom: 1px solid #e8eef5;
+        }
+        .quotation-validity-label {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 8px;
+          color: #334155;
+        }
+        .quotation-validity-label span {
+          font-size: 11px;
+          font-weight: 700;
+        }
+        .quotation-validity-label small {
+          color: #94a3b8;
+          font-size: 10px;
+          font-weight: 500;
+          white-space: nowrap;
+        }
+        .quotation-validity-controls {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .quotation-validity-controls input {
+          min-width: 0;
+          flex: 1;
+          height: 30px;
+          border: 1px solid #d8e2ee;
+          border-radius: 8px;
+          background: #fff;
+          padding: 0 8px;
+          color: #334155;
+          font-size: 11px;
+          outline: none;
+        }
+        .quotation-validity-controls input:focus {
+          border-color: #76b99b;
+          box-shadow: 0 0 0 3px rgba(21, 148, 102, 0.1);
+        }
+        .quotation-validity-reset {
+          width: auto !important;
+          min-width: 38px;
+          padding: 0 8px !important;
+          border-color: #b9ddca !important;
+          background: #f3fbf6 !important;
+          color: #16764e !important;
+          font-size: 11px !important;
+        }
         .quotation-print-scope-panel p::before {
           content: "";
           display: inline-block;
@@ -900,12 +1189,21 @@ export default function QuotationSharePage() {
             margin-top: 14px !important;
           }
           .quotation-share-page .quotation-print-head-table {
+            --quotation-print-head-line-color: #111111 !important;
+            --quotation-print-head-inner-line-color: #111111 !important;
+            --quotation-print-head-line-width: 1px !important;
+            --quotation-print-head-inner-line-width: 1px !important;
             grid-template-columns: 34% repeat(3, minmax(0, 1fr)) 10% !important;
             grid-template-rows: repeat(2, 44px) !important;
+            border: var(--quotation-print-head-line-width) solid var(--quotation-print-head-line-color) !important;
+          }
+          .quotation-share-page .quotation-print-head-table::after {
+            display: none !important;
           }
           .quotation-share-page .quotation-print-head-title-cell {
             grid-column: 1 !important;
             grid-row: 1 / span 2 !important;
+            border: 0 !important;
             padding: 8px 14px !important;
           }
           .quotation-share-page .quotation-print-head-title-cell h1 {
@@ -919,7 +1217,7 @@ export default function QuotationSharePage() {
             padding: 7px 12px !important;
             border-right: 0 !important;
             border-bottom: 0 !important;
-            border-left: var(--quotation-print-head-inner-line-width) solid #111111 !important;
+            border-left: var(--quotation-print-head-inner-line-width) solid var(--quotation-print-head-inner-line-color, #111111) !important;
           }
           .quotation-share-page .quotation-print-head-field-phone {
             grid-column: 2 !important;
@@ -939,17 +1237,17 @@ export default function QuotationSharePage() {
           .quotation-share-page .quotation-print-head-field-designer {
             grid-column: 2 !important;
             grid-row: 2 !important;
-            border-top: var(--quotation-print-head-inner-line-width) solid #111111 !important;
+            border-top: var(--quotation-print-head-inner-line-width) solid var(--quotation-print-head-inner-line-color, #111111) !important;
           }
           .quotation-share-page .quotation-print-head-field-creator {
             grid-column: 3 !important;
             grid-row: 2 !important;
-            border-top: var(--quotation-print-head-inner-line-width) solid #111111 !important;
+            border-top: var(--quotation-print-head-inner-line-width) solid var(--quotation-print-head-inner-line-color, #111111) !important;
           }
           .quotation-share-page .quotation-print-head-field-company-phone {
             grid-column: 4 !important;
             grid-row: 2 !important;
-            border-top: var(--quotation-print-head-inner-line-width) solid #111111 !important;
+            border-top: var(--quotation-print-head-inner-line-width) solid var(--quotation-print-head-inner-line-color, #111111) !important;
           }
           .quotation-share-page .quotation-print-qr {
             display: flex !important;
@@ -957,7 +1255,7 @@ export default function QuotationSharePage() {
             grid-row: 1 / span 2 !important;
             width: auto !important;
             justify-self: auto !important;
-            border-left: var(--quotation-print-head-inner-line-width) solid #111111 !important;
+            border-left: var(--quotation-print-head-inner-line-width) solid var(--quotation-print-head-inner-line-color, #111111) !important;
             border-top: 0 !important;
           }
           .quotation-share-page .quotation-print-section {
@@ -974,6 +1272,9 @@ export default function QuotationSharePage() {
           .quotation-share-page .quotation-print-cabinet-table,
           .quotation-share-page .quotation-print-composition-table {
             min-width: 0 !important;
+          }
+          .quotation-share-page .quotation-print-base-description {
+            white-space: pre-wrap !important;
           }
           .quotation-share-page .quotation-print-appendix-note,
           .quotation-share-page .quotation-print-budget-compilation-content,

@@ -231,9 +231,14 @@ export default function ProfilePage() {
 
   if (loading) {
     return (
-      <div className="flex h-[60vh] items-center justify-center text-surface-500">
-        <Loader2 className="mr-2 h-5 w-5 animate-spin text-[#407AFF]" />
-        正在加载个人信息...
+      <div className="profile-settings-ui profile-loading-state">
+        <div className="profile-loading-card">
+          <Loader2 className="h-5 w-5 animate-spin text-[#407AFF]" />
+          <div>
+            <p>正在加载个人设置</p>
+            <span>同步账号资料、头像、审批签名和安全状态...</span>
+          </div>
+        </div>
       </div>
     );
   }
@@ -245,14 +250,19 @@ export default function ProfilePage() {
           <h1>个人设置</h1>
           <p>管理当前账号资料、头像、审批签名和登录密码。</p>
         </div>
-        <button
-          type="button"
-          onClick={() => setLogoutConfirmOpen(true)}
-          className="profile-logout-button"
-        >
-          <LogOut className="h-4 w-4" />
-          退出登录
-        </button>
+        <div className="profile-header-actions">
+          <span className={`profile-status-badge ${Number(profile?.is_active ?? 1) === 1 ? "is-active" : "is-disabled"}`}>
+            {Number(profile?.is_active ?? 1) === 1 ? "正常启用" : "已停用"}
+          </span>
+          <button
+            type="button"
+            onClick={() => setLogoutConfirmOpen(true)}
+            className="profile-logout-button"
+          >
+            <LogOut className="h-4 w-4" />
+            退出登录
+          </button>
+        </div>
       </header>
 
       <div className="profile-settings-layout">
@@ -311,10 +321,16 @@ export default function ProfilePage() {
               </button>
             )}
           </div>
+
+          <nav className="profile-settings-nav" aria-label="个人设置导航">
+            <a href="#profile-info-section">账号资料</a>
+            <a href="#profile-signature-section">审批签名</a>
+            <a href="#profile-security-section">登录密码</a>
+          </nav>
         </aside>
 
         <main className="profile-settings-main">
-          <section className="profile-settings-section">
+          <section id="profile-info-section" className="profile-settings-section">
             <div className="profile-section-header">
               <span className="profile-section-icon"><UserRound className="h-4 w-4" /></span>
               <div>
@@ -337,11 +353,11 @@ export default function ProfilePage() {
             </div>
           </section>
 
-          <section className="profile-settings-section profile-signature-section">
+          <section id="profile-signature-section" className="profile-settings-section profile-signature-section">
             <SignatureSettings />
           </section>
 
-          <section className="profile-settings-section profile-security-section">
+          <section id="profile-security-section" className="profile-settings-section profile-security-section">
             <div className="profile-section-header">
               <span className="profile-section-icon is-security"><KeyRound className="h-4 w-4" /></span>
               <div>
@@ -406,6 +422,21 @@ export default function ProfilePage() {
               {passwordMessage && <Message tone="success" text={passwordMessage} />}
               {passwordError && <Message tone="danger" text={passwordError} />}
             </form>
+          </section>
+
+          <section className="profile-settings-section profile-danger-section" aria-labelledby="profile-danger-title">
+            <div>
+              <h2 id="profile-danger-title">安全操作</h2>
+              <p>退出当前登录状态，不会影响账号资料、审批签名或任何业务数据。</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setLogoutConfirmOpen(true)}
+              className="profile-logout-button"
+            >
+              <LogOut className="h-4 w-4" />
+              退出登录
+            </button>
           </section>
         </main>
       </div>
@@ -485,7 +516,7 @@ function Message({ tone, text }: { tone: "success" | "danger"; text: string }) {
     ? "border-emerald-100 bg-emerald-50 text-emerald-700"
     : "border-red-100 bg-red-50 text-red-600";
   return (
-    <div className={`rounded-lg border px-3 py-2 text-sm font-semibold ${className}`}>
+    <div className={`profile-message rounded-lg border px-3 py-2 text-sm font-semibold ${className}`}>
       {text}
     </div>
   );

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Check, ChevronDown, Edit3, Loader2, Plus, Search, Shield, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, Edit3, Loader2, Plus, Search, Trash2, X } from "lucide-react";
 import DataPagination, { useDataPagination } from "@/components/ui/DataPagination";
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
 import SystemSelect from "@/components/ui/SystemSelect";
@@ -52,6 +52,7 @@ const menuPermissionGroups: MenuPermissionGroup[] = [
     children: [
       { key: "quota_library", label: "基装定额", permissions: ["quotations.manage", "settings.manage"] },
       { key: "quota_templates", label: "预算模版", permissions: ["quotations.manage", "settings.manage"] },
+      { key: "quota_personalized_templates", label: "个性化模板", permissions: ["quotations.manage", "settings.manage"] },
     ],
   },
   {
@@ -168,6 +169,87 @@ const emptyForm = {
   is_active: "1",
 };
 
+type RoleIconKind = "owner" | "admin" | "pm" | "designer" | "finance" | "sales" | "advisor" | "custom";
+
+function getRoleIconKind(role: Role): RoleIconKind {
+  const text = `${role.code || ""} ${role.name || ""}`.toUpperCase();
+  if (text.includes("OWNER") || text.includes("老板")) return "owner";
+  if (text.includes("ADMIN") || text.includes("管理员")) return "admin";
+  if (text.includes("PM") || text.includes("项目经理")) return "pm";
+  if (text.includes("DESIGNER") || text.includes("设计师")) return "designer";
+  if (text.includes("FINANCE") || text.includes("财务")) return "finance";
+  if (text.includes("SALES") || text.includes("销售") || text.includes("跟单")) return "sales";
+  if (text.includes("顾问")) return "advisor";
+  return "custom";
+}
+
+function RoleIcon({ role }: { role: Role }) {
+  const kind = getRoleIconKind(role);
+  return (
+    <span className={`role-icon-badge role-icon-${kind}`} aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none">
+        {kind === "owner" && (
+          <>
+            <path d="M4.5 9.2 7.4 12l4.5-6 4.7 6 2.9-2.8v8.1a1.7 1.7 0 0 1-1.7 1.7H6.2a1.7 1.7 0 0 1-1.7-1.7V9.2Z" />
+            <path d="M7.2 15.2h9.6" />
+          </>
+        )}
+        {kind === "admin" && (
+          <>
+            <path d="M12 3.8 18 6v5.1c0 3.8-2.4 7.2-6 8.4-3.6-1.2-6-4.6-6-8.4V6l6-2.2Z" />
+            <path d="M9.8 12.2h4.4" />
+            <path d="M12 10v4.4" />
+          </>
+        )}
+        {kind === "pm" && (
+          <>
+            <path d="M6.8 10.6v-1A5.2 5.2 0 0 1 12 4.4a5.2 5.2 0 0 1 5.2 5.2v1" />
+            <path d="M4.8 10.6h14.4" />
+            <path d="M7 10.6l.9 7.1a1.8 1.8 0 0 0 1.8 1.5h4.6a1.8 1.8 0 0 0 1.8-1.5l.9-7.1" />
+            <path d="M9.6 7.2v3.4M14.4 7.2v3.4" />
+          </>
+        )}
+        {kind === "designer" && (
+          <>
+            <path d="M5.4 18.6 7 13.8l7.6-7.6a2 2 0 0 1 2.8 2.8L9.8 16.6l-4.4 2Z" />
+            <path d="m13.3 7.5 3.2 3.2" />
+            <path d="M13.8 18.4h4.8" />
+          </>
+        )}
+        {kind === "finance" && (
+          <>
+            <path d="M6.4 4.8h11.2v14.4l-2-1.2-1.8 1.2-1.8-1.2-1.8 1.2-1.8-1.2-2 1.2V4.8Z" />
+            <path d="M9.2 8.2h5.6M9.2 11.6h5.6" />
+            <path d="M12 7v8" />
+            <path d="M10.2 14.4h3.6" />
+          </>
+        )}
+        {kind === "sales" && (
+          <>
+            <path d="M7.2 13.2H6a2 2 0 0 1-2-2v-.8a8 8 0 0 1 16 0v.8a2 2 0 0 1-2 2h-1.2" />
+            <path d="M7.2 10.2v4.6a1.4 1.4 0 0 1-1.4 1.4H5.4A1.4 1.4 0 0 1 4 14.8v-4.6" />
+            <path d="M16.8 10.2v4.6a1.4 1.4 0 0 0 1.4 1.4h.4a1.4 1.4 0 0 0 1.4-1.4v-4.6" />
+            <path d="M14.8 17.8h-2.1a2.1 2.1 0 0 1-2.1-2.1" />
+          </>
+        )}
+        {kind === "advisor" && (
+          <>
+            <path d="M4.8 11.2 12 5.1l7.2 6.1" />
+            <path d="M6.7 10v8.2h10.6V10" />
+            <path d="M9.3 14.4c.7-1.6 2.2-1.6 2.7-.4.5-1.2 2-1.2 2.7.4-.4 1.8-2.7 3-2.7 3s-2.3-1.2-2.7-3Z" />
+          </>
+        )}
+        {kind === "custom" && (
+          <>
+            <path d="M7 5.6h10a1.4 1.4 0 0 1 1.4 1.4v10a1.4 1.4 0 0 1-1.4 1.4H7A1.4 1.4 0 0 1 5.6 17V7A1.4 1.4 0 0 1 7 5.6Z" />
+            <path d="M9 9h6M9 12h6M9 15h3.5" />
+          </>
+        )}
+      </svg>
+    </span>
+  );
+}
+
 export default function RolesPage() {
   const [roles, setRoles] = useState<Role[]>([]);
   const [search, setSearch] = useState("");
@@ -274,9 +356,7 @@ export default function RolesPage() {
                 <tr key={role.id} className="transition-colors hover:bg-surface-50/80">
                   <td className="py-3.5 pl-5 pr-5">
                     <div className="flex items-center gap-3">
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary-50 text-primary-700 ring-1 ring-primary-100">
-                        <Shield className="h-4 w-4" />
-                      </div>
+                      <RoleIcon role={role} />
                       <div className="min-w-0">
                         <p className="font-semibold text-surface-900">{role.name}</p>
                         {role.description && <p className="mt-0.5 truncate text-xs text-surface-500">{role.description}</p>}
@@ -327,9 +407,14 @@ export default function RolesPage() {
                 <tr>
                   <td colSpan={7} className="px-5 py-16 text-center">
                     <div className="mx-auto max-w-sm">
-                      <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-lg border border-surface-200 bg-surface-50 text-surface-400">
-                        <Shield className="h-4 w-4" />
-                      </div>
+                      <span className="mx-auto flex w-max">
+                        <span className="role-icon-badge role-icon-custom" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" fill="none">
+                            <path d="M7 5.6h10a1.4 1.4 0 0 1 1.4 1.4v10a1.4 1.4 0 0 1-1.4 1.4H7A1.4 1.4 0 0 1 5.6 17V7A1.4 1.4 0 0 1 7 5.6Z" />
+                            <path d="M9 9h6M9 12h6M9 15h3.5" />
+                          </svg>
+                        </span>
+                      </span>
                       <p className="mt-4 text-sm font-semibold text-surface-800">暂无角色</p>
                       <p className="mt-1 text-sm text-surface-500">新增角色后，可分配给团队成员。</p>
                     </div>

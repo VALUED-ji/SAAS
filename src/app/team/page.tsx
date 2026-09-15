@@ -182,7 +182,7 @@ export default function TeamPage() {
               <col className="w-[120px]" />
               <col className="w-[390px]" />
               <col className="w-[100px]" />
-              <col className="w-[150px]" />
+              <col className="w-[220px]" />
               <col className="w-[110px]" />
               <col className="w-[110px]" />
               <col className="w-[90px]" />
@@ -254,7 +254,21 @@ export default function TeamPage() {
                         {online ? "在线" : "离线"}
                       </span>
                     </td>
-                    <td className="whitespace-nowrap pr-4 text-surface-700">{formatLoginTime(member.last_login_at)}</td>
+                    <td className="team-last-login-cell pr-4">
+                      {member.last_login_at ? (
+                        <div className="min-w-0">
+                          <p className="whitespace-nowrap text-surface-700">{formatLoginTime(member.last_login_at)}</p>
+                          <p className="mt-1 truncate text-xs text-surface-500" title={`${member.last_login_location || "未知地区"}（${member.last_login_ip || "未知 IP"}）`}>
+                            {member.last_login_location || "未知地区"}
+                            <span className="px-1">（</span>
+                            <span className="font-mono text-[11px]">{member.last_login_ip || "未知 IP"}</span>
+                            <span>）</span>
+                          </p>
+                        </div>
+                      ) : (
+                        <span className="text-surface-400">从未登录</span>
+                      )}
+                    </td>
                     <td className="whitespace-nowrap pr-4 text-surface-700">{member.employee_no || <span className="text-surface-400">-</span>}</td>
                     <td className="whitespace-nowrap pr-4 text-surface-700">{member.hire_date ? formatDate(member.hire_date) : <span className="text-surface-400">-</span>}</td>
                     <td className="whitespace-nowrap pr-4">

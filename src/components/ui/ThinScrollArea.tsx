@@ -60,12 +60,25 @@ export default function ThinScrollArea({ children, className, scrollClassName, o
     event.preventDefault();
     const rect = track.getBoundingClientRect();
     const startPointer = isVertical ? event.clientY : event.clientX;
-    const startScroll = isVertical ? element.scrollTop : element.scrollLeft;
     const maxScroll = isVertical ? element.scrollHeight - element.clientHeight : element.scrollWidth - element.clientWidth;
     const trackSize = isVertical ? rect.height : rect.width;
     const thumbSizePx = (scrollbar.size / 100) * trackSize;
     const movableSize = Math.max(1, trackSize - thumbSizePx);
     const scrollPerPixel = maxScroll / movableSize;
+    const pointerOffset = (isVertical ? event.clientY : event.clientX) - (isVertical ? rect.top : rect.left);
+    const thumbStart = (scrollbar.offset / 100) * trackSize;
+    const thumbEnd = thumbStart + thumbSizePx;
+    const dragOffset = pointerOffset >= thumbStart && pointerOffset <= thumbEnd
+      ? pointerOffset - thumbStart
+      : thumbSizePx / 2;
+    const startScroll = pointerOffset >= thumbStart && pointerOffset <= thumbEnd
+      ? (isVertical ? element.scrollTop : element.scrollLeft)
+      : Math.max(0, Math.min(maxScroll, (pointerOffset - dragOffset) * scrollPerPixel));
+    if (isVertical) {
+      element.scrollTop = startScroll;
+    } else {
+      element.scrollLeft = startScroll;
+    }
 
     const handlePointerMove = (moveEvent: PointerEvent) => {
       const currentPointer = isVertical ? moveEvent.clientY : moveEvent.clientX;

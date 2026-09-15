@@ -34,6 +34,7 @@ const menuRoutes: MenuRoute[] = [
     children: [
       { href: "/quota/library", menuKey: "quota_library" },
       { href: "/quota/templates", menuKey: "quota_templates" },
+      { href: "/quota/personalized-templates", menuKey: "quota_personalized_templates" },
     ],
   },
   {
@@ -91,6 +92,7 @@ const legacyMenuPermissionMap: Record<string, string[]> = {
   finance_labor_settlement: ["finance.view"],
   quota_library: ["quotations.manage", "settings.manage"],
   quota_templates: ["quotations.manage", "settings.manage"],
+  quota_personalized_templates: ["quotations.manage", "settings.manage"],
   orders_auxiliary: ["materials.manage"],
   materials_library: ["materials.manage"],
   materials_products: ["materials.manage"],

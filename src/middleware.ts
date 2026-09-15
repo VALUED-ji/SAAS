@@ -1,22 +1,8 @@
-import { SignJWT, jwtVerify } from "jose";
+import { jwtVerify } from "jose";
 import { NextRequest, NextResponse } from "next/server";
 import { isSameOriginMutation } from "@/lib/security/requestOrigin";
 
 const SESSION_COOKIE_NAME = "zxgj_session";
-const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
-
-async function signSlidingSessionToken(input: { userId: string; companyId: string; role: string; sessionVersion: number }, secret: string) {
-  return new SignJWT({
-    userId: input.userId,
-    companyId: input.companyId,
-    role: input.role,
-    sessionVersion: input.sessionVersion,
-  })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuedAt()
-    .setExpirationTime(`${SESSION_MAX_AGE_SECONDS}s`)
-    .sign(new TextEncoder().encode(secret));
-}
 
 function isPublicRequest(req: NextRequest) {
   const pathname = req.nextUrl.pathname;
@@ -85,16 +71,7 @@ export async function middleware(req: NextRequest) {
       target.pathname = `/api/private-files${req.nextUrl.pathname.slice("/uploads".length)}`;
       return applySecurityHeaders(NextResponse.rewrite(target, { request: { headers } }));
     }
-    const response = applySecurityHeaders(NextResponse.next({ request: { headers } }));
-    const refreshedToken = await signSlidingSessionToken({ userId, companyId, role, sessionVersion }, secret);
-    response.cookies.set(SESSION_COOKIE_NAME, refreshedToken, {
-      httpOnly: true,
-      maxAge: SESSION_MAX_AGE_SECONDS,
-      path: "/",
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-    });
-    return response;
+    return applySecurityHeaders(NextResponse.next({ request: { headers } }));
   } catch {
     return unauthorized("登录已失效，请重新登录");
   }

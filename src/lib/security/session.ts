@@ -2,7 +2,7 @@ import jwt from "jsonwebtoken";
 import type { NextRequest, NextResponse } from "next/server";
 
 export const SESSION_COOKIE_NAME = "zxgj_session";
-export const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
+export const SESSION_MAX_AGE_SECONDS = 4 * 60 * 60;
 
 export type SessionClaims = {
   userId: string;

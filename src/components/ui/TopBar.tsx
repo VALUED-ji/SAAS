@@ -18,7 +18,7 @@ const pageTitles: Record<string, { title: string; subtitle: string }> = {
   "/roles": { title: "角色管理", subtitle: "配置员工角色和权限范围" },
   "/branch-settings": { title: "分公司设置", subtitle: "维护各分公司的业务规则和功能开关" },
   "/finance": { title: "财务中心", subtitle: "追踪营收、成本与利润表现" },
-  "/quota": { title: "定额管理", subtitle: "维护定额库、定额模板和造价基础数据" },
+  "/quota": { title: "定额管理", subtitle: "维护定额库、定额模板、个性化模板和造价基础数据" },
   "/organization": { title: "组织管理", subtitle: "维护组织架构和门店关系" },
 };
 

@@ -25,6 +25,7 @@ import { getAuthContext, hasPermission } from "@/lib/security/authorization";
 import { signQuotationShareToken, verifyQuotationShareToken } from "@/lib/security/quotationShare";
 import { getPublicAppOrigin } from "@/lib/security/requestOrigin";
 import { ensureQuotationSchema } from "@/lib/quotationSchema";
+import { createQuotationShareShortUrl } from "@/lib/quotationShareShortLinks";
 
 type ExportItem = {
   id?: string;
@@ -85,6 +86,22 @@ const EXPORT_SECTION_FILL = "F8FBFF";
 const EXPORT_TOTAL_FILL = "EDF4FF";
 const builtInDirectCategories = ["base", "main_material", "custom_cabinet"];
 const baseExportColumnKeys: BaseExportColumnKey[] = ["materialUnit", "materialTotal", "laborUnit", "laborTotal", "subtotal", "description"];
+const baseColumnShortCodes: Record<BaseExportColumnKey, string> = {
+  materialUnit: "mu",
+  materialTotal: "mt",
+  laborUnit: "lu",
+  laborTotal: "lt",
+  subtotal: "st",
+  description: "ds",
+};
+const exportScopeShortCodes: Record<QuotationExportScope, string> = {
+  all: "a",
+  all_without_cover: "n",
+  base: "b",
+  main_material: "m",
+  custom_cabinet: "c",
+  fees: "f",
+};
 const defaultBaseExportColumnOptions: BaseExportColumnOptions = {
   materialUnit: true,
   materialTotal: true,
@@ -295,8 +312,13 @@ function cleanQuotationExportTitle(value?: string | null) {
     .trim();
 }
 
+function getExportCustomerName(value?: string | null) {
+  const name = String(value || "").trim();
+  return /^(未命名客户|未命名)$/u.test(name) ? "" : name;
+}
+
 function buildExportTitle(quotation: any) {
-  const customerName = String(quotation?.customer_name || "").trim();
+  const customerName = getExportCustomerName(quotation?.customer_name);
   const community = getExportCommunityText(quotation);
   const room = getQuotationRoomNumber(quotation);
   const projectName = String(quotation?.project_name || "").trim();
@@ -313,6 +335,13 @@ function formatChineseDate(value: Date) {
 function getCurrentYearLastDayText() {
   const now = new Date();
   return formatChineseDate(new Date(now.getFullYear(), 11, 31));
+}
+
+function getQuotationValidityText(value?: string | null) {
+  const normalized = String(value || "").trim();
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return getCurrentYearLastDayText();
+  return `${Number(match[1])}年${Number(match[2])}月${Number(match[3])}日`;
 }
 
 function getPublicImageFile(imageUrl?: string | null) {
@@ -358,12 +387,28 @@ function parseBaseExportColumns(value: string | null, scope: QuotationExportScop
   return Object.fromEntries(baseExportColumnKeys.map((key) => [key, selected.has(key)])) as BaseExportColumnOptions;
 }
 
+function supportsBaseColumnConfig(scope: QuotationExportScope) {
+  return scope === "all" || scope === "all_without_cover" || scope === "base";
+}
+
+function buildConfiguredShareUrl(req: NextRequest, shareToken: string, scope: QuotationExportScope, baseColumns: BaseExportColumnOptions, includeBudgetCompilation: boolean, outputMode: "list" | "composition", quotationValidUntil?: string) {
+  const shareUrl = new URL(`${getPublicAppOrigin(req)}/q/${encodeURIComponent(shareToken)}`);
+  shareUrl.searchParams.set("s", exportScopeShortCodes[scope]);
+  if (outputMode === "composition") shareUrl.searchParams.set("m", "c");
+  if (supportsBaseColumnConfig(scope)) {
+    shareUrl.searchParams.set("bc", baseExportColumnKeys.filter((key) => baseColumns[key]).map((key) => baseColumnShortCodes[key]).join("."));
+  }
+  if (!includeBudgetCompilation) shareUrl.searchParams.set("ib", "0");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(quotationValidUntil || ""))) shareUrl.searchParams.set("vu", String(quotationValidUntil));
+  return shareUrl.toString();
+}
+
 function getExportScopeLabel(scope: QuotationExportScope) {
   const labels: Record<QuotationExportScope, string> = {
     all: "全部明细-带封面",
     all_without_cover: "全部明细-不带封面",
     base: "基装明细",
-    main_material: "主材明细",
+    main_material: "产品明细",
     custom_cabinet: "定制柜明细",
     fees: "综合费用和总费用",
   };
@@ -727,10 +772,11 @@ function shouldShowAutoOtherFeeRule(item: ExportItem) {
 
 function getOtherFeeRuleDisplay(item: ExportItem, total: number, context?: FeeFormulaContext) {
   const remark = String(item.remark || "").trim();
+  if (remark) return remark;
   if (!shouldShowAutoOtherFeeRule(item)) return remark;
 
   const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context);
-  return remark ? `${remark}；${rule}` : rule;
+  return rule;
 }
 
 function itemText(value?: string | number | null) {
@@ -753,7 +799,7 @@ function isQuotaCodeOnly(value?: string | null) {
 function getBaseRowDescription(item: ExportItem) {
   const spec = stripQuotaCodeText(item.spec);
   const remark = isQuotaCodeOnly(item.remark) ? "" : stripQuotaCodeText(item.remark);
-  return uniqueValues([spec, remark]).join("；");
+  return uniqueValues([spec, remark]).join("\n");
 }
 
 function getWrappedRowHeight(value: unknown, charsPerLine: number, minHeight = 28, maxHeight = 96) {
@@ -901,7 +947,7 @@ function addQuotationHeader(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet
   sheet.getCell(2, 11).value = "扫码查看报价单";
 
   for (let rowNumber = 1; rowNumber <= 3; rowNumber += 1) {
-    sheet.getRow(rowNumber).height = rowNumber === 1 ? 36 : 32;
+    sheet.getRow(rowNumber).height = rowNumber === 1 ? 36 : 42;
     for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
       const cell = sheet.getCell(rowNumber, col);
       cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF" } };
@@ -940,8 +986,8 @@ function addQuotationHeader(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet
       extension: "png",
     });
     sheet.addImage(imageId, {
-      tl: { col: 11.18, row: 1.02 },
-      ext: { width: 50, height: 50 },
+      tl: { col: 11.08, row: 1.05 },
+      ext: { width: 68, height: 68 },
       editAs: "oneCell",
     });
   }
@@ -1682,7 +1728,7 @@ function addBudgetCompilationSheet(workbook: ExcelJS.Workbook, quotation: any, c
   sheet.pageSetup.printArea = `A1:L${lastRow}`;
 }
 
-function addCoverSheet(workbook: ExcelJS.Workbook, quotation: any, branchSettings: any) {
+function addCoverSheet(workbook: ExcelJS.Workbook, quotation: any, branchSettings: any, quotationValidUntil?: string) {
   const sheet = workbook.addWorksheet("封面", {
     pageSetup: {
       paperSize: 9,
@@ -1707,11 +1753,11 @@ function addCoverSheet(workbook: ExcelJS.Workbook, quotation: any, branchSetting
   ).trim();
   const coverCompanyName = legalCompanyName || (brandShortName ? `${brandShortName}工程有限公司` : quotation.company_name || "装修公司");
   const coverFields = [
-    ["客户姓名", quotation.customer_name || ""],
+    ["客户姓名", getExportCustomerName(quotation.customer_name) || "-"],
     ["楼盘小区", getExportProjectAddress(quotation)],
     ["联系电话", maskExportPhone(quotation.customer_phone)],
-    ["报价人", quotation.creator_name || ""],
-    ["设计师", quotation.designer_name || ""],
+    ["报价人", String(quotation.creator_name || "").trim() || "-"],
+    ["设计师", String(quotation.designer_name || "").trim() || "-"],
   ];
 
   for (let rowNumber = 1; rowNumber <= 44; rowNumber += 1) {
@@ -1754,7 +1800,7 @@ function addCoverSheet(workbook: ExcelJS.Workbook, quotation: any, branchSetting
   sheet.getRow(9).height = 34;
 
   sheet.mergeCells(12, 2, 12, 9);
-  sheet.getCell(12, 2).value = `报价执行有效期： ${getCurrentYearLastDayText()}`;
+  sheet.getCell(12, 2).value = `报价执行有效期： ${getQuotationValidityText(quotationValidUntil)}`;
   sheet.getCell(12, 2).font = { name: EXPORT_FONT_NAME, size: 13, color: { argb: "111111" } };
   sheet.getCell(12, 2).alignment = { vertical: "middle", horizontal: "center", wrapText: false };
   sheet.getRow(12).height = 28;
@@ -1834,6 +1880,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   const exportScope = parseExportScope(req.nextUrl.searchParams.get("scope"));
   const baseExportColumns = parseBaseExportColumns(req.nextUrl.searchParams.get("baseColumns"), exportScope);
   const includeBudgetCompilation = req.nextUrl.searchParams.get("includeBudgetCompilation") !== "0";
+  const quotationValidUntil = req.nextUrl.searchParams.get("validUntil") || req.nextUrl.searchParams.get("vu") || "";
   const shareClaims = verifyQuotationShareToken(req.nextUrl.searchParams.get("share") || "", params.id);
   const auth = getAuthContext(req);
   if (shareClaims && !auth) return NextResponse.json({ message: "分享报价单仅支持查看，不能导出" }, { status: 403 });
@@ -1928,14 +1975,15 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   workbook.modified = new Date();
   const exportTitle = buildExportTitle(quotation);
   const shareToken = signQuotationShareToken(params.id, companyId, null);
-  const shareUrl = `${getPublicAppOrigin(req)}/q/${encodeURIComponent(shareToken)}`;
-  const qrDataUrl = await QRCode.toDataURL(shareUrl, {
+  const shareUrl = buildConfiguredShareUrl(req, shareToken, exportScope, baseExportColumns, includeBudgetCompilation, outputMode, quotationValidUntil);
+  const qrTargetUrl = createQuotationShareShortUrl(req, db, shareUrl) || shareUrl;
+  const qrDataUrl = await QRCode.toDataURL(qrTargetUrl, {
     errorCorrectionLevel: "L",
-    margin: 2,
-    width: 180,
+    margin: 4,
+    width: 360,
   });
   const shouldAddCoverSheet = outputMode === "list" && exportScope === "all";
-  if (shouldAddCoverSheet) addCoverSheet(workbook, quotation, branchSettings);
+  if (shouldAddCoverSheet) addCoverSheet(workbook, quotation, branchSettings, quotationValidUntil);
   const sheet = workbook.addWorksheet(safeSheetName(shouldAddCoverSheet ? "报价明细" : exportTitle), {
     pageSetup: {
       paperSize: 9,
@@ -2012,7 +2060,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   });
 
   const buffer = await workbook.xlsx.writeBuffer();
-  const customerName = cleanFileNamePart(quotation.customer_name, "客户") || "客户";
+  const customerName = cleanFileNamePart(getExportCustomerName(quotation.customer_name), "客户") || "客户";
   const projectName = cleanFileNamePart(
     quotation.project_name || quotation.customer_address || quotation.project_address || quotation.title,
     "报价单",

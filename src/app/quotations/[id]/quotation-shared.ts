@@ -29,6 +29,7 @@ export type QuotationItem = {
   cost_source?: string | null;
   quota_source_id?: string | null;
   quota_source_type?: string | null;
+  quota_source_synced_at?: string | null;
   profit_margin?: number;
   row_color?: string | null;
   fee_calc_method?: FeeCalcMethod;
