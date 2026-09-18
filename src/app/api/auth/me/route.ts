@@ -1,17 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { getRequestSession, setSessionCookie, signSessionToken } from "@/lib/security/session";
+import { getEffectiveRolePermissions } from "@/lib/rolePermissionOverrides";
 import { getCompanyShortNameForOrgUnit, getSidebarBrandLogoUrlForOrgUnit, getSidebarBrandNameForOrgUnit, getSidebarBrandSubtitleForOrgUnit } from "@/lib/branchSettingsLookup";
 import { ensureQuotationAccessColumns, parseQuotationAccessOrgUnitIds } from "@/lib/quotationOrgAccess";
-
-function parsePermissions(value: unknown) {
-  try {
-    const parsed = JSON.parse(String(value || "[]"));
-    return Array.isArray(parsed) ? parsed.map((item) => String(item)) : [];
-  } catch {
-    return [];
-  }
-}
 
 export async function GET(req: NextRequest) {
   const decoded = getRequestSession(req);
@@ -35,12 +27,12 @@ export async function GET(req: NextRequest) {
     if (Number(user.session_version || 0) !== decoded.sessionVersion) {
       return NextResponse.json({ message: "登录已失效，请重新登录" }, { status: 401 });
     }
-    const role = db.prepare(`
-      SELECT permissions
-      FROM roles
-      WHERE company_id = ? AND code = ? AND deleted_at IS NULL AND COALESCE(is_active, 1) = 1
-      LIMIT 1
-    `).get(user.company_id, user.role) as any;
+    const effectiveRole = getEffectiveRolePermissions(
+      db,
+      String(user.company_id),
+      String(user.role || ""),
+      user.org_unit_id ? String(user.org_unit_id) : null,
+    );
     const companyShortName = getCompanyShortNameForOrgUnit(db, user.org_unit_id, user.company_id);
     const sidebarBrandName = getSidebarBrandNameForOrgUnit(db, user.org_unit_id, user.company_id);
     const sidebarBrandLogoUrl = getSidebarBrandLogoUrlForOrgUnit(db, user.org_unit_id, user.company_id);
@@ -62,7 +54,7 @@ export async function GET(req: NextRequest) {
       phone: user.phone,
       avatar: user.avatar,
       role: user.role,
-      permissions: parsePermissions(role?.permissions),
+      permissions: effectiveRole?.permissions || [],
       org_unit_id: user.org_unit_id,
       quotation_access_org_unit_ids: parseQuotationAccessOrgUnitIds(user.quotation_access_org_unit_ids),
       companyName: company?.name || "",

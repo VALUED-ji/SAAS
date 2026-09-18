@@ -200,21 +200,9 @@ function getFinanceActor(db: ReturnType<typeof getDb>, request: NextRequest) {
   `).get(auth.userId, auth.companyId) as FinanceActor | undefined;
   if (!user) return { error: "当前账号不可用", status: 401 as const };
 
-  const role = db.prepare(`
-    SELECT permissions
-    FROM roles
-    WHERE company_id = ? AND code = ? AND deleted_at IS NULL AND COALESCE(is_active, 1) = 1
-    LIMIT 1
-  `).get(user.companyId, user.role) as { permissions?: string | null } | undefined;
-  let permissions: string[] = [];
-  try {
-    const parsed = JSON.parse(String(role?.permissions || "[]"));
-    permissions = Array.isArray(parsed) ? parsed.map((item) => String(item)) : [];
-  } catch {
-    permissions = [];
-  }
-
-  const hasFinanceAccess = ["OWNER", "ADMIN", "FINANCE"].includes(String(user.role || "").toUpperCase()) || permissions.includes("finance.view");
+  const hasFinanceAccess = auth.isAdmin
+    || ["FINANCE"].includes(String(user.role || "").toUpperCase())
+    || auth.permissions.includes("finance.view");
   if (!hasFinanceAccess) return { error: "没有业主收款权限", status: 403 as const };
   return { actor: user };
 }

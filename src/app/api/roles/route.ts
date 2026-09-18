@@ -1,33 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ensureDefaultRoles, getDb } from "@/lib/db";
+import { cleanRolePermissions } from "@/lib/rolePermissions";
 import { canManageRoles, getAuthContext } from "@/lib/security/authorization";
 
-const permissionCatalog = new Set([
-  "dashboard.view",
-  "customers.view",
-  "customers.create",
-  "customers.edit",
-  "customers.import_export",
-  "customers.assign",
-  "team.view",
-  "team.manage",
-  "organization.manage",
-  "roles.manage",
-  "settings.manage",
-  "quotations.manage",
-  "materials.manage",
-  "finance.view",
-  "logs.view",
-]);
-
 const dataScopes = new Set(["self", "team", "dept", "store", "company", "region", "group"]);
-
-function cleanPermissions(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return Array.from(new Set(value.map((item) => String(item)).filter((item) => (
-    permissionCatalog.has(item) || /^menu\.[a-z0-9_]+$/.test(item)
-  ))));
-}
 
 function cleanDataScope(value: unknown): string {
   const scope = String(value || "self");
@@ -66,7 +42,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const name = String(body.name || "").trim();
     const description = String(body.description || "").trim();
-    const permissions = cleanPermissions(body.permissions);
+    const permissions = cleanRolePermissions(body.permissions);
     const dataScope = cleanDataScope(body.data_scope);
     if (!name) return NextResponse.json({ message: "角色名称为必填项" }, { status: 400 });
 
@@ -104,7 +80,7 @@ export async function PATCH(req: NextRequest) {
     const id = String(body.id || "").trim();
     const name = String(body.name || "").trim();
     const description = String(body.description || "").trim();
-    const permissions = cleanPermissions(body.permissions);
+    const permissions = cleanRolePermissions(body.permissions);
     const dataScope = cleanDataScope(body.data_scope);
     const isActive = body.is_active === false || body.is_active === 0 || body.is_active === "0" ? 0 : 1;
     if (!id) return NextResponse.json({ message: "缺少角色 ID" }, { status: 400 });

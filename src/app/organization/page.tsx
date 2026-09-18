@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, type DragEvent } from "react";
 import {
   Building2, Globe, Building, Store, Layers, Users,
   ChevronRight, ChevronDown, Plus, Search, X, Trash2, Loader2, AlertTriangle, Power,
@@ -36,6 +36,7 @@ import {
   getOrgPath,
   isOrgActive,
 } from "./organization-components";
+import { canReorderOrgUnits, getOrgReorderableIds, getOrgSiblingKey, reorderOrgUnits } from "./organization-order";
 
 function EnhancedOrgPage() {
   const [units, setUnits] = useState<OrgUnit[]>([]);
@@ -53,12 +54,57 @@ function EnhancedOrgPage() {
   const [formManagerIds, setFormManagerIds] = useState<string[]>([]);
   const [formError, setFormError] = useState("");
   const [actionNotice, setActionNotice] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [draggedId, setDraggedId] = useState("");
+  const [dropTarget, setDropTarget] = useState<{ id: string; position: "before" | "after" } | null>(null);
+  const [moveFeedback, setMoveFeedback] = useState<{ id: string; token: number } | null>(null);
+  const previousRowPositionsRef = useRef(new Map<string, number>());
 
   useEffect(() => {
     if (!actionNotice) return;
     const timer = window.setTimeout(() => setActionNotice(null), 4000);
     return () => window.clearTimeout(timer);
   }, [actionNotice]);
+
+  useEffect(() => {
+    if (!moveFeedback) return;
+    const timer = window.setTimeout(() => {
+      setMoveFeedback((current) => (current?.token === moveFeedback.token ? null : current));
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [moveFeedback]);
+
+  const captureRowPositions = () => {
+    const positions = new Map<string, number>();
+    document.querySelectorAll<HTMLElement>("[data-org-row-id]").forEach((row) => {
+      const id = row.dataset.orgRowId;
+      if (id) positions.set(id, row.getBoundingClientRect().top);
+    });
+    previousRowPositionsRef.current = positions;
+  };
+
+  useLayoutEffect(() => {
+    const previousPositions = previousRowPositionsRef.current;
+    if (previousPositions.size === 0) return;
+    previousRowPositionsRef.current = new Map();
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const frame = window.requestAnimationFrame(() => {
+      document.querySelectorAll<HTMLElement>("[data-org-row-id]").forEach((row) => {
+        const id = row.dataset.orgRowId;
+        const previousTop = id ? previousPositions.get(id) : undefined;
+        if (previousTop === undefined) return;
+        const deltaY = previousTop - row.getBoundingClientRect().top;
+        if (Math.abs(deltaY) < 0.5) return;
+        row.animate(
+          [
+            { transform: `translateY(${deltaY}px)` },
+            { transform: "translateY(0)" },
+          ],
+          { duration: 280, easing: "cubic-bezier(.2,.8,.2,1)" },
+        );
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [units]);
 
   const fetchUnits = useCallback(async () => {
     try {
@@ -137,6 +183,91 @@ function EnhancedOrgPage() {
   const selectedPath = selectedNode ? getOrgPath(units, selectedNode.id) : "";
   const selectedDescendantCount = selectedNode ? getDescendantCount(units, selectedNode.id) : 0;
   const selectedDirectChildren = selectedNode ? units.filter((unit) => unit.parent_id === selectedNode.id).length : 0;
+  const reorderEnabled = !searchQuery.trim() && typeFilter === "all";
+  const reorderableIds = useMemo(() => getOrgReorderableIds(units), [units]);
+
+  const canReorderNode = useCallback((sourceId: string, targetId: string) => (
+    reorderEnabled && canReorderOrgUnits(units, sourceId, targetId)
+  ), [reorderEnabled, units]);
+
+  const handleDragStartNode = (event: DragEvent<HTMLSpanElement>, id: string) => {
+    event.stopPropagation();
+    if (!reorderEnabled || !reorderableIds.has(id)) {
+      event.preventDefault();
+      return;
+    }
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", id);
+    const row = event.currentTarget.closest(".org-tree-node")?.querySelector(".org-tree-row");
+    if (row) event.dataTransfer.setDragImage(row, 28, 28);
+    setDraggedId(id);
+    setDropTarget(null);
+  };
+
+  const handleDragOverNode = (event: DragEvent<HTMLDivElement>, targetId: string) => {
+    if (!canReorderNode(draggedId, targetId)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+    setDropTarget((current) => (
+      current?.id === targetId && current.position === position ? current : { id: targetId, position }
+    ));
+  };
+
+  const handleDragLeaveNode = (id: string) => {
+    setDropTarget((current) => (current?.id === id ? null : current));
+  };
+
+  const handleReorderOrganizations = async (
+    sourceId: string,
+    targetId: string,
+    position: "before" | "after",
+  ) => {
+    const nextUnits = reorderOrgUnits(units, sourceId, targetId, position);
+    if (nextUnits === units) return;
+    const source = units.find((unit) => unit.id === sourceId);
+    if (!source) return;
+    const siblingKey = getOrgSiblingKey(source);
+    const orderedIds = nextUnits
+      .filter((unit) => getOrgSiblingKey(unit) === siblingKey)
+      .map((unit) => unit.id);
+    const previousUnits = units;
+    captureRowPositions();
+    setUnits(nextUnits);
+    try {
+      const response = await fetch("/api/org", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ordered_ids: orderedIds }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message || "排序保存失败");
+      }
+      setMoveFeedback({ id: sourceId, token: Date.now() });
+    } catch (error: any) {
+      captureRowPositions();
+      setUnits(previousUnits);
+      setActionNotice({ type: "error", text: error?.message || "排序保存失败，请稍后重试" });
+    }
+  };
+
+  const handleDropNode = (event: DragEvent<HTMLDivElement>, targetId: string) => {
+    if (!canReorderNode(draggedId, targetId)) return;
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+    const sourceId = draggedId;
+    setDraggedId("");
+    setDropTarget(null);
+    void handleReorderOrganizations(sourceId, targetId, position);
+  };
+
+  const handleDragEnd = () => {
+    setDraggedId("");
+    setDropTarget(null);
+  };
 
   const closeModal = () => {
     setModal({ open: false });
@@ -387,6 +518,17 @@ function EnhancedOrgPage() {
                   onAdd={onAdd}
                   onEdit={onEdit}
                   onDelete={openDeleteConfirm}
+                  canReorder={reorderEnabled}
+                  reorderableIds={reorderableIds}
+                  draggedId={draggedId}
+                  dropTarget={dropTarget}
+                  moveFeedbackId={moveFeedback?.id || ""}
+                  moveFeedbackToken={moveFeedback?.token || 0}
+                  onDragStartNode={handleDragStartNode}
+                  onDragOverNode={handleDragOverNode}
+                  onDragLeaveNode={handleDragLeaveNode}
+                  onDropNode={handleDropNode}
+                  onDragEnd={handleDragEnd}
                 />
               ))}
             </div>

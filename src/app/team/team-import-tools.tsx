@@ -15,7 +15,25 @@ import {
   isOrgActive,
   orgTypeLabels,
 } from "./team-shared";
-export function OrgUnitPicker({ units, value, onChange }: { units: OrgUnit[]; value: string; onChange: (value: string) => void }) {
+export function OrgUnitPicker({
+  units,
+  value,
+  onChange,
+  allowAll = false,
+  title = "选择所属组织",
+  placeholder = "请选择所属组织",
+  allLabel = "全部组织",
+  triggerClassName = "",
+}: {
+  units: OrgUnit[];
+  value: string;
+  onChange: (value: string) => void;
+  allowAll?: boolean;
+  title?: string;
+  placeholder?: string;
+  allLabel?: string;
+  triggerClassName?: string;
+}) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [candidateId, setCandidateId] = useState(value);
@@ -72,7 +90,12 @@ export function OrgUnitPicker({ units, value, onChange }: { units: OrgUnit[]; va
   };
 
   const confirmSelection = () => {
-    if (!candidateId) return;
+    if (!candidateId) {
+      if (!allowAll) return;
+      onChange("");
+      closePicker();
+      return;
+    }
     onChange(candidateId);
     closePicker();
   };
@@ -90,7 +113,7 @@ export function OrgUnitPicker({ units, value, onChange }: { units: OrgUnit[]; va
         onClick={() => setOpen(true)}
         aria-expanded={open}
         aria-haspopup="dialog"
-        className={`org-unit-picker-trigger flex h-10 min-h-10 w-full items-center justify-between gap-3 rounded-lg border bg-white px-3 py-0 text-left transition-colors ${
+        className={`org-unit-picker-trigger flex h-10 min-h-10 w-full items-center justify-between gap-3 rounded-lg border bg-white px-3 py-0 text-left transition-colors ${triggerClassName} ${
           open ? "border-primary-400 ring-4 ring-primary-100/80" : "border-surface-200 hover:border-surface-300"
         }`}
       >
@@ -101,7 +124,9 @@ export function OrgUnitPicker({ units, value, onChange }: { units: OrgUnit[]; va
               {!isOrgActive(selected) && <span className="shrink-0 rounded bg-amber-50 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 ring-1 ring-amber-100">已停用</span>}
             </span>
           ) : (
-            <span className="block truncate text-sm font-medium text-surface-400">请选择所属组织</span>
+            <span className={`block truncate text-sm font-medium ${allowAll ? "text-surface-900" : "text-surface-400"}`}>
+              {allowAll ? allLabel : placeholder}
+            </span>
           )}
         </span>
         <ChevronRight className="h-4 w-4 shrink-0 text-surface-400" />
@@ -118,7 +143,7 @@ export function OrgUnitPicker({ units, value, onChange }: { units: OrgUnit[]; va
           <div className="team-org-picker-dialog relative z-10 flex w-full max-w-[680px] flex-col overflow-hidden bg-white" role="dialog" aria-modal="true" aria-labelledby="org-picker-dialog-title">
             <div className="team-org-picker-dialog-header flex shrink-0 items-start justify-between gap-4 border-b px-5 py-4 sm:px-6">
               <div>
-                <h3 id="org-picker-dialog-title" className="text-base font-semibold text-[#111827]">选择所属组织</h3>
+                <h3 id="org-picker-dialog-title" className="text-base font-semibold text-[#111827]">{title}</h3>
                 <p className="mt-1 text-sm text-[#667085]">逐级进入组织，或直接搜索名称和路径</p>
               </div>
               <button type="button" onClick={closePicker} className="team-org-picker-close grid h-9 w-9 shrink-0 place-items-center text-[#667085]" aria-label="关闭组织选择">
@@ -160,6 +185,31 @@ export function OrgUnitPicker({ units, value, onChange }: { units: OrgUnit[]; va
               </div>
 
               <div className="team-org-picker-list mt-1 overflow-y-auto" role="listbox">
+                {!searching && allowAll && currentParentId === null && (
+                  <div
+                    className="team-org-picker-row flex items-center gap-2 border-b"
+                    data-selected={!candidateId ? "true" : undefined}
+                  >
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={!candidateId}
+                      onClick={() => setCandidateId("")}
+                      className="flex min-w-0 flex-1 items-center gap-3 px-3 py-3 text-left"
+                    >
+                      <span className="team-org-picker-icon grid h-9 w-9 shrink-0 place-items-center rounded-[8px] text-[#667085]">
+                        <Building2 className="h-4 w-4" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className="truncate text-sm font-semibold text-[#344054]">{allLabel}</span>
+                          <span className="team-org-picker-type shrink-0 px-1.5 py-0.5 text-[11px] font-medium text-[#667085]">不过滤</span>
+                        </span>
+                      </span>
+                      {!candidateId && <Check className="h-4 w-4 shrink-0 text-[#407AFF]" />}
+                    </button>
+                  </div>
+                )}
                 {(searching ? filteredOptions : currentOptions).length > 0 ? (searching ? filteredOptions : currentOptions).map((option) => {
                   const active = option.id === candidateId;
                   const childCount = (childrenByParent.get(option.id) || []).length;
@@ -204,11 +254,13 @@ export function OrgUnitPicker({ units, value, onChange }: { units: OrgUnit[]; va
             <div className="team-org-picker-dialog-footer flex shrink-0 flex-col gap-3 border-t px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
               <div className="min-w-0">
                 <p className="text-xs font-medium text-[#667085]">当前选择</p>
-                <p className="mt-0.5 truncate text-sm font-semibold text-[#344054]" title={candidate?.path || ""}>{candidate?.path || "请选择组织"}</p>
+                <p className="mt-0.5 truncate text-sm font-semibold text-[#344054]" title={candidate?.path || ""}>
+                  {candidate?.path || (allowAll ? allLabel : "请选择组织")}
+                </p>
               </div>
               <div className="flex shrink-0 items-center justify-end gap-2">
                 <button type="button" className="team-org-picker-secondary h-10 px-4 text-sm font-semibold" onClick={closePicker}>取消</button>
-                <button type="button" className="team-org-picker-primary h-10 px-4 text-sm font-semibold" disabled={!candidateId} onClick={confirmSelection}>确认选择</button>
+                <button type="button" className="team-org-picker-primary h-10 px-4 text-sm font-semibold" disabled={!candidateId && !allowAll} onClick={confirmSelection}>确认选择</button>
               </div>
             </div>
           </div>
@@ -377,6 +429,56 @@ export function downloadCsv(filename: string, rows: unknown[][]) {
   link.href = url;
   link.download = filename;
   link.click();
+  URL.revokeObjectURL(url);
+}
+
+export async function downloadEmployeeXlsx(filename: string, rows: unknown[][]) {
+  const ExcelJS = (await import("exceljs")).default;
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("员工信息", {
+    views: [{ state: "frozen", ySplit: 1 }],
+  });
+  sheet.addRows(rows as any[][]);
+  sheet.columns.forEach((column, index) => {
+    const maxLength = Math.max(
+      8,
+      ...rows.map((row) => String(row[index] ?? "").replace(/[^\x00-\xff]/g, "aa").length),
+    );
+    column.width = Math.min(Math.max(maxLength + 4, index === 0 ? 16 : 12), index === 0 ? 24 : 38);
+    column.numFmt = "@";
+  });
+  sheet.getRow(1).eachCell((cell) => {
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEFF4FA" } };
+    cell.font = { name: "Microsoft YaHei", size: 11, bold: true, color: { argb: "FF1F2937" } };
+    cell.alignment = { vertical: "middle", horizontal: "center" };
+  });
+  const headerCellCount = rows[0]?.length || 1;
+  sheet.eachRow({ includeEmpty: true }, (row) => {
+    row.height = row.number === 1 ? 26 : 24;
+    for (let columnNumber = 1; columnNumber <= headerCellCount; columnNumber += 1) {
+      const cell = row.getCell(columnNumber);
+      cell.border = {
+        top: { style: "thin", color: { argb: "FF000000" } },
+        left: { style: "thin", color: { argb: "FF000000" } },
+        bottom: { style: "thin", color: { argb: "FF000000" } },
+        right: { style: "thin", color: { argb: "FF000000" } },
+      };
+      cell.alignment = { vertical: "middle" };
+    }
+  });
+  sheet.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: headerCellCount },
+  };
+  const buffer = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
   URL.revokeObjectURL(url);
 }
 

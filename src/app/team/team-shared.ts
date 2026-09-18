@@ -68,3 +68,26 @@ export function buildOrgOptions(units: OrgUnit[]): OrgOption[] {
   roots.forEach((root) => walk(root, 0, []));
   return options;
 }
+
+export function collectOrgSubtreeIds(
+  units: Pick<OrgUnit, "id" | "parent_id">[],
+  rootId: string,
+) {
+  const ids = new Set<string>();
+  if (!rootId) return ids;
+  const childrenByParent = new Map<string, string[]>();
+  units.forEach((unit) => {
+    if (!unit.parent_id) return;
+    const children = childrenByParent.get(unit.parent_id) || [];
+    children.push(unit.id);
+    childrenByParent.set(unit.parent_id, children);
+  });
+  const pending = [rootId];
+  while (pending.length > 0) {
+    const id = pending.pop()!;
+    if (ids.has(id)) continue;
+    ids.add(id);
+    pending.push(...(childrenByParent.get(id) || []));
+  }
+  return ids;
+}

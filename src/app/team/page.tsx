@@ -26,6 +26,7 @@ import {
   OrgUnit,
   RoleOption,
   buildOrgOptions,
+  collectOrgSubtreeIds,
   defaultRoleOptions,
   employeeImportHeaders,
   isOrgActive,
@@ -33,7 +34,7 @@ import {
 import {
   Field,
   OrgUnitPicker,
-  downloadCsv,
+  downloadEmployeeXlsx,
   downloadEmployeeXlsxTemplate,
   mapEmployeeImportRowToPayload,
   parseCsv,
@@ -68,7 +69,9 @@ export default function TeamPage() {
   const [orgUnits, setOrgUnits] = useState<OrgUnit[]>([]);
   const [roleOptions, setRoleOptions] = useState<RoleOption[]>(defaultRoleOptions);
   const [search, setSearch] = useState("");
+  const [orgFilter, setOrgFilter] = useState("");
   const [roleFilter, setRoleFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
   const [showAddModal, setShowAddModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [editingMember, setEditingMember] = useState<TeamData | null>(null);
@@ -90,6 +93,10 @@ export default function TeamPage() {
   const orgOptions = useMemo(() => buildOrgOptions(orgUnits), [orgUnits]);
   const activeOrgOptions = useMemo(() => orgOptions.filter((option) => isOrgActive(option)), [orgOptions]);
   const orgOptionById = useMemo(() => new Map(orgOptions.map((option) => [option.id, option])), [orgOptions]);
+  const orgFilterIds = useMemo(
+    () => orgFilter ? collectOrgSubtreeIds(orgUnits, orgFilter) : new Set<string>(),
+    [orgFilter, orgUnits],
+  );
   const roleLabelMap = useMemo(() => {
     const map: Record<string, string> = { ...defaultRoleLabels };
     roleOptions.forEach((role) => {
@@ -98,7 +105,10 @@ export default function TeamPage() {
     return map;
   }, [roleOptions]);
   const filteredMembers = members.filter((member) => {
+    if (orgFilter && !orgFilterIds.has(member.org_unit_id || "")) return false;
     if (roleFilter && member.role !== roleFilter) return false;
+    if (statusFilter === "active" && member.is_active !== 1) return false;
+    if (statusFilter === "inactive" && member.is_active === 1) return false;
     const q = search.trim().toLowerCase();
     if (!q) return true;
     const orgPath = member.org_unit_id ? orgOptionById.get(member.org_unit_id)?.path : "";
@@ -106,10 +116,11 @@ export default function TeamPage() {
       .filter(Boolean)
       .some((value) => String(value).toLowerCase().includes(q));
   });
-  const memberPagination = useDataPagination(filteredMembers, [search, roleFilter].join("|"));
+  const hasEmployeeFilters = Boolean(search.trim() || orgFilter || roleFilter || statusFilter);
+  const memberPagination = useDataPagination(filteredMembers, [search, orgFilter, roleFilter, statusFilter].join("|"));
 
-  const handleExportEmployees = () => {
-    const headers = ["员工姓名", "手机号", "角色", "所属组织", "在线状态", "最近登录", "工号", "入职日期", "在职状态", "在施项目", "备注"];
+  const handleExportEmployees = async () => {
+    const headers = ["员工姓名", "手机号", "角色", "所属组织", "在线状态", "最近登录", "工号", "入职日期", "在职状态", "备注"];
     const rows = filteredMembers.map((member) => {
       const memberOrg = member.org_unit_id ? orgOptionById.get(member.org_unit_id) : null;
       return [
@@ -122,11 +133,10 @@ export default function TeamPage() {
         member.employee_no || "",
         member.hire_date ? formatDate(member.hire_date) : "",
         member.is_active ? "在职" : "停用",
-        member.project_count || 0,
         member.notes || "",
       ];
     });
-    downloadCsv(`员工导出_${new Date().toISOString().slice(0, 10)}.csv`, [headers, ...rows]);
+    await downloadEmployeeXlsx(`员工导出_${new Date().toISOString().slice(0, 10)}.xlsx`, [headers, ...rows]);
   };
 
   if (isLoading) {
@@ -154,9 +164,33 @@ export default function TeamPage() {
             </div>
           </div>
           <div className="org-access-toolbar-actions flex flex-wrap items-center gap-2.5">
-            <SystemSelect value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)} className="input-field team-role-filter min-h-10 w-36 py-2" menuClassName="org-access-select-menu" optionClassName="org-access-select-option">
+            <div className="w-56">
+              <OrgUnitPicker
+                units={orgUnits}
+                value={orgFilter}
+                onChange={setOrgFilter}
+                allowAll
+                title="筛选组织"
+                placeholder="全部组织"
+                allLabel="全部组织"
+                triggerClassName="team-filter-control"
+              />
+            </div>
+            <SystemSelect value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)} className="input-field team-filter-control team-role-filter h-10 min-h-10 w-36 py-0" menuClassName="org-access-select-menu" optionClassName="org-access-select-option">
               <option value="">全部角色</option>
               {roleOptions.map((role) => <option key={role.value} value={role.value}>{role.label}</option>)}
+            </SystemSelect>
+            <SystemSelect
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+              className="input-field team-filter-control team-status-filter h-10 min-h-10 w-32 py-0"
+              menuClassName="org-access-select-menu"
+              optionClassName="org-access-select-option"
+              aria-label="按账号状态筛选"
+            >
+              <option value="">全部状态</option>
+              <option value="active">在职</option>
+              <option value="inactive">停用</option>
             </SystemSelect>
             <button className="btn-secondary" onClick={() => setShowImportModal(true)}>
               <Upload className="h-4 w-4" />
@@ -175,8 +209,9 @@ export default function TeamPage() {
       </section>
 
       <section className="org-access-panel org-access-list-panel team-list-panel flex min-h-0 flex-1 flex-col overflow-hidden border border-surface-200/90 bg-white/95">
-        <ThinScrollArea className="min-h-0 flex-1" scrollClassName="h-full overflow-auto">
-          <table className="team-list-table w-full min-w-[1500px] table-fixed text-left text-[13px]">
+        <div className="relative min-h-0 flex-1">
+          <ThinScrollArea className="h-full" scrollClassName="h-full overflow-auto">
+            <table className="team-list-table w-full min-w-[1500px] table-fixed text-left text-[13px]">
             <colgroup>
               <col className="w-[210px]" />
               <col className="w-[120px]" />
@@ -187,7 +222,6 @@ export default function TeamPage() {
               <col className="w-[110px]" />
               <col className="w-[90px]" />
               <col className="w-[90px]" />
-              <col className="w-[140px]" />
               <col className="w-[90px]" />
             </colgroup>
             <thead className="sticky top-0 z-10 bg-surface-50/85">
@@ -200,7 +234,6 @@ export default function TeamPage() {
                 <th className="pr-4">工号</th>
                 <th className="pr-4">入职日期</th>
                 <th className="pr-4">状态</th>
-                <th className="pr-4">在施项目</th>
                 <th className="pr-4">备注</th>
                 <th className="px-3 text-center">操作</th>
               </tr>
@@ -274,7 +307,6 @@ export default function TeamPage() {
                     <td className="whitespace-nowrap pr-4">
                       <StatusBadge status={member.is_active ? "active" : "vacation"} label={member.is_active ? "在职" : "停用"} />
                     </td>
-                    <td className="whitespace-nowrap pr-4 text-surface-700">{member.project_count || 0}</td>
                     <td className="truncate pr-4 text-surface-700" title={member.notes || ""}>{member.notes || <span className="text-surface-400">-</span>}</td>
                     <td className="whitespace-nowrap px-3 text-center">
                       <button
@@ -289,22 +321,39 @@ export default function TeamPage() {
                   </tr>
                 );
               })}
-              {filteredMembers.length === 0 && (
-                <tr>
-                  <td colSpan={11} className="px-5 py-16 text-center">
-                    <div className="mx-auto max-w-sm">
-                      <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-lg border border-surface-200 bg-surface-50 text-surface-400">
-                        <Users className="h-4 w-4" />
-                      </div>
-                      <p className="mt-4 text-sm font-semibold text-surface-800">暂无员工</p>
-                      <p className="mt-1 text-sm text-surface-500">新增员工后，这里会显示真实团队档案。</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
             </tbody>
           </table>
-        </ThinScrollArea>
+          </ThinScrollArea>
+          {filteredMembers.length === 0 && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-6 py-10">
+              <div className="pointer-events-auto max-w-sm text-center">
+                <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-lg border border-surface-200 bg-surface-50 text-surface-400">
+                  <Users className="h-4 w-4" />
+                </div>
+                <p className="mt-4 text-sm font-semibold text-surface-800">
+                  {hasEmployeeFilters ? "没有符合条件的员工" : "暂无员工"}
+                </p>
+                <p className="mt-1 text-sm text-surface-500">
+                  {hasEmployeeFilters ? "调整搜索或筛选条件后重试。" : "新增员工后，这里会显示真实团队档案。"}
+                </p>
+                {hasEmployeeFilters && (
+                  <button
+                    type="button"
+                    className="mt-4 text-xs font-semibold text-primary-600 hover:text-primary-700"
+                    onClick={() => {
+                      setSearch("");
+                      setOrgFilter("");
+                      setRoleFilter("");
+                      setStatusFilter("");
+                    }}
+                  >
+                    清除筛选
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
         <DataPagination
           total={filteredMembers.length}
           page={memberPagination.page}

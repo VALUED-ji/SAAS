@@ -839,7 +839,8 @@ function PrintCoverPage({
     { label: "报价人", value: quotation?.creator_name },
     { label: "设计师", value: quotation?.designer_name },
   ];
-  const brandLogoUrl = String(quotation?.branch_company_logo_url || "").trim() || "/brand/xingyi-decoration-logo.png";
+  const configuredBrandLogoUrl = String(quotation?.branch_company_logo_url || "").trim();
+  const brandLogoUrl = configuredBrandLogoUrl || "/brand/xingyi-decoration-logo-print.png";
   const brandShortName = String(quotation?.branch_company_short_name || "").trim();
   const legalCompanyName = String(quotation?.branch_company_legal_name || "").trim();
   const coverCompanyName = legalCompanyName || (brandShortName ? `${brandShortName}工程有限公司` : quotation?.company_name || "装修公司");

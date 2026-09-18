@@ -31,7 +31,20 @@ const nextConfig = {
     if (process.env.NODE_ENV === "production") {
       headers.push({ key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" });
     }
-    return [{ source: "/:path*", headers }];
+    return [
+      ...[
+        "/brand/login-palace-c-20260918.avif",
+        "/brand/login-palace-c-20260918.webp",
+        "/brand/login-palace-c-20260918.jpg",
+      ].map((source) => ({
+        source,
+        headers: [
+          ...headers,
+          { key: "Cache-Control", value: "public, max-age=31536000, immutable" },
+        ],
+      })),
+      { source: "/:path*", headers },
+    ];
   },
 };
 module.exports = nextConfig;

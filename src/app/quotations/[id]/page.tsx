@@ -41,6 +41,7 @@ import SystemSelect from "@/components/ui/SystemSelect";
 import NativeImage from "@/components/ui/NativeImage";
 import { AmapLocationPicker, type LocationPick } from "@/components/ui/AddCustomerModal";
 import { createQuotationPrintPreviewUrl, createQuotationShareUrl } from "@/lib/quotationShareClient";
+import { QUOTATION_PRESENCE_HEARTBEAT_MS } from "@/lib/quotationPresenceClient";
 import { parseProductAttributes } from "@/app/materials/library/material-editor-shared";
 import { getPersonalizedTemplateCategoryLabel, normalizePersonalizedTemplate, type PersonalizedQuotationTemplate } from "@/lib/personalizedQuotationTemplate";
 import {
@@ -1918,6 +1919,7 @@ export default function QuotationDetailPage() {
   const [customerVisibleNote, setCustomerVisibleNote] = useState("");
   const [status, setStatus] = useState("DRAFT");
   const [loading, setLoading] = useState(true);
+  const presenceSessionIdRef = useRef("");
   const [autoSaveStatus, setAutoSaveStatus] = useState<"idle" | "pending" | "saving" | "saved" | "error">("idle");
   const [autoSaveErrorMessage, setAutoSaveErrorMessage] = useState("");
   const [activeCategory, setActiveCategory] = useState<QuotationItem["category"]>("base");
@@ -2167,6 +2169,48 @@ export default function QuotationDetailPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (loading || isReadonly) return;
+    const presenceSessionId = presenceSessionIdRef.current || `quote_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    presenceSessionIdRef.current = presenceSessionId;
+    let stopped = false;
+    let active = document.visibilityState !== "hidden";
+    const endpoint = `/api/quotations/${encodeURIComponent(quotationId)}/presence`;
+    const sendPresence = (action: "heartbeat" | "leave") => {
+      if (action === "heartbeat" && (!active || stopped)) return;
+      const request = fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ action, session_id: presenceSessionId }),
+        keepalive: action === "leave",
+      });
+      if (action === "heartbeat") request.catch(() => undefined);
+    };
+    const handleVisibilityChange = () => {
+      active = document.visibilityState !== "hidden";
+      if (active && !stopped) {
+        sendPresence("heartbeat");
+      } else {
+        sendPresence("leave");
+      }
+    };
+    const handlePageHide = () => {
+      stopped = true;
+      sendPresence("leave");
+    };
+    sendPresence("heartbeat");
+    const timer = window.setInterval(() => sendPresence("heartbeat"), QUOTATION_PRESENCE_HEARTBEAT_MS);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("pagehide", handlePageHide);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("pagehide", handlePageHide);
+      sendPresence("leave");
+    };
+  }, [isReadonly, loading, quotationId]);
 
   const checkQuotaUpdates = useCallback(async () => {
     if (isReadonly) return;
@@ -5168,73 +5212,67 @@ export default function QuotationDetailPage() {
       )}
       {quotaUpdateDialogOpen && (
         <div
-          className="fixed inset-0 z-[10000] flex items-center justify-center bg-[#101828]/30 px-4 py-6 backdrop-blur-sm no-print"
+          className="quote-quota-update-overlay no-print"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) setQuotaUpdateDialogOpen(false);
           }}
         >
           <div
-            className="grid max-h-[calc(100dvh-72px)] w-full max-w-[1060px] overflow-hidden rounded-[16px] border border-[#d8e1ee] bg-white shadow-[0_24px_70px_rgba(15,23,42,0.22)] md:grid-cols-[320px_1fr] md:grid-rows-[auto_minmax(0,1fr)_auto]"
+            className="quote-quota-update-modal"
             onMouseDown={(event) => event.stopPropagation()}
             role="dialog"
             aria-modal="true"
             aria-label="基装定额更新"
           >
-            <div className="flex items-start justify-between gap-4 border-b border-[#edf1f6] bg-white px-5 py-4 md:col-span-2">
-              <div className="flex min-w-0 flex-1 items-start gap-3">
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] border border-[#d8eadf] bg-[#f3fbf6] text-[#159863]">
-                  <BookmarkPlus className="h-[18px] w-[18px]" />
+            <header className="quote-quota-update-header">
+              <div className="quote-quota-update-title-wrap">
+                <span className="quote-quota-update-title-icon">
+                  <RefreshCw className="h-[18px] w-[18px]" />
                 </span>
                 <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="text-[16px] font-semibold leading-6 text-[#182230]">基装定额有更新</div>
-                    <div className="inline-flex items-center gap-1.5 rounded-full bg-[#eefaf4] px-2.5 py-1 text-xs font-semibold text-[#027a48]">
-                      <span>{quotaUpdateNotices.length} 项待确认</span>
-                      <span className="h-1 w-1 rounded-full bg-[#75c89c]" />
-                      <span>{quotaUpdateDifferenceCount} 处差异</span>
-                    </div>
+                  <div className="quote-quota-update-title-row">
+                    <h2>基装定额有更新</h2>
+                    <span className="quote-quota-update-summary-pill">
+                      {quotaUpdateNotices.length} 项待确认 · {quotaUpdateDifferenceCount} 处差异
+                    </span>
                   </div>
-                  <p className="mt-1.5 text-xs leading-5 text-[#667085]">
-                    对比当前报价和新版定额，只覆盖名称、单位、人工单价、材料单价和施工说明。
-                  </p>
+                  <p>对比当前报价和新版定额，只同步发生变化的字段。</p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setQuotaUpdateDialogOpen(false)}
-                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[#667085] transition hover:bg-[#f3f6fa] hover:text-[#172033]"
+                className="quote-quota-update-close"
                 aria-label="关闭定额更新"
               >
                 <X className="h-4 w-4" />
               </button>
-            </div>
-            <div className="contents">
-              <div className="flex min-h-0 flex-col border-b border-[#dfe7f2] bg-white md:border-b-0 md:border-r">
-                <div className="border-b border-[#edf1f6] px-4 py-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-xs font-semibold text-[#344054]">待处理项目</span>
-                    <span className="rounded-full bg-[#f2f5f9] px-2 py-0.5 text-[11px] font-medium text-[#667085]">
-                      {filteredQuotaUpdateNotices.length}/{quotaUpdateNotices.length} 项
-                    </span>
+            </header>
+
+            <div className="quote-quota-update-body">
+              <aside className="quote-quota-update-sidebar">
+                <div className="quote-quota-update-sidebar-head">
+                  <div>
+                    <strong>待处理项目</strong>
+                    <span>{filteredQuotaUpdateNotices.length}/{quotaUpdateNotices.length} 项</span>
                   </div>
-                  <p className="mt-1 text-[11px] leading-4 text-[#8a98aa]">选择空间后，在下方逐项确认需要同步的定额。</p>
+                  <p>选择项目后查看差异并更新。</p>
                 </div>
-                <div className="relative border-b border-[#edf1f6] bg-[#fbfcfe] px-3 py-2.5">
+
+                <div className="quote-quota-update-space-filter">
                   <button
                     type="button"
                     onClick={() => setQuotaUpdateSpacePanelOpen((current) => !current)}
-                    className="flex h-9 w-full items-center justify-between gap-2 rounded-[9px] border border-[#d8e1ee] bg-white px-3 text-left transition hover:border-[#b7c5d8]"
+                    className="quote-quota-update-space-trigger"
                   >
-                    <span className="min-w-0">
-                      <span className="block truncate text-xs font-semibold text-[#344054]">{activeQuotaUpdateSpaceLabel}</span>
-                    </span>
-                    <span className="flex shrink-0 items-center gap-2">
-                      <span className="rounded-full bg-[#f2f5f9] px-2 py-0.5 text-[11px] font-medium text-[#667085]">{filteredQuotaUpdateNotices.length} 项</span>
-                      <ChevronDown className={cn("h-3.5 w-3.5 text-[#8a98aa] transition", quotaUpdateSpacePanelOpen ? "rotate-180" : "")} />
+                    <span className="truncate">{activeQuotaUpdateSpaceLabel}</span>
+                    <span>
+                      <em>{filteredQuotaUpdateNotices.length} 项</em>
+                      <ChevronDown className={cn("h-3.5 w-3.5 transition", quotaUpdateSpacePanelOpen ? "rotate-180" : "")} />
                     </span>
                   </button>
                   {quotaUpdateSpacePanelOpen ? (
-                    <div className="absolute left-3 right-3 top-[52px] z-20 max-h-[220px] overflow-y-auto rounded-[10px] border border-[#d8e1ee] bg-white p-1.5 shadow-[0_14px_34px_rgba(15,23,42,0.16)]">
+                    <div className="quote-quota-update-space-menu">
                       <button
                         type="button"
                         onClick={() => {
@@ -5242,13 +5280,10 @@ export default function QuotationDetailPage() {
                           setSelectedQuotaUpdateItemId(quotaUpdateNotices[0]?.itemId || "");
                           setQuotaUpdateSpacePanelOpen(false);
                         }}
-                        className={cn(
-                          "flex w-full items-center justify-between rounded-[8px] px-2.5 py-2 text-left text-xs transition",
-                          quotaUpdateSpaceFilter === "all" ? "bg-[#f4fbf7] font-semibold text-[#159863]" : "font-medium text-[#52647b] hover:bg-[#f7f9fc]",
-                        )}
+                        data-active={quotaUpdateSpaceFilter === "all" ? "true" : "false"}
                       >
                         <span>全部空间</span>
-                        <span className="text-[11px] text-[#98a2b3]">{quotaUpdateNotices.length}</span>
+                        <em>{quotaUpdateNotices.length}</em>
                       </button>
                       {quotaUpdateGroups.map((group) => (
                         <button
@@ -5259,160 +5294,115 @@ export default function QuotationDetailPage() {
                             setSelectedQuotaUpdateItemId(group.notices[0]?.itemId || "");
                             setQuotaUpdateSpacePanelOpen(false);
                           }}
-                          className={cn(
-                            "mt-0.5 flex w-full items-center justify-between gap-2 rounded-[8px] px-2.5 py-2 text-left text-xs transition",
-                            quotaUpdateSpaceFilter === group.space ? "bg-[#f4fbf7] font-semibold text-[#159863]" : "font-medium text-[#52647b] hover:bg-[#f7f9fc]",
-                          )}
+                          data-active={quotaUpdateSpaceFilter === group.space ? "true" : "false"}
                         >
-                          <span className="min-w-0 truncate">{group.space}</span>
-                          <span className="shrink-0 text-[11px] text-[#98a2b3]">{group.notices.length}</span>
+                          <span className="truncate">{group.space}</span>
+                          <em>{group.notices.length}</em>
                         </button>
                       ))}
                     </div>
                   ) : null}
                 </div>
-                <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
-                  <div className="space-y-1">
-                    {filteredQuotaUpdateNotices.map((notice) => {
-                      const globalIndex = quotaUpdateNotices.findIndex((item) => item.itemId === notice.itemId);
-                      const selected = activeQuotaUpdateNotice?.itemId === notice.itemId;
-                      const syncing = quotaUpdateSyncingIds.includes(notice.itemId) || quotaUpdateSyncingIds.includes("__all__");
-                      return (
-                        <button
-                          key={notice.itemId}
-                          type="button"
-                          onClick={() => setSelectedQuotaUpdateItemId(notice.itemId)}
-                          className={cn(
-                            "group grid w-full grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-2 rounded-[9px] border px-2.5 py-2 text-left transition",
-                            selected
-                              ? "border-[#a8d6bc] bg-[#f4fbf7]"
-                              : "border-transparent bg-white hover:border-[#dbe4ef] hover:bg-[#f8fafc]",
-                          )}
-                        >
-                          <span className={cn(
-                            "flex h-5 w-5 items-center justify-center rounded-full text-[11px] font-semibold",
-                            selected ? "bg-[#159863] text-white" : "bg-[#eef2f7] text-[#667085]",
-                          )}>
-                            {globalIndex + 1}
-                          </span>
-                          <span className="min-w-0">
-                            <span className="flex min-w-0 items-center gap-1.5">
-                              <span className="truncate text-xs font-semibold leading-5 text-[#172033]">{notice.itemName || notice.latestName || "未命名项目"}</span>
-                              {syncing ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[#159863]" /> : null}
-                            </span>
-                            {notice.quotaCode ? (
-                              <span className="mt-0.5 block truncate text-[11px] leading-4 text-[#7a8797]">{notice.quotaCode}</span>
-                            ) : null}
-                          </span>
-                          <span className="shrink-0 rounded-full bg-[#fff7ed] px-2 py-0.5 text-[11px] font-semibold text-[#b54708]">
-                            {notice.differences.length} 处
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
+                <div className="quote-quota-update-list">
+                  {filteredQuotaUpdateNotices.map((notice) => {
+                    const globalIndex = quotaUpdateNotices.findIndex((item) => item.itemId === notice.itemId);
+                    const selected = activeQuotaUpdateNotice?.itemId === notice.itemId;
+                    const syncing = quotaUpdateSyncingIds.includes(notice.itemId) || quotaUpdateSyncingIds.includes("__all__");
+                    return (
+                      <button
+                        key={notice.itemId}
+                        type="button"
+                        onClick={() => setSelectedQuotaUpdateItemId(notice.itemId)}
+                        className="quote-quota-update-list-item"
+                        data-active={selected ? "true" : "false"}
+                      >
+                        <span className="quote-quota-update-index">{globalIndex + 1}</span>
+                        <span className="quote-quota-update-list-copy">
+                          <strong>{notice.itemName || notice.latestName || "未命名项目"}</strong>
+                          <small>{notice.quotaCode || notice.space || "未指定空间"}</small>
+                        </span>
+                        {syncing ? <Loader2 className="h-3.5 w-3.5 animate-spin text-[#159863]" /> : null}
+                        <em>{notice.differences.length} 处差异</em>
+                      </button>
+                    );
+                  })}
                 </div>
-              </div>
-              <div className="min-h-0 overflow-y-auto p-4">
+              </aside>
+
+              <main className="quote-quota-update-detail">
                 {activeQuotaUpdateNotice ? (
-                  <div className="flex min-h-full flex-col overflow-hidden rounded-[14px] border border-[#dbe4ef] bg-white">
-                    <div className="border-b border-[#edf1f6] bg-[#fbfcfe] px-4 py-3">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex min-w-0 items-center gap-2">
-                            <span className="shrink-0 rounded-full bg-[#eefaf4] px-2 py-0.5 text-[11px] font-medium text-[#148554]">当前项目</span>
-                            <span className="truncate text-[15px] font-semibold leading-6 text-[#172033]">{activeQuotaUpdateNotice.itemName || activeQuotaUpdateNotice.latestName || "未命名项目"}</span>
-                          </div>
-                          <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11px] leading-4 text-[#667085]">
-                            {activeQuotaUpdateNotice.quotaCode ? (
-                              <span className="min-w-0 truncate">编号：{activeQuotaUpdateNotice.quotaCode}</span>
-                            ) : null}
-                            <span className="min-w-0 truncate">空间：{activeQuotaUpdateNotice.space || "未指定空间"}</span>
-                            <span className="text-[#b54708]">差异：{activeQuotaUpdateNotice.differences.length} 处待确认</span>
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setQuotaUpdateSingleConfirmId(activeQuotaUpdateNotice.itemId)}
-                          disabled={quotaUpdateSyncingIds.includes(activeQuotaUpdateNotice.itemId) || quotaUpdateSyncingIds.includes("__all__")}
-                          className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-[9px] border border-[#bdd8c9] bg-white px-3.5 text-xs font-medium text-[#137a4a] transition hover:border-[#8fc3a5] hover:bg-[#f5fbf8] disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {quotaUpdateSyncingIds.includes(activeQuotaUpdateNotice.itemId) || quotaUpdateSyncingIds.includes("__all__") ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-                          更新当前项目
-                        </button>
+                  <>
+                    <div className="quote-quota-update-detail-head">
+                      <div className="min-w-0">
+                        <span className="quote-quota-update-current-badge">当前项目</span>
+                        <h3>{activeQuotaUpdateNotice.itemName || activeQuotaUpdateNotice.latestName || "未命名项目"}</h3>
+                        <p>
+                          {activeQuotaUpdateNotice.quotaCode ? `编号：${activeQuotaUpdateNotice.quotaCode} · ` : ""}
+                          空间：{activeQuotaUpdateNotice.space || "未指定空间"} · 差异：{activeQuotaUpdateNotice.differences.length} 处待确认
+                        </p>
                       </div>
+                      <button
+                        type="button"
+                        onClick={() => setQuotaUpdateSingleConfirmId(activeQuotaUpdateNotice.itemId)}
+                        disabled={quotaUpdateSyncingIds.includes(activeQuotaUpdateNotice.itemId) || quotaUpdateSyncingIds.includes("__all__")}
+                        className="quote-quota-update-single-action"
+                      >
+                        {quotaUpdateSyncingIds.includes(activeQuotaUpdateNotice.itemId) || quotaUpdateSyncingIds.includes("__all__") ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                        更新此项
+                      </button>
                     </div>
-                    <div className="flex min-h-0 flex-1 p-4">
-                      <div className="flex min-h-full flex-1 flex-col overflow-hidden rounded-[12px] border border-[#e2e8f0]">
-                        <div className="grid grid-cols-[150px_minmax(0,1fr)_minmax(0,1fr)] border-b border-[#e2e8f0] bg-[#f8fafc] text-center text-xs font-semibold text-[#52647b]">
-                          <div className="flex items-center justify-center px-3 py-2.5">更新字段</div>
-                          <div className="flex items-center justify-center border-l border-[#e2e8f0] px-3 py-2.5">当前报价</div>
-                          <div className="flex items-center justify-center border-l border-[#e2e8f0] px-3 py-2.5">新版定额</div>
-                        </div>
-                        <div className="flex flex-1 flex-col">
-                        {activeQuotaUpdateNotice.differences.map((diff, index) => (
-                          <div
-                            key={`${activeQuotaUpdateNotice.itemId}-${diff.field}`}
-                            className={cn(
-                              "grid grid-cols-[150px_minmax(0,1fr)_minmax(0,1fr)] border-b border-[#edf1f6] last:border-b-0",
-                              index === activeQuotaUpdateNotice.differences.length - 1 ? "flex-1" : "",
-                            )}
-                          >
-                            <div className="flex items-center justify-center bg-[#fbfcfe] px-3 py-3 text-center text-xs font-semibold text-[#344054]">{diff.label}</div>
-                            <div className="min-w-0 border-l border-[#edf1f6] px-3 py-3">
-                              <div className="flex h-full items-center justify-center whitespace-pre-wrap break-words text-center text-xs leading-5 text-[#667085]">{diff.current || "-"}</div>
-                            </div>
-                            <div className="min-w-0 border-l border-[#edf1f6] bg-[#fffaf5] px-3 py-3">
-                              <div className="flex h-full items-center justify-center whitespace-pre-wrap break-words text-center text-xs font-medium leading-5 text-[#9a3412]">{diff.latest || "-"}</div>
-                            </div>
-                          </div>
-                        ))}
-                        </div>
+
+                    <div className="quote-quota-update-compare">
+                      <div className="quote-quota-update-compare-head">
+                        <div>更新字段</div>
+                        <div>当前报价</div>
+                        <div>新版定额</div>
                       </div>
+                      {activeQuotaUpdateNotice.differences.map((diff) => (
+                        <div key={`${activeQuotaUpdateNotice.itemId}-${diff.field}`} className="quote-quota-update-compare-row">
+                          <div className="quote-quota-update-compare-field">{diff.label}</div>
+                          <div className="quote-quota-update-compare-current">{diff.current || "-"}</div>
+                          <div className="quote-quota-update-compare-latest">{diff.latest || "-"}</div>
+                        </div>
+                      ))}
                     </div>
-                    <div className="mt-auto border-t border-[#edf1f6] bg-[#fbfcfe] px-4 py-3">
-                      <div className="flex items-start gap-2 text-xs font-medium leading-5 text-[#667085]">
-                        <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#159863]" />
-                        <span>更新后只覆盖差异字段，原报价中的数量、空间归属、备注和特殊项目状态会保留。</span>
-                      </div>
+
+                    <div className="quote-quota-update-note">
+                      <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#159863]" />
+                      <span>更新后只覆盖差异字段，原报价中的数量、空间归属、备注和特殊项目状态会保留。</span>
                     </div>
-                  </div>
+                  </>
                 ) : (
-                  <div className="flex h-full min-h-[360px] items-center justify-center rounded-[14px] border border-dashed border-[#cfd8e6] bg-white text-sm font-medium text-[#667085]">
-                    暂无需要更新的基装定额
-                  </div>
+                  <div className="quote-quota-update-empty">暂无需要更新的基装定额</div>
                 )}
-              </div>
+              </main>
             </div>
-            <div className="flex items-center justify-between gap-3 border-t border-[#edf1f6] bg-white px-5 py-3.5 md:col-span-2">
+
+            <footer className="quote-quota-update-footer">
               <button
                 type="button"
                 onClick={checkQuotaUpdates}
                 disabled={quotaUpdateChecking || quotaUpdateSyncingIds.length > 0}
-                className="inline-flex h-9 items-center justify-center gap-1.5 rounded-[9px] border border-[#d8e1ee] bg-white px-3 text-xs font-medium text-[#52647b] transition hover:border-[#c4cfdd] hover:bg-[#f6f8fb] disabled:cursor-not-allowed disabled:opacity-60"
+                className="quote-quota-update-recheck"
               >
                 {quotaUpdateChecking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
                 重新检查
               </button>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setQuotaUpdateDialogOpen(false)}
-                  className="inline-flex h-9 items-center justify-center rounded-[9px] border border-[#d8e1ee] bg-white px-4 text-xs font-medium text-[#52647b] transition hover:bg-[#f6f8fb]"
-                >
-                  取消
+              <div>
+                <button type="button" onClick={() => setQuotaUpdateDialogOpen(false)} className="quote-quota-update-cancel">
+                  稍后处理
                 </button>
                 <button
                   type="button"
                   onClick={() => setQuotaUpdateConfirmOpen(true)}
                   disabled={quotaUpdateNotices.length === 0 || quotaUpdateSyncingIds.length > 0}
-                  className="inline-flex h-9 min-w-[104px] items-center justify-center gap-1.5 rounded-[9px] bg-[#159863] px-4 text-xs font-semibold text-white shadow-[0_8px_18px_rgba(21,152,99,0.18)] transition hover:bg-[#0f8155] disabled:cursor-not-allowed disabled:bg-[#c9d4e2] disabled:shadow-none"
+                  className="quote-quota-update-all"
                 >
                   <Check className="h-3.5 w-3.5" />
                   全部更新
                 </button>
               </div>
-            </div>
+            </footer>
           </div>
         </div>
       )}

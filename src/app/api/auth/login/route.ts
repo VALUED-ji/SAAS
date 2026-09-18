@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { ensureUserLoginColumns, getDb } from "@/lib/db";
+import { getEffectiveRolePermissions } from "@/lib/rolePermissionOverrides";
 import { setSessionCookie, signSessionToken } from "@/lib/security/session";
 import { isSameOriginMutation } from "@/lib/security/authorization";
 import { getRequestIp } from "@/lib/security/requestIp";
@@ -15,15 +16,6 @@ type LoginAttempt = { count: number; resetAt: number };
 const globalLoginState = globalThis as typeof globalThis & { __zxgjLoginAttempts?: Map<string, LoginAttempt> };
 const loginAttempts = globalLoginState.__zxgjLoginAttempts || new Map<string, LoginAttempt>();
 globalLoginState.__zxgjLoginAttempts = loginAttempts;
-
-function parsePermissions(value: unknown) {
-  try {
-    const parsed = JSON.parse(String(value || "[]"));
-    return Array.isArray(parsed) ? parsed.map((item) => String(item)) : [];
-  } catch {
-    return [];
-  }
-}
 
 function getAttemptKey(req: NextRequest, username: string) {
   return `${getRequestIp(req)}:${username.toLowerCase()}`;
@@ -97,12 +89,12 @@ export async function POST(req: NextRequest) {
 
     const company = db.prepare("SELECT name FROM companies WHERE id = ? AND deleted_at IS NULL").get(user.company_id) as any;
     if (!company) return NextResponse.json({ message: "账号所属公司不可用" }, { status: 403 });
-    const role = db.prepare(`
-      SELECT permissions
-      FROM roles
-      WHERE company_id = ? AND code = ? AND deleted_at IS NULL AND COALESCE(is_active, 1) = 1
-      LIMIT 1
-    `).get(user.company_id, user.role) as any;
+    const effectiveRole = getEffectiveRolePermissions(
+      db,
+      String(user.company_id),
+      String(user.role || ""),
+      user.org_unit_id ? String(user.org_unit_id) : null,
+    );
     const companyShortName = getCompanyShortNameForOrgUnit(db, user.org_unit_id, user.company_id);
     const sidebarBrandName = getSidebarBrandNameForOrgUnit(db, user.org_unit_id, user.company_id);
     const sidebarBrandLogoUrl = getSidebarBrandLogoUrlForOrgUnit(db, user.org_unit_id, user.company_id);
@@ -122,7 +114,7 @@ export async function POST(req: NextRequest) {
         phone: user.phone,
         avatar: user.avatar || null,
         role: user.role,
-        permissions: parsePermissions(role?.permissions),
+        permissions: effectiveRole?.permissions || [],
         org_unit_id: user.org_unit_id,
         companyName: company?.name || "",
         companyShortName,

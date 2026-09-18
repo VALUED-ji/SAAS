@@ -8,8 +8,6 @@
     ]
   },
   "include": [
-    ".next-build-candidate-*/types/**/*.ts",
-    ".next-build/types/**/*.ts",
     "next-env.d.ts",
     "src/**/*.ts",
     "src/**/*.tsx"

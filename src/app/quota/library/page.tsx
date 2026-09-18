@@ -77,7 +77,6 @@ export default function QuotaLibraryPage() {
   const [quotaItemsLoaded, setQuotaItemsLoaded] = useState(false);
   const quotaItemsPersistSkipRef = useRef(true);
   const quotaDictionariesLoadedRef = useRef(false);
-  const quotaRequestStartedRef = useRef(false);
   const activeStoreScopeOptionsRef = useRef<string[]>([]);
   const orgUnitsLoadedRef = useRef(false);
   const [orgUnits, setOrgUnits] = useState<OrgUnit[]>([]);
@@ -248,8 +247,6 @@ export default function QuotaLibraryPage() {
   }, [orgUnitsLoaded]);
 
   useEffect(() => {
-    if (quotaRequestStartedRef.current) return;
-    quotaRequestStartedRef.current = true;
     let cancelled = false;
     const loadQuotaItems = async () => {
       try {
@@ -904,8 +901,8 @@ export default function QuotaLibraryPage() {
                 <th className="px-3 py-3 text-center">价格类型</th>
                 <th className="px-3 py-3 text-left">项目名称</th>
                 <th className="px-3 py-3 text-center">单位</th>
-                <th className="px-3 py-3 text-center">人工单价</th>
                 <th className="px-3 py-3 text-center">材料单价</th>
+                <th className="px-3 py-3 text-center">人工单价</th>
                 <th className="px-3 py-3 text-center">客户单价</th>
                 <th className="px-3 py-3 text-left">施工说明</th>
                 <th className="px-3 py-3 text-center">适用门店</th>
@@ -951,8 +948,8 @@ export default function QuotaLibraryPage() {
                     <p className="quota-item-name">{item.name}</p>
                   </td>
                   <td className="quota-unit-cell px-3 py-3 text-center text-surface-700">{item.unit}</td>
-                  <td className="quota-money-cell px-3 py-3 text-center tabular-nums text-surface-700">{formatAmount(item.laborPrice)}</td>
                   <td className="quota-money-cell px-3 py-3 text-center tabular-nums text-surface-700">{formatAmount(item.materialPrice)}</td>
+                  <td className="quota-money-cell px-3 py-3 text-center tabular-nums text-surface-700">{formatAmount(item.laborPrice)}</td>
                   <td className="quota-money-cell quota-total-price px-3 py-3 text-center font-semibold tabular-nums text-red-600">
                     <span className="quota-total-price-inner">
                       <span>{formatAmount(item.totalPrice)}</span>

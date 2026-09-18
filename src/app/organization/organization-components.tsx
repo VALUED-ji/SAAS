@@ -3,8 +3,8 @@
 
 "use client";
 
-import { useMemo, useState } from "react";
-import { ChevronRight, Edit3, Plus, Power, Search, Trash2, X } from "lucide-react";
+import { useMemo, useState, type DragEvent } from "react";
+import { ChevronRight, Edit3, GripVertical, Plus, Power, Search, Trash2, X } from "lucide-react";
 import NativeImage from "@/components/ui/NativeImage";
 import { formatUserRoleLabel } from "@/lib/userRoleLabels";
 export interface OrgUnit {
@@ -12,6 +12,7 @@ export interface OrgUnit {
   name: string;
   type: string;
   parent_id: string | null;
+  sort_order?: number;
   children?: OrgUnit[];
   manager_id?: string | null;
   manager_name?: string;
@@ -213,17 +214,50 @@ export function OrgLevelIcon({ type, size = "md" }: { type?: string | null; size
   );
 }
 
-export function EnhancedOrgNode({ node, depth, expanded, selectedId, onSelect, onToggle, searchQuery, onAdd, onEdit, onDelete }: {
+export function EnhancedOrgNode({
+  node,
+  depth,
+  expanded,
+  selectedId,
+  searchQuery,
+  canReorder,
+  reorderableIds,
+  draggedId,
+  dropTarget,
+  moveFeedbackId,
+  moveFeedbackToken,
+  onSelect,
+  onToggle,
+  onAdd,
+  onEdit,
+  onDelete,
+  onDragStartNode,
+  onDragOverNode,
+  onDragLeaveNode,
+  onDropNode,
+  onDragEnd,
+}: {
   node: OrgUnit;
   depth: number;
   expanded: Set<string>;
   selectedId: string;
+  searchQuery: string;
+  canReorder: boolean;
+  reorderableIds: Set<string>;
+  draggedId: string;
+  dropTarget: { id: string; position: "before" | "after" } | null;
+  moveFeedbackId: string;
+  moveFeedbackToken: number;
   onSelect: (id: string) => void;
   onToggle: (id: string) => void;
-  searchQuery: string;
   onAdd: (p: string, t: string) => void;
   onEdit: (n: OrgUnit) => void;
   onDelete: (node: OrgUnit) => void;
+  onDragStartNode: (event: DragEvent<HTMLSpanElement>, id: string) => void;
+  onDragOverNode: (event: DragEvent<HTMLDivElement>, id: string) => void;
+  onDragLeaveNode: (id: string) => void;
+  onDropNode: (event: DragEvent<HTMLDivElement>, id: string) => void;
+  onDragEnd: () => void;
 }) {
   const meta = typeMeta[node.type] || typeMeta.team;
   const hasChildren = (node.children?.length || 0) > 0;
@@ -232,29 +266,73 @@ export function EnhancedOrgNode({ node, depth, expanded, selectedId, onSelect, o
   const nextType = getNextOrgType(node.type);
   const managerName = getManagerName(node);
   const active = isOrgActive(node);
+  const isDragging = draggedId === node.id;
+  const nodeCanReorder = canReorder && reorderableIds.has(node.id);
+  const currentNodeDropTarget = dropTarget?.id === node.id ? dropTarget : null;
+  const currentNodeMoveFeedbackToken = moveFeedbackId === node.id ? moveFeedbackToken : 0;
 
   return (
     <div className="org-tree-node">
       <div
         onClick={() => onSelect(node.id)}
-        className={`group relative grid min-h-[56px] cursor-pointer grid-cols-[auto_auto_minmax(0,1fr)_auto_auto] items-center gap-2 border-b border-surface-200/70 px-3 py-2.5 transition-colors ${
+        onDragOver={(event) => onDragOverNode(event, node.id)}
+        onDragLeave={(event) => {
+          const nextTarget = event.relatedTarget;
+          if (!nextTarget || !event.currentTarget.contains(nextTarget as Node)) onDragLeaveNode(node.id);
+        }}
+        onDrop={(event) => onDropNode(event, node.id)}
+        data-org-row-id={node.id}
+        aria-grabbed={isDragging}
+        className={`org-tree-row group relative grid min-h-[56px] cursor-pointer grid-cols-[auto_auto_minmax(0,1fr)_auto_auto] items-center gap-2 border-b border-surface-200/70 px-3 py-2.5 transition-all ${
           isSelected ? "bg-primary-50/80" : active ? "bg-white hover:bg-surface-50" : "bg-surface-50/80 hover:bg-surface-100/70"
-        }`}
+        } ${isDragging ? "opacity-45" : ""} ${currentNodeDropTarget ? "bg-primary-50/70" : ""}`}
         style={{ paddingLeft: `${14 + depth * 26}px` }}
       >
         {isSelected && <span className="absolute inset-y-2 left-0 w-1 rounded-r bg-primary-600" />}
-        <button
-          type="button"
-          onClick={(event) => { event.stopPropagation(); onToggle(node.id); }}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-surface-400 transition hover:bg-white hover:text-surface-700"
-          aria-label={hasChildren ? (isOpen ? "收起组织" : "展开组织") : "无下级组织"}
-        >
-          {hasChildren ? (
-            <ChevronRight className={`h-4 w-4 transition-transform duration-300 ease-out ${isOpen ? "rotate-90" : "rotate-0"}`} />
+        {currentNodeMoveFeedbackToken > 0 && (
+          <span key={currentNodeMoveFeedbackToken} className="org-tree-move-feedback" aria-hidden="true" />
+        )}
+        {currentNodeDropTarget && currentNodeDropTarget.position === "before" && (
+          <span className="pointer-events-none absolute left-3 right-3 top-0 z-10 h-0.5 bg-primary-600">
+            <span className="absolute -left-0.5 -top-1 h-2.5 w-2.5 rounded-full bg-primary-600" />
+          </span>
+        )}
+        {currentNodeDropTarget && currentNodeDropTarget.position === "after" && (
+          <span className="pointer-events-none absolute bottom-0 left-3 right-3 z-10 h-0.5 bg-primary-600">
+            <span className="absolute -left-0.5 -top-1 h-2.5 w-2.5 rounded-full bg-primary-600" />
+          </span>
+        )}
+        <div className="flex shrink-0 items-center">
+          {nodeCanReorder ? (
+            <span
+              draggable
+              onDragStart={(event) => onDragStartNode(event, node.id)}
+              onDragEnd={onDragEnd}
+              onClick={(event) => event.stopPropagation()}
+              className={`flex h-7 w-4 cursor-grab items-center justify-center text-surface-300 transition hover:text-primary-700 active:cursor-grabbing ${isDragging ? "text-primary-700" : ""}`}
+              title="拖动调整同级顺序"
+              aria-label={`拖动${meta.label}调整同级顺序`}
+              role="button"
+              tabIndex={0}
+            >
+              <GripVertical className="h-4 w-4" />
+            </span>
           ) : (
-            <span className="h-4 w-4" />
+            <span className="h-7 w-4" />
           )}
-        </button>
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); onToggle(node.id); }}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-surface-400 transition hover:bg-white hover:text-surface-700"
+            aria-label={hasChildren ? (isOpen ? "收起组织" : "展开组织") : "无下级组织"}
+          >
+            {hasChildren ? (
+              <ChevronRight className={`h-4 w-4 transition-transform duration-300 ease-out ${isOpen ? "rotate-90" : "rotate-0"}`} />
+            ) : (
+              <span className="h-4 w-4" />
+            )}
+          </button>
+        </div>
         <OrgLevelIcon type={node.type} />
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
@@ -330,6 +408,17 @@ export function EnhancedOrgNode({ node, depth, expanded, selectedId, onSelect, o
                 onAdd={onAdd}
                 onEdit={onEdit}
                 onDelete={onDelete}
+                canReorder={canReorder}
+                reorderableIds={reorderableIds}
+                draggedId={draggedId}
+                dropTarget={dropTarget}
+                moveFeedbackId={moveFeedbackId}
+                moveFeedbackToken={moveFeedbackToken}
+                onDragStartNode={onDragStartNode}
+                onDragOverNode={onDragOverNode}
+                onDragLeaveNode={onDragLeaveNode}
+                onDropNode={onDropNode}
+                onDragEnd={onDragEnd}
               />
             ))}
           </div>

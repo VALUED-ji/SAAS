@@ -6,6 +6,7 @@ import { Building2, ChevronRight, Loader2, Search, SlidersHorizontal } from "luc
 import { formatDateTime } from "@/lib/utils";
 import DataPagination, { useDataPagination } from "@/components/ui/DataPagination";
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
+import { buildOrgTreeOrder } from "@/app/organization/organization-order";
 
 type OrgUnit = {
   id: string;
@@ -39,7 +40,7 @@ function buildBranchOptions(units: OrgUnit[]): BranchOption[] {
     return names.join(" / ");
   };
 
-  return units
+  return buildOrgTreeOrder(units)
     .filter((unit) => unit.type === "company")
     .map((unit) => {
       const path = pathOf(unit);

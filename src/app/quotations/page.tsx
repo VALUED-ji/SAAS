@@ -44,6 +44,7 @@ import SystemSelect from "@/components/ui/SystemSelect";
 import NativeImage from "@/components/ui/NativeImage";
 import AddCustomerModal, { AmapLocationPicker, type LocationPick } from "@/components/ui/AddCustomerModal";
 import { createQuotationPrintPreviewUrl, createQuotationShareUrl, type QuotationShareBaseColumnKey, type QuotationShareCabinetColumnKey, type QuotationShareProductColumnKey } from "@/lib/quotationShareClient";
+import { QUOTATION_PRESENCE_REFRESH_MS } from "@/lib/quotationPresenceClient";
 import {
   QuotationDialogState,
   QuotationSystemDialogModal,
@@ -651,6 +652,17 @@ export default function QuotationsPage() {
   const { data: deletedQuotations, refetch: refetchDeletedQuotations } = useDeletedQuotations(selectedOrgUnitId, quotationViewerKey, quotationQueriesEnabled);
   const isTemporaryQuotationMode = ENABLE_TEMPORARY_QUOTATION && createMode === "temporary";
   const isNewCustomerMode = createMode === "new_customer";
+
+  useEffect(() => {
+    if (!recordCustomerKey || showRecycleBin || !quotationQueriesEnabled) return;
+    const refreshPresence = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void refetch();
+    };
+    refreshPresence();
+    const timer = window.setInterval(refreshPresence, QUOTATION_PRESENCE_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [quotationQueriesEnabled, recordCustomerKey, refetch, showRecycleBin]);
 
   useEffect(() => {
     if (!recordCustomerKey || !message) return;
@@ -2508,7 +2520,18 @@ export default function QuotationsPage() {
                         <div className="quotation-record-action-panel xl:justify-self-end xl:w-full">
                           <div className="quotation-record-action-head mb-2.5 flex items-center justify-between gap-3">
                             <span className="text-xs font-semibold text-[#98a2b3]">{showRecycleBin ? "回收站操作" : "操作"}</span>
-                            <span className="quotation-status-stamp" data-tone={recordStatusTone}>{recordStatusLabel}</span>
+                            <div className="quotation-record-action-badges">
+                              {!showRecycleBin && Number(record.active_editor_count || 0) > 0 ? (
+                                <span
+                                  className="quotation-record-editor-badge"
+                                  title={(Array.isArray(record.active_editors) ? record.active_editors : []).map((editor: any) => String(editor?.user_name || "未知用户")).join("、")}
+                                >
+                                  <Users className="h-3.5 w-3.5" />
+                                  {Number(record.active_editor_count || 1)} 人正在编辑
+                                </span>
+                              ) : null}
+                              <span className="quotation-status-stamp" data-tone={recordStatusTone}>{recordStatusLabel}</span>
+                            </div>
                           </div>
 
                           {showRecycleBin ? (
@@ -2572,20 +2595,21 @@ export default function QuotationsPage() {
       )}
 
       {shareLinkDialog && (
-        <div className="fixed inset-0 z-[64] flex items-center justify-center overflow-y-auto bg-[#0f172a]/32 p-4">
+        <div className="fixed inset-0 z-[64] flex items-center justify-center bg-[#0f172a]/32 p-3 sm:p-4">
           <div
-            className="max-h-[calc(100dvh-24px)] w-full max-w-[660px] overflow-y-auto rounded-[18px] bg-white p-5 shadow-[0_24px_72px_rgba(15,23,42,0.22)]"
+            className="flex w-full max-w-[920px] flex-col overflow-hidden rounded-[16px] border border-[#dfe6ef] bg-white shadow-[0_24px_72px_rgba(15,23,42,0.22)]"
+            style={{ maxHeight: "calc(100dvh - 24px)" }}
             onWheel={(event) => event.stopPropagation()}
             onTouchMove={(event) => event.stopPropagation()}
           >
-            <div className="flex items-start justify-between gap-4 border-b border-[#e6edf5] pb-4">
+            <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[#e6edf5] bg-white px-5 py-4 sm:px-6">
               <div className="flex min-w-0 items-start gap-3.5">
                 <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[12px] border border-[#bfe8d2] bg-[#f0fbf6] text-[#159a68]">
                   <LinkIcon className="h-5 w-5" />
                 </span>
                 <div className="min-w-0">
                   <h3 className="text-[18px] font-semibold text-[#172033]">分享报价链接</h3>
-                  <p className="mt-2 text-sm font-semibold text-[#667085]">选择链接有效期和客户可见字段，确认后生成并复制。</p>
+                  <p className="mt-1.5 text-[13px] font-medium leading-5 text-[#667085]">选择链接有效期和客户可见字段，确认后生成并复制。</p>
                 </div>
               </div>
               <button
@@ -2599,114 +2623,128 @@ export default function QuotationsPage() {
               </button>
             </div>
 
-            <div className="pt-4">
-              <div className="mb-4 flex min-h-[54px] items-center gap-3 border-b border-[#edf2f7] pb-4" title={getBudgetRecordTitle(shareLinkDialog)}>
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#f4fbf7] text-[#159a68] ring-1 ring-[#d7eee2]">
-                  <ReceiptText className="h-4 w-4" />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="mb-1 flex items-center gap-2">
-                    <span className="rounded-full bg-[#f2f6fb] px-2 py-0.5 text-[11px] font-semibold leading-4 text-[#667085]">分享对象</span>
-                    <span className="h-1 w-1 rounded-full bg-[#cbd5e1]" />
-                    <span className="text-[11px] font-medium leading-4 text-[#98a2b3]">报价单</span>
-                  </div>
-                  <span className="block truncate text-[14px] font-semibold leading-5 text-[#25364b]">{getBudgetRecordTitle(shareLinkDialog)}</span>
-                </div>
-                <span className="hidden shrink-0 rounded-full bg-[#ecfdf3] px-2.5 py-1 text-[11px] font-bold leading-4 text-[#149260] sm:inline-flex">客户可见</span>
-              </div>
-              <div className="grid grid-cols-2 gap-3 border-b border-[#edf2f7] pb-4">
-                {quotationShareExpireOptions.map((option) => {
-                  const active = shareExpireDays === option.value;
-                  return (
-                    <button
-                      key={option.label}
-                      type="button"
-                      onClick={() => setShareExpireDays(option.value)}
-                      disabled={sharingLink}
-                      className={`flex min-h-[64px] items-center gap-3 rounded-[12px] border px-4 text-left transition disabled:opacity-60 ${
-                        active
-                          ? "border-[#64d795] bg-white text-[#143b2b] shadow-[0_10px_24px_rgba(21,154,104,0.08)]"
-                          : "border-[#dbe3ee] bg-white text-[#475467] hover:border-[#a9e7c4] hover:bg-[#fbfffd]"
-                      }`}
-                    >
-                      <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${active ? "bg-[#1dbf73] text-white" : "border border-[#d1dbe8] bg-[#f8fafc] text-transparent"}`}>
-                        <Check className="h-4 w-4" />
+            <div className="min-h-0 flex-1 overflow-y-auto bg-[#f7f9fc] px-4 py-4 sm:px-5">
+              <div className="grid gap-4 lg:grid-cols-[310px_minmax(0,1fr)]">
+                <aside className="space-y-4">
+                  <section className="rounded-[12px] border border-[#e3eaf3] bg-white p-4" title={getBudgetRecordTitle(shareLinkDialog)}>
+                    <div className="flex items-center gap-3">
+                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#f4fbf7] text-[#159a68] ring-1 ring-[#d7eee2]">
+                        <ReceiptText className="h-4 w-4" />
                       </span>
-                      <span className="min-w-0">
-                        <span className="block text-sm font-semibold">{option.label}</span>
-                        <span className={`mt-0.5 block text-xs ${active ? "text-[#159a68]" : "text-[#98a2b3]"}`}>{option.desc}</span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-              <div className="border-b border-[#edf2f7] py-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-[15px] font-semibold leading-5 text-[#26384c]">报价执行有效期</p>
-                    <p className="mt-1 text-[13px] font-medium leading-5 text-[#7a8699]">默认使用当年12月31日，也可以为本次分享指定日期。</p>
+                      <div className="min-w-0 flex-1">
+                        <div className="mb-1 flex items-center gap-2">
+                          <span className="rounded-full bg-[#f2f6fb] px-2 py-0.5 text-[11px] font-semibold leading-4 text-[#667085]">分享对象</span>
+                          <span className="h-1 w-1 rounded-full bg-[#cbd5e1]" />
+                          <span className="text-[11px] font-medium leading-4 text-[#98a2b3]">报价单</span>
+                        </div>
+                        <span className="block truncate text-[14px] font-semibold leading-5 text-[#25364b]">{getBudgetRecordTitle(shareLinkDialog)}</span>
+                      </div>
+                      <span className="hidden shrink-0 rounded-full bg-[#ecfdf3] px-2.5 py-1 text-[11px] font-bold leading-4 text-[#149260] sm:inline-flex">客户可见</span>
+                    </div>
+                  </section>
+
+                  <section className="rounded-[12px] border border-[#e3eaf3] bg-white p-4">
+                    <div className="mb-3">
+                      <p className="text-[14px] font-semibold leading-5 text-[#26384c]">链接有效期</p>
+                      <p className="mt-1 text-[12px] font-medium leading-5 text-[#7a8699]">选择客户可以打开链接的时间范围。</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2.5">
+                      {quotationShareExpireOptions.map((option) => {
+                        const active = shareExpireDays === option.value;
+                        return (
+                          <button
+                            key={option.label}
+                            type="button"
+                            onClick={() => setShareExpireDays(option.value)}
+                            disabled={sharingLink}
+                            className={`flex min-h-[58px] items-center gap-2.5 rounded-[10px] border px-3 text-left transition disabled:opacity-60 ${
+                              active
+                                ? "border-[#64d795] bg-[#f7fffa] text-[#143b2b] shadow-[0_8px_20px_rgba(21,154,104,0.07)]"
+                                : "border-[#dbe3ee] bg-white text-[#475467] hover:border-[#a9e7c4] hover:bg-[#fbfffd]"
+                            }`}
+                          >
+                            <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${active ? "bg-[#1dbf73] text-white" : "border border-[#d1dbe8] bg-[#f8fafc] text-transparent"}`}>
+                              <Check className="h-3.5 w-3.5" />
+                            </span>
+                            <span className="min-w-0">
+                              <span className="block text-[13px] font-semibold">{option.label}</span>
+                              <span className={`mt-0.5 block text-[11px] ${active ? "text-[#159a68]" : "text-[#98a2b3]"}`}>{option.desc}</span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+
+                  <section className="rounded-[12px] border border-[#e3eaf3] bg-white p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-[14px] font-semibold leading-5 text-[#26384c]">报价执行有效期</p>
+                        <p className="mt-1 text-[12px] font-medium leading-5 text-[#7a8699]">默认使用当年12月31日，也可为本次分享指定日期。</p>
+                      </div>
+                      <span className="shrink-0 text-[11px] font-semibold text-[#159a68]">{shareQuotationValidUntil ? "自定义日期" : "默认日期"}</span>
+                    </div>
+                    <div className="mt-3 flex items-center gap-2">
+                      <input
+                        type="date"
+                        aria-label="报价执行有效期"
+                        value={shareQuotationValidUntil}
+                        onChange={(event) => setShareQuotationValidUntil(event.target.value)}
+                        disabled={sharingLink}
+                        className="h-10 min-w-0 flex-1 rounded-[9px] border border-[#dbe3ee] bg-white px-3 text-sm text-[#344054] outline-none transition focus:border-[#64d795] focus:ring-4 focus:ring-[#64d795]/10 disabled:opacity-60"
+                      />
+                      {shareQuotationValidUntil && (
+                        <button
+                          type="button"
+                          onClick={() => setShareQuotationValidUntil("")}
+                          disabled={sharingLink}
+                          className="h-10 rounded-[9px] border border-[#bfe8d2] bg-[#f3fbf6] px-3 text-xs font-semibold text-[#159a68] transition hover:bg-[#e8f8ee] disabled:opacity-60"
+                        >
+                          默认
+                        </button>
+                      )}
+                    </div>
+                  </section>
+                </aside>
+
+                <section className="rounded-[12px] border border-[#e3eaf3] bg-white p-4 sm:p-5">
+                  <div className="flex items-start justify-between gap-3 border-b border-[#edf2f7] pb-4">
+                    <div>
+                      <p className="text-[15px] font-semibold leading-5 text-[#26384c]">客户可见字段</p>
+                      <p className="mt-1 text-[12px] font-medium leading-5 text-[#7a8699]">配置随本次链接保存，客户只能看到勾选字段。</p>
+                    </div>
+                    <span className="shrink-0 rounded-full bg-[#ecfdf3] px-3 py-1.5 text-[11px] font-bold leading-4 text-[#149260]">链接快照</span>
                   </div>
-                  <span className="shrink-0 text-[12px] font-semibold text-[#159a68]">{shareQuotationValidUntil ? "自定义日期" : "默认日期"}</span>
-                </div>
-                <div className="mt-3 flex items-center gap-2">
-                  <input
-                    type="date"
-                    aria-label="报价执行有效期"
-                    value={shareQuotationValidUntil}
-                    onChange={(event) => setShareQuotationValidUntil(event.target.value)}
-                    disabled={sharingLink}
-                    className="h-10 min-w-0 flex-1 rounded-[9px] border border-[#dbe3ee] bg-white px-3 text-sm text-[#344054] outline-none transition focus:border-[#64d795] focus:ring-4 focus:ring-[#64d795]/10 disabled:opacity-60"
-                  />
-                  {shareQuotationValidUntil && (
-                    <button
-                      type="button"
-                      onClick={() => setShareQuotationValidUntil("")}
-                      disabled={sharingLink}
-                      className="h-10 rounded-[9px] border border-[#bfe8d2] bg-[#f3fbf6] px-3 text-xs font-semibold text-[#159a68] transition hover:bg-[#e8f8ee] disabled:opacity-60"
-                    >
-                      默认
-                    </button>
-                  )}
-                </div>
-              </div>
-              <div className="mt-4 border-b border-[#edf2f7] pb-4">
-                <div className="mb-3 flex items-start justify-between gap-3 px-0.5 py-0.5">
-                  <div>
-                    <p className="text-[15px] font-semibold leading-5 text-[#26384c]">客户可见字段</p>
-                    <p className="mt-1 text-[13px] font-medium leading-5 text-[#7a8699]">配置随本次链接保存，客户只能看到勾选字段。</p>
+                  <div className="grid gap-x-5 gap-y-4 pt-4 md:grid-cols-2">
+                    {renderShareFieldGroup("基装", quotationShareBaseColumnOptions, shareBaseColumns, setShareBaseColumns)}
+                    {renderShareFieldGroup("产品", quotationShareProductColumnOptions, shareProductColumns, setShareProductColumns)}
+                    {renderShareFieldGroup("定制柜", quotationShareCabinetColumnOptions, shareCabinetColumns, setShareCabinetColumns)}
                   </div>
-                  <span className="shrink-0 rounded-full bg-[#ecfdf3] px-3 py-1.5 text-[12px] font-bold leading-4 text-[#149260]">链接快照</span>
-                </div>
-                <div className="grid gap-3">
-                  {renderShareFieldGroup("基装", quotationShareBaseColumnOptions, shareBaseColumns, setShareBaseColumns)}
-                  {renderShareFieldGroup("产品", quotationShareProductColumnOptions, shareProductColumns, setShareProductColumns)}
-                  {renderShareFieldGroup("定制柜", quotationShareCabinetColumnOptions, shareCabinetColumns, setShareCabinetColumns)}
-                </div>
+                </section>
               </div>
-              <div className="mt-4 text-[13px] leading-5 text-[#47715d]">
-                生成后会自动复制到剪贴板；过期后客户再次打开会提示链接已失效。
-              </div>
-              <div className="h-2" />
             </div>
 
-            <div className="flex items-center justify-end gap-3 pt-4">
-              <button
-                type="button"
-                onClick={() => setShareLinkDialog(null)}
-                disabled={sharingLink}
-                className="inline-flex h-11 items-center justify-center rounded-[10px] border border-[#cfd8e5] bg-white px-5 text-sm font-semibold text-[#475467] transition hover:border-[#b9c5d4] hover:bg-[#f8fafc] hover:text-[#182230] disabled:opacity-50"
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                onClick={copyShareLink}
-                disabled={sharingLink}
-                className="inline-flex h-11 items-center justify-center gap-2 rounded-[10px] bg-[#169b68] px-6 text-sm font-semibold text-white transition hover:bg-[#10865a] disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {sharingLink ? <Loader2 className="h-4 w-4 animate-spin" /> : <LinkIcon className="h-4 w-4" />}
-                生成并复制
-              </button>
+            <div className="flex shrink-0 flex-col gap-3 border-t border-[#e6edf5] bg-white px-5 py-3.5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+              <p className="text-[12px] leading-5 text-[#47715d]">生成后会自动复制到剪贴板；过期后客户再次打开会提示链接已失效。</p>
+              <div className="flex shrink-0 items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShareLinkDialog(null)}
+                  disabled={sharingLink}
+                  className="inline-flex h-10 items-center justify-center rounded-[10px] border border-[#cfd8e5] bg-white px-5 text-sm font-semibold text-[#475467] transition hover:border-[#b9c5d4] hover:bg-[#f8fafc] hover:text-[#182230] disabled:opacity-50"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={copyShareLink}
+                  disabled={sharingLink}
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-[10px] bg-[#169b68] px-6 text-sm font-semibold text-white transition hover:bg-[#10865a] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {sharingLink ? <Loader2 className="h-4 w-4 animate-spin" /> : <LinkIcon className="h-4 w-4" />}
+                  生成并复制
+                </button>
+              </div>
             </div>
           </div>
         </div>

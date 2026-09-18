@@ -14,6 +14,9 @@ function ensureOrgColumns(db: ReturnType<typeof getDb>) {
   if (!columns.some((column) => column.name === "is_active")) {
     db.prepare("ALTER TABLE org_units ADD COLUMN is_active INTEGER DEFAULT 1").run();
   }
+  if (!columns.some((column) => column.name === "sort_order")) {
+    db.prepare("ALTER TABLE org_units ADD COLUMN sort_order INTEGER DEFAULT 0").run();
+  }
 }
 
 function getManagerIdsFromBody(body: any) {
@@ -96,7 +99,13 @@ export async function GET(req: NextRequest) {
     FROM org_units o
     LEFT JOIN users u ON o.manager_id = u.id AND u.company_id = o.company_id AND u.deleted_at IS NULL
     WHERE o.company_id = ? AND o.deleted_at IS NULL
-    ORDER BY o.sort_order
+    ORDER BY
+      CASE WHEN o.parent_id IS NULL THEN 0 ELSE 1 END,
+      COALESCE(o.parent_id, ''),
+      o.type,
+      COALESCE(o.sort_order, 0),
+      COALESCE(o.created_at, ''),
+      o.id
   `).all(auth.companyId) as any[];
   const managerMap = getOrgManagerMap(db, units.map((unit) => unit.id));
   return NextResponse.json(units.map((unit) => ({
@@ -131,8 +140,19 @@ export async function POST(req: NextRequest) {
       if (Number(parent.is_active ?? 1) !== 1) return NextResponse.json({ message: "停用组织下不能新增下级组织" }, { status: 400 });
     }
     const id = `OG${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-    db.prepare("INSERT INTO org_units (id, company_id, parent_id, name, type) VALUES (?,?,?,?,?)")
-      .run(id, auth.companyId, parent_id || null, name, type);
+    const sortOrderRow = parent_id
+      ? db.prepare(`
+          SELECT COALESCE(MAX(sort_order), 0) + 10 as next_sort_order
+          FROM org_units
+          WHERE company_id = ? AND parent_id = ? AND type = ? AND deleted_at IS NULL
+        `).get(auth.companyId, parent_id, type) as { next_sort_order?: number } | undefined
+      : db.prepare(`
+          SELECT COALESCE(MAX(sort_order), 0) + 10 as next_sort_order
+          FROM org_units
+          WHERE company_id = ? AND parent_id IS NULL AND type = ? AND deleted_at IS NULL
+        `).get(auth.companyId, type) as { next_sort_order?: number } | undefined;
+    db.prepare("INSERT INTO org_units (id, company_id, parent_id, name, type, sort_order) VALUES (?,?,?,?,?,?)")
+      .run(id, auth.companyId, parent_id || null, name, type, Number(sortOrderRow?.next_sort_order || 10));
     try {
       setOrgManagers(db, id, managerIds);
     } catch (error: any) {
@@ -183,6 +203,63 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: true });
   } catch (err: any) {
     return NextResponse.json({ message: err.message }, { status: 500 });
+  }
+}
+
+export async function PATCH(req: NextRequest) {
+  const auth = getAuthContext(req);
+  if (!auth) return NextResponse.json({ message: "请先登录" }, { status: 401 });
+  if (!canManageOrganization(auth)) return NextResponse.json({ message: "没有组织管理权限" }, { status: 403 });
+  try {
+    const body = await req.json();
+    const orderedIds = Array.from(new Set(
+      (Array.isArray(body?.ordered_ids) ? body.ordered_ids : [])
+        .map((id: unknown) => String(id || "").trim())
+        .filter(Boolean),
+    ));
+    if (orderedIds.length < 2) {
+      return NextResponse.json({ message: "至少需要两个组织才能排序" }, { status: 400 });
+    }
+
+    const db = getDb();
+    ensureOrgColumns(db);
+    const placeholders = orderedIds.map(() => "?").join(",");
+    const rows = db.prepare(`
+      SELECT id, parent_id, type
+      FROM org_units
+      WHERE company_id = ? AND id IN (${placeholders}) AND deleted_at IS NULL
+    `).all(auth.companyId, ...orderedIds) as { id: string; parent_id: string | null; type: string }[];
+    if (rows.length !== orderedIds.length) {
+      return NextResponse.json({ message: "排序数据已变化，请刷新后重试" }, { status: 409 });
+    }
+
+    const first = rows[0];
+    const sameScope = rows.every((row) => (
+      row.parent_id === first.parent_id
+      && row.type === first.type
+    ));
+    if (!sameScope) {
+      return NextResponse.json({ message: "只能在同一上级、同一组织类型内调整顺序" }, { status: 400 });
+    }
+
+    const updateOrder = db.prepare(`
+      UPDATE org_units
+      SET sort_order = ?, updated_at = datetime('now')
+      WHERE id = ? AND company_id = ? AND deleted_at IS NULL
+    `);
+    db.exec("BEGIN");
+    try {
+      orderedIds.forEach((id, index) => {
+        updateOrder.run((index + 1) * 10, id, auth.companyId);
+      });
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    return NextResponse.json({ success: true });
+  } catch (err: any) {
+    return NextResponse.json({ message: err.message || "排序保存失败" }, { status: 500 });
   }
 }
 

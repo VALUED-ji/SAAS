@@ -20,6 +20,7 @@ import { getAuthContext, hasPermission } from "@/lib/security/authorization";
 import { ensureQuotationSchema } from "@/lib/quotationSchema";
 import { ensureProjectCostControlSchema } from "@/lib/projectCostControl";
 import { ensureQuotationChangeLogSchema, getLatestQuotationChangeSummary } from "@/lib/quotationChangeLogs";
+import { getQuotationEditorPresenceMap } from "@/lib/quotationPresence";
 import {
   canAccessQuotationOrg,
   ensureQuotationAccessColumns,
@@ -740,6 +741,7 @@ export async function GET(req: NextRequest) {
   `).all(...quotationIds) as any[];
   const receiptCountByQuotation = new Map(receiptRows.map((row: any) => [String(row.quotation_id || ""), Number(row.count || 0)]));
   const latestChangeByQuotation = getLatestQuotationChangeSummary(db, quotationIds);
+  const editorPresenceByQuotation = getQuotationEditorPresenceMap(db, quotationIds);
   const settingsByQuotation = new Map<string, Record<string, any>>();
   list.forEach((quotation) => {
     settingsByQuotation.set(String(quotation.id || ""), parseQuotationSettings(quotation.settings));
@@ -811,6 +813,8 @@ export async function GET(req: NextRequest) {
       latest_change_user_name: latestChangeByQuotation.get(String(quotation.id || ""))?.user_name || null,
       latest_change_summary: latestChangeByQuotation.get(String(quotation.id || ""))?.summary || null,
       latest_change_count: latestChangeByQuotation.get(String(quotation.id || ""))?.change_count || 0,
+      active_editor_count: editorPresenceByQuotation.get(String(quotation.id || ""))?.length || 0,
+      active_editors: editorPresenceByQuotation.get(String(quotation.id || "")) || [],
       item_count: currentItems.length,
       ...calculateQuotationRecordCostSummary(currentItems, quotation.settings, quotation.customer_area_size ?? quotation.project_area),
     };

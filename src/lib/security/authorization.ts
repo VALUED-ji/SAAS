@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { getDb } from "@/lib/db";
+import { getEffectiveRolePermissions } from "@/lib/rolePermissionOverrides";
 import { getRequestSession } from "@/lib/security/session";
 import { isSameOriginMutation } from "@/lib/security/requestOrigin";
 
@@ -15,15 +16,6 @@ export type AuthContext = {
   isAdmin: boolean;
 };
 
-function parsePermissions(value: unknown) {
-  try {
-    const parsed = JSON.parse(String(value || "[]"));
-    return Array.isArray(parsed) ? parsed.map((item) => String(item)) : [];
-  } catch {
-    return [];
-  }
-}
-
 export function getAuthContext(req: NextRequest): AuthContext | null {
   const session = getRequestSession(req);
   if (!session) return null;
@@ -38,20 +30,20 @@ export function getAuthContext(req: NextRequest): AuthContext | null {
   if (!user) return null;
   if (Number(user.session_version || 0) !== session.sessionVersion) return null;
 
-  const roleRow = db.prepare(`
-    SELECT permissions, data_scope
-    FROM roles
-    WHERE company_id = ? AND code = ? AND deleted_at IS NULL AND COALESCE(is_active, 1) = 1
-    LIMIT 1
-  `).get(user.company_id, user.role) as any;
+  const effectiveRole = getEffectiveRolePermissions(
+    db,
+    String(user.company_id),
+    String(user.role || ""),
+    user.org_unit_id ? String(user.org_unit_id) : null,
+  );
   const role = String(user.role || "").toUpperCase();
   return {
     userId: String(user.id),
     companyId: String(user.company_id),
     role,
     orgUnitId: user.org_unit_id ? String(user.org_unit_id) : null,
-    permissions: parsePermissions(roleRow?.permissions),
-    dataScope: String(roleRow?.data_scope || "self"),
+    permissions: effectiveRole?.permissions || [],
+    dataScope: effectiveRole?.dataScope || "self",
     isAdmin: role === "OWNER" || role === "ADMIN",
   };
 }

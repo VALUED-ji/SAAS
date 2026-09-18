@@ -621,8 +621,16 @@ export default function MaterialInboundPage() {
       </section>
 
       <SystemResourceTable.Panel className="auxiliary-orders-table aux-orders-list-panel flex-1">
-        <SystemResourceTable.Scroll>
-          <SystemResourceTable.Table minWidth={1580} fixed>
+        {filteredOrders.length === 0 ? (
+          <SystemResourceTable.EmptyState
+            className="aux-orders-empty-state"
+            icon={<ClipboardCheck />}
+          >
+            暂无符合条件的入库单
+          </SystemResourceTable.EmptyState>
+        ) : (
+          <SystemResourceTable.Scroll>
+            <SystemResourceTable.Table minWidth={1580} fixed>
             <colgroup>
               <col className="w-[56px]" />
               <col className="w-[92px]" />
@@ -695,19 +703,10 @@ export default function MaterialInboundPage() {
                   </SystemResourceTable.Cell>
                 </SystemResourceTable.Row>
               ))}
-              {filteredOrders.length === 0 && (
-                <tr>
-                  <td colSpan={12} className="px-4 py-16 text-center">
-                    <div className="mx-auto flex max-w-sm flex-col items-center text-surface-400">
-                      <ClipboardCheck className="mb-3 h-10 w-10 text-surface-300" />
-                      <p className="text-sm">暂无符合条件的入库单</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
             </tbody>
-          </SystemResourceTable.Table>
-        </SystemResourceTable.Scroll>
+            </SystemResourceTable.Table>
+          </SystemResourceTable.Scroll>
+        )}
         <SystemResourceTable.Pagination
           total={filteredOrders.length}
           page={inboundPagination.page}
