@@ -140,6 +140,20 @@ export type TemplateSpaceQuota = {
   materialPrice: number;
   totalPrice: number;
   isSpecialPrice: boolean;
+  sourceVersion?: string;
+  sourceSnapshot?: Partial<Pick<TemplateSpaceQuota,
+    "code"
+    | "category"
+    | "priceScene"
+    | "name"
+    | "constructionDescription"
+    | "unit"
+    | "laborPrice"
+    | "materialPrice"
+    | "totalPrice"
+    | "isSpecialPrice"
+  >>;
+  overriddenFields?: string[];
 };
 
 export type TemplateSpace = {
@@ -204,6 +218,7 @@ export type QuotaLibraryItem = {
   totalPrice: number;
   isSpecialPrice: boolean;
   status?: string;
+  updatedAt?: string;
 };
 
 export type CustomQuotaDraft = {
@@ -782,10 +797,36 @@ export function makeQuotaItemFromLibrary(quota: QuotaLibraryItem, quoteScope?: T
     materialPrice: quota.materialPrice,
     totalPrice: quota.totalPrice,
     isSpecialPrice: quota.isSpecialPrice,
+    sourceVersion: quota.updatedAt || "",
+    sourceSnapshot: {
+      code: quota.code,
+      category: quota.category,
+      priceScene: quota.priceScene,
+      name: quota.name,
+      constructionDescription: quota.constructionDescription,
+      unit: quota.unit,
+      laborPrice: quota.laborPrice,
+      materialPrice: quota.materialPrice,
+      totalPrice: quota.totalPrice,
+      isSpecialPrice: quota.isSpecialPrice,
+    },
+    overriddenFields: [],
   });
 }
 
 export function normalizeSpaceQuotaItem(value: any, index: number): TemplateSpaceQuota {
+  const sourceSnapshot = value?.sourceSnapshot && typeof value.sourceSnapshot === "object" ? {
+    code: String(value.sourceSnapshot.code || ""),
+    category: String(value.sourceSnapshot.category || ""),
+    priceScene: String(value.sourceSnapshot.priceScene || value.sourceSnapshot.price_scene || "标准"),
+    name: String(value.sourceSnapshot.name || ""),
+    constructionDescription: String(value.sourceSnapshot.constructionDescription || value.sourceSnapshot.description || ""),
+    unit: String(value.sourceSnapshot.unit || ""),
+    laborPrice: toAmount(value.sourceSnapshot.laborPrice),
+    materialPrice: toAmount(value.sourceSnapshot.materialPrice),
+    totalPrice: toAmount(value.sourceSnapshot.totalPrice),
+    isSpecialPrice: Boolean(value.sourceSnapshot.isSpecialPrice),
+  } : undefined;
   return {
     id: String(value?.id || `space-quota-${Date.now()}-${index}`),
     quotaId: String(value?.quotaId || value?.quota_id || ""),
@@ -801,6 +842,9 @@ export function normalizeSpaceQuotaItem(value: any, index: number): TemplateSpac
     materialPrice: toAmount(value?.materialPrice),
     totalPrice: toAmount(value?.totalPrice ?? (toAmount(value?.laborPrice) + toAmount(value?.materialPrice))),
     isSpecialPrice: Boolean(value?.isSpecialPrice),
+    sourceVersion: String(value?.sourceVersion || ""),
+    sourceSnapshot,
+    overriddenFields: Array.isArray(value?.overriddenFields) ? value.overriddenFields.map(String) : [],
   };
 }
 
@@ -903,6 +947,7 @@ export function loadQuotaLibraryItems() {
           totalPrice: toAmount(item.totalPrice ?? (toAmount(item.laborPrice) + toAmount(item.materialPrice))),
           isSpecialPrice: Boolean(item.isSpecialPrice),
           status: String(item.status || ""),
+          updatedAt: String(item.updatedAt || item.updated_at || ""),
         };
       })
       .filter((item): item is QuotaLibraryItem => Boolean(item?.id && item.name && item.status !== "disabled"));

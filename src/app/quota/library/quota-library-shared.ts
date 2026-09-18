@@ -54,6 +54,7 @@ export const DEFAULT_PRICE_SCENE = "标准";
 export const FALLBACK_STORE_SCOPES = ["番禺店", "新塘店"];
 export const COMMON_QUOTA_UNITS = ["㎡", "m", "项", "个", "套", "处", "间", "樘", "组", "台", "块", "片", "根", "卷", "桶", "kg"];
 export const quotaImportHeaders = ["价格类型", "分类", "项目名称", "施工说明", "单位", "人工单价", "材料单价", "内部人工成本", "内部材料成本", "损耗率", "是否特价"];
+export const quotaExportHeaders = ["定额编码", "分类", "项目名称", "单位", "材料单价", "人工单价", "客户单价", "施工说明", "适用门店", "价格类型", "状态"];
 export const requiredQuotaImportHeaders = new Set(["项目名称", "单位", "人工单价", "材料单价"]);
 export const QUOTA_LIBRARY_STORAGE_KEY = "zxgj_quota_library_items";
 export const QUOTA_TEMPLATE_STORAGE_KEY = "zxgj_quota_templates";
@@ -555,6 +556,117 @@ export async function downloadQuotaImportErrors(errors: QuotaImportError[]) {
   const link = document.createElement("a");
   link.href = url;
   link.download = `定额导入错误明细_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+export function buildQuotaExportRows(items: QuotaItem[]) {
+  return items.map((item) => [
+    item.code,
+    item.category,
+    item.name,
+    item.unit,
+    item.materialPrice,
+    item.laborPrice,
+    item.totalPrice,
+    item.constructionDescription,
+    item.scope || DEFAULT_QUOTA_SCOPE,
+    item.priceScene || DEFAULT_PRICE_SCENE,
+    item.status === "enabled" ? "启用" : "停用",
+  ]);
+}
+
+const quotaExportColumnBounds = [
+  { min: 16, max: 20 },
+  { min: 10, max: 18 },
+  { min: 18, max: 30 },
+  { min: 8, max: 10 },
+  { min: 12, max: 16 },
+  { min: 12, max: 16 },
+  { min: 12, max: 16 },
+  { min: 72, max: 116 },
+  { min: 10, max: 14 },
+  { min: 10, max: 14 },
+  { min: 10, max: 12 },
+] as const;
+
+function getExportTextWidth(value: unknown) {
+  return Math.max(
+    0,
+    ...String(value ?? "")
+      .split(/\r?\n/)
+      .map((line) => Array.from(line).reduce((width, character) => width + (/[^\x00-\xff]/.test(character) ? 2 : 1), 0)),
+  );
+}
+
+function getExportWrappedLineCount(value: unknown, columnWidth: number) {
+  return String(value ?? "")
+    .split(/\r?\n/)
+    .reduce((total, line) => total + Math.max(1, Math.ceil(getExportTextWidth(line) / Math.max(6, columnWidth - 1))), 0);
+}
+
+export function calculateQuotaExportLayout(rows: Array<Array<string | number>>) {
+  const widths = quotaExportColumnBounds.map(({ min, max }, columnIndex) => {
+    const contentWidth = rows.reduce((current, row) => Math.max(current, getExportTextWidth(row[columnIndex])), 0);
+    return Math.min(max, Math.max(min, contentWidth + 2));
+  });
+  const rowHeights = rows.map((row, rowIndex) => {
+    if (rowIndex === 0) return 30;
+    const wrappedLines = Math.max(
+      getExportWrappedLineCount(row[2], widths[2]),
+      getExportWrappedLineCount(row[7], widths[7]),
+    );
+    return Math.min(120, Math.max(30, wrappedLines * 15 + 6));
+  });
+  return { widths, rowHeights };
+}
+
+export async function downloadQuotaItems(items: QuotaItem[], fileName = "基装定额") {
+  const ExcelJS = (await import("exceljs")).default;
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("基装定额", {
+    views: [{ state: "frozen", ySplit: 1 }],
+  });
+  const rows = [quotaExportHeaders, ...buildQuotaExportRows(items)];
+  sheet.addRows(rows as any[][]);
+  sheet.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: Math.max(1, rows.length), column: quotaExportHeaders.length },
+  };
+  const layout = calculateQuotaExportLayout(rows);
+  sheet.columns = layout.widths.map((width) => ({ width }));
+  const amountColumns = new Set([5, 6, 7]);
+  sheet.eachRow((row) => {
+    row.height = layout.rowHeights[row.number - 1] || 30;
+    row.eachCell((cell, columnNumber) => {
+      cell.font = { name: "SimSun", size: 11, color: { argb: "FF111827" }, bold: row.number === 1 };
+      cell.alignment = {
+        vertical: "middle",
+        horizontal: row.number === 1 ? "center" : amountColumns.has(columnNumber) ? "right" : "left",
+        wrapText: columnNumber === 3 || columnNumber === 8,
+      };
+      cell.border = {
+        top: { style: "thin", color: { argb: "FF000000" } },
+        left: { style: "thin", color: { argb: "FF000000" } },
+        bottom: { style: "thin", color: { argb: "FF000000" } },
+        right: { style: "thin", color: { argb: "FF000000" } },
+      };
+      if (row.number === 1) {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE5E7EB" } };
+      }
+      if (row.number > 1 && amountColumns.has(columnNumber)) {
+        cell.numFmt = "0.00";
+      }
+    });
+  });
+  const buffer = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${fileName}_${new Date().toISOString().slice(0, 10)}.xlsx`;
   document.body.appendChild(link);
   link.click();
   link.remove();

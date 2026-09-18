@@ -5775,7 +5775,7 @@ html body .dashboard-scale-root .admin-config-ui.branch-settings-ui [role="combo
   align-items: center;
   justify-content: center;
   margin: 0;
-  color: #34445a;
+  color: #166534;
   font-size: 12px;
   font-weight: 500;
   line-height: 36px;
@@ -7910,7 +7910,7 @@ html body .quotation-index-workbench .quotation-index-title {
 
 html body .quotation-index-workbench .quotation-index-toolbar-actions {
   display: flex;
-  width: min(100%, 760px);
+  width: min(100%, 980px);
   min-width: 0;
   align-items: center;
   justify-content: flex-end;
@@ -7919,14 +7919,20 @@ html body .quotation-index-workbench .quotation-index-toolbar-actions {
 
 html body .quotation-index-workbench .quotation-index-search-wrap {
   position: relative;
-  min-width: 240px;
-  flex: 1 1 420px;
+  min-width: 320px;
+  flex: 1 1 520px;
 }
 
 html body .quotation-index-workbench .quotation-index-org-filter {
-  width: 220px;
-  min-width: 200px;
-  flex: 0 0 220px;
+  width: 200px;
+  min-width: 180px;
+  flex: 0 0 200px;
+}
+
+html body .quotation-index-workbench .quotation-index-customer-status-filter {
+  width: 170px;
+  min-width: 160px;
+  flex: 0 0 170px;
 }
 
 html body .quotation-index-org-filter-menu {
@@ -7997,6 +8003,12 @@ html body .quotation-index-workbench .quotation-index-primary-button {
   }
 
   html body .quotation-index-workbench .quotation-index-org-filter {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+  }
+
+  html body .quotation-index-workbench .quotation-index-customer-status-filter {
     flex: 1 1 0;
     width: auto;
     min-width: 0;
@@ -9568,710 +9580,6 @@ html body .quotation-contract-ui .quotation-record-list-body {
   scroll-padding-bottom: 28px;
 }
 
-html body .dashboard-scale-root .fixed .quotation-copy-modal,
-html body .quotation-contract-ui .quotation-copy-modal {
-  border-color: rgba(255, 255, 255, 0.72) !important;
-  background: rgba(255, 255, 255, 0.70) !important;
-  padding: 20px 20px 18px !important;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.92),
-    0 22px 62px rgba(31, 47, 68, 0.20) !important;
-  backdrop-filter: blur(18px) saturate(1.25);
-  -webkit-backdrop-filter: blur(18px) saturate(1.25);
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-header,
-html body .quotation-contract-ui .quotation-copy-header {
-  border: 0 !important;
-  border-radius: 0 !important;
-  background: transparent !important;
-  padding: 0 !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body,
-html body .quotation-contract-ui .quotation-copy-body {
-  margin-top: 14px !important;
-  flex: 1 1 auto !important;
-  border: 1px solid rgba(218, 228, 240, 0.82) !important;
-  border-radius: 14px !important;
-  background: rgba(248, 251, 255, 0.64) !important;
-  padding: 0 !important;
-  overflow: hidden !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-footer,
-html body .quotation-contract-ui .quotation-copy-footer {
-  margin-top: 0 !important;
-  margin-bottom: 0 !important;
-  border: 0 !important;
-  border-top: 1px solid rgba(218, 228, 240, 0.78) !important;
-  border-radius: 0 !important;
-  background: rgba(248, 251, 255, 0.64) !important;
-  padding: 12px 0 0 !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-footer.-mt-px,
-html body .quotation-contract-ui .quotation-copy-footer.-mt-px {
-  margin-top: 0 !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .shrink-0,
-html body .quotation-contract-ui .quotation-copy-body > .shrink-0,
-html body .dashboard-scale-root .fixed .quotation-copy-body > :where(.mt-3, .mt-4),
-html body .quotation-contract-ui .quotation-copy-body > :where(.mt-3, .mt-4) {
-  position: relative;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .shrink-0,
-html body .quotation-contract-ui .quotation-copy-body > .shrink-0 {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: 0;
-  flex-direction: column;
-  padding: 0;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .shrink-0 > .mt-4,
-html body .quotation-contract-ui .quotation-copy-body > .shrink-0 > .mt-4 {
-  flex: 1 1 auto;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .mt-3,
-html body .quotation-contract-ui .quotation-copy-body > .mt-3 {
-  flex: 0 0 auto;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body .grid.grid-cols-2.rounded-\[10px\],
-html body .quotation-contract-ui .quotation-copy-body .grid.grid-cols-2.rounded-\[10px\] {
-  width: 100%;
-  border: 0 !important;
-  border-bottom: 1px solid rgba(218, 228, 240, 0.72);
-  border-radius: 0 !important;
-  background: transparent !important;
-  box-shadow: none !important;
-  padding: 0 !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body .grid.grid-cols-2.rounded-\[10px\] button,
-html body .quotation-contract-ui .quotation-copy-body .grid.grid-cols-2.rounded-\[10px\] button {
-  border-radius: 0 !important;
-  min-height: 46px;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body .grid.grid-cols-2.rounded-\[10px\] button,
-html body .quotation-contract-ui .quotation-copy-body .grid.grid-cols-2.rounded-\[10px\] button {
-  background: transparent;
-  box-shadow: none !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body .grid.grid-cols-2.rounded-\[10px\] button[class*="bg-white"],
-html body .quotation-contract-ui .quotation-copy-body .grid.grid-cols-2.rounded-\[10px\] button[class*="bg-white"] {
-  background: rgba(255, 255, 255, 0.72) !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .shrink-0 > .mt-4,
-html body .quotation-contract-ui .quotation-copy-body > .shrink-0 > .mt-4,
-html body .dashboard-scale-root .fixed .quotation-copy-body > .mt-3,
-html body .quotation-contract-ui .quotation-copy-body > .mt-3,
-html body .dashboard-scale-root .fixed .quotation-copy-body > p,
-html body .quotation-contract-ui .quotation-copy-body > p {
-  border-color: transparent !important;
-  background: transparent !important;
-  box-shadow: none !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .shrink-0 > .mt-4 button,
-html body .quotation-contract-ui .quotation-copy-body > .shrink-0 > .mt-4 button {
-  background: transparent !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .shrink-0 > .mt-4 button[class*="bg-[#f6f9ff]"],
-html body .quotation-contract-ui .quotation-copy-body > .shrink-0 > .mt-4 button[class*="bg-[#f6f9ff]"] {
-  background: rgba(239, 246, 255, 0.52) !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-choice-panel,
-html body .quotation-contract-ui .quotation-copy-choice-panel {
-  margin-top: 0 !important;
-  border-radius: 0 !important;
-  border-width: 0 !important;
-  border-bottom: 1px solid rgba(218, 228, 240, 0.68) !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-choice-panel > button,
-html body .quotation-contract-ui .quotation-copy-choice-panel > button {
-  border-radius: 0 !important;
-  padding-left: 18px !important;
-  padding-right: 18px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-choice-panel > button + button,
-html body .quotation-contract-ui .quotation-copy-choice-panel > button + button {
-  border-top: 1px solid rgba(218, 228, 240, 0.72) !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-target-card,
-html body .quotation-contract-ui .quotation-copy-target-card {
-  margin: 0 !important;
-  border-radius: 0 !important;
-  border-width: 0 !important;
-  border-bottom: 1px solid rgba(218, 228, 240, 0.68) !important;
-  padding: 16px 18px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-hint,
-html body .quotation-contract-ui .quotation-copy-hint {
-  margin: 0 !important;
-  border-radius: 0 !important;
-  border-width: 0 !important;
-  border-bottom: 1px solid rgba(218, 228, 240, 0.68) !important;
-  padding: 12px 18px !important;
-}
-
-/* Final copy-quotation modal polish: one compact panel, rows separated by lines. */
-html body .dashboard-scale-root .fixed .quotation-copy-modal,
-html body .quotation-contract-ui .quotation-copy-modal {
-  max-width: 560px !important;
-  padding: 22px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body,
-html body .quotation-contract-ui .quotation-copy-body {
-  flex: 0 0 auto !important;
-  margin-top: 18px !important;
-  border: 1px solid rgba(218, 228, 240, 0.86) !important;
-  border-radius: 16px !important;
-  background: rgba(249, 251, 254, 0.70) !important;
-  overflow: hidden !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .shrink-0,
-html body .quotation-contract-ui .quotation-copy-body > .shrink-0 {
-  display: block !important;
-  flex: 0 0 auto !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .shrink-0 > .mt-4,
-html body .quotation-contract-ui .quotation-copy-body > .shrink-0 > .mt-4 {
-  flex: 0 0 auto !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body .grid.grid-cols-2.rounded-\[10px\],
-html body .quotation-contract-ui .quotation-copy-body .grid.grid-cols-2.rounded-\[10px\] {
-  height: 48px;
-  border-bottom: 1px solid rgba(218, 228, 240, 0.82) !important;
-  background: rgba(239, 244, 250, 0.72) !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body .grid.grid-cols-2.rounded-\[10px\] button,
-html body .quotation-contract-ui .quotation-copy-body .grid.grid-cols-2.rounded-\[10px\] button {
-  height: 48px !important;
-  min-height: 48px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-choice-panel,
-html body .quotation-contract-ui .quotation-copy-choice-panel {
-  margin: 0 !important;
-  border: 0 !important;
-  border-bottom: 1px solid rgba(218, 228, 240, 0.78) !important;
-  background: transparent !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-choice-panel > button,
-html body .quotation-contract-ui .quotation-copy-choice-panel > button {
-  min-height: 72px !important;
-  padding: 12px 18px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-target-card,
-html body .quotation-contract-ui .quotation-copy-target-card {
-  min-height: 74px !important;
-  padding: 14px 18px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-hint,
-html body .quotation-contract-ui .quotation-copy-hint {
-  min-height: 42px !important;
-  padding: 10px 18px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-footer,
-html body .quotation-contract-ui .quotation-copy-footer {
-  height: 64px;
-  align-items: center;
-  border-top: 1px solid rgba(218, 228, 240, 0.78) !important;
-  background: transparent !important;
-  padding: 12px 18px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .quotation-copy-footer,
-html body .quotation-contract-ui .quotation-copy-body > .quotation-copy-footer {
-  margin-top: 0 !important;
-  width: 100%;
-  border-radius: 0 !important;
-  border-right: 0 !important;
-  border-bottom: 0 !important;
-  border-left: 0 !important;
-  box-shadow: none !important;
-}
-
-/* Copy quotation picker: make the "copy to other customer" mode usable and polished. */
-html body .dashboard-scale-root .fixed .quotation-copy-modal.quotation-copy-modal-other,
-html body .quotation-contract-ui .quotation-copy-modal.quotation-copy-modal-other {
-  max-width: 680px !important;
-  height: min(760px, calc(100dvh - 56px)) !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-modal.quotation-copy-modal-other .quotation-copy-body,
-html body .quotation-contract-ui .quotation-copy-modal.quotation-copy-modal-other .quotation-copy-body {
-  flex: 1 1 auto !important;
-  display: flex !important;
-  min-height: 0;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-modal.quotation-copy-modal-other .quotation-copy-body > .shrink-0,
-html body .quotation-contract-ui .quotation-copy-modal.quotation-copy-modal-other .quotation-copy-body > .shrink-0 {
-  flex: 0 0 auto !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-modal.quotation-copy-modal-other .quotation-copy-choice-panel > button,
-html body .quotation-contract-ui .quotation-copy-modal.quotation-copy-modal-other .quotation-copy-choice-panel > button {
-  min-height: 64px !important;
-}
-
-/* Copy quotation modal: final fused layout fixes. */
-html body .dashboard-scale-root .fixed .quotation-copy-body > .quotation-copy-target-card,
-html body .quotation-contract-ui .quotation-copy-body > .quotation-copy-target-card {
-  border-top: 1px solid rgba(218, 228, 240, 0.82) !important;
-  border-bottom: 0 !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body .quotation-copy-choice-panel,
-html body .quotation-contract-ui .quotation-copy-body .quotation-copy-choice-panel {
-  border-bottom: 0 !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .quotation-copy-hint,
-html body .quotation-contract-ui .quotation-copy-body > .quotation-copy-hint {
-  border-top: 0 !important;
-  border-bottom: 1px solid rgba(218, 228, 240, 0.78) !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .quotation-copy-footer,
-html body .quotation-contract-ui .quotation-copy-body > .quotation-copy-footer {
-  display: flex !important;
-  flex: 0 0 68px !important;
-  flex-direction: row !important;
-  align-items: center !important;
-  justify-content: flex-end !important;
-  gap: 10px !important;
-  height: 68px !important;
-  margin: 0 !important;
-  padding: 12px 18px !important;
-  border-top: 1px solid rgba(218, 228, 240, 0.78) !important;
-  border-radius: 0 !important;
-  background: rgba(249, 251, 254, 0.54) !important;
-  box-shadow: none !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .quotation-copy-footer .btn-secondary,
-html body .dashboard-scale-root .fixed .quotation-copy-body > .quotation-copy-footer .btn-primary,
-html body .quotation-contract-ui .quotation-copy-body > .quotation-copy-footer .btn-secondary,
-html body .quotation-contract-ui .quotation-copy-body > .quotation-copy-footer .btn-primary {
-  min-width: 92px !important;
-  height: 40px !important;
-  min-height: 40px !important;
-  padding: 0 16px !important;
-  border-radius: 12px !important;
-  font-size: 13px !important;
-  line-height: 40px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .quotation-copy-footer .quotation-copy-cancel-button,
-html body .dashboard-scale-root .fixed .quotation-copy-body > .quotation-copy-footer .quotation-copy-confirm-button,
-html body .quotation-contract-ui .quotation-copy-body > .quotation-copy-footer .quotation-copy-cancel-button,
-html body .quotation-contract-ui .quotation-copy-body > .quotation-copy-footer .quotation-copy-confirm-button {
-  display: inline-flex !important;
-  position: static !important;
-  width: auto !important;
-  min-width: 96px !important;
-  height: 40px !important;
-  min-height: 40px !important;
-  flex: 0 0 auto !important;
-  align-items: center !important;
-  justify-content: center !important;
-  gap: 7px !important;
-  margin: 0 !important;
-  padding: 0 16px !important;
-  border-radius: 12px !important;
-  font-size: 13px !important;
-  font-weight: 700 !important;
-  line-height: 40px !important;
-  white-space: nowrap !important;
-  transform: none !important;
-  box-shadow: none !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .quotation-copy-footer .quotation-copy-cancel-button,
-html body .quotation-contract-ui .quotation-copy-body > .quotation-copy-footer .quotation-copy-cancel-button {
-  border: 1px solid rgba(203, 215, 229, 0.96) !important;
-  background: rgba(255, 255, 255, 0.88) !important;
-  color: #52647b !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .quotation-copy-footer .quotation-copy-confirm-button,
-html body .quotation-contract-ui .quotation-copy-body > .quotation-copy-footer .quotation-copy-confirm-button {
-  border: 1px solid #407aff !important;
-  background: #407aff !important;
-  color: #ffffff !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-other-target,
-html body .quotation-contract-ui .quotation-copy-other-target {
-  flex: 1 1 auto !important;
-  min-height: 0;
-  margin: 12px 0 0 !important;
-  border-top: 0 !important;
-  padding: 0 !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-modal-other .quotation-copy-other-target,
-html body .quotation-contract-ui .quotation-copy-modal-other .quotation-copy-other-target {
-  margin-top: 12px !important;
-  border-top: 0 !important;
-  padding-right: 0 !important;
-  padding-left: 0 !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-search,
-html body .quotation-contract-ui .quotation-copy-search {
-  height: 42px !important;
-  border-color: rgba(199, 211, 226, 0.92) !important;
-  background: rgba(255, 255, 255, 0.86) !important;
-  font-size: 13px !important;
-  font-weight: 600 !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72) !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-customer-list,
-html body .quotation-contract-ui .quotation-copy-customer-list {
-  margin-top: 10px !important;
-  border: 1px solid rgba(218, 228, 240, 0.82) !important;
-  border-radius: 12px !important;
-  background: rgba(255, 255, 255, 0.72) !important;
-  overflow: auto !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-customer-row,
-html body .quotation-contract-ui .quotation-copy-customer-row {
-  min-height: 56px;
-  padding: 9px 12px !important;
-  background: rgba(255, 255, 255, 0.64) !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-customer-row:hover,
-html body .quotation-contract-ui .quotation-copy-customer-row:hover {
-  background: rgba(242, 247, 255, 0.86) !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-customer-row[class*="bg-[#f3f7ff]"],
-html body .quotation-contract-ui .quotation-copy-customer-row[class*="bg-[#f3f7ff]"] {
-  background: rgba(235, 243, 255, 0.92) !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-customer-row > div,
-html body .quotation-contract-ui .quotation-copy-customer-row > div {
-  grid-template-columns: 74px minmax(0, 1fr) !important;
-  gap: 10px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-customer-status,
-html body .quotation-contract-ui .quotation-copy-customer-status {
-  width: 70px !important;
-  height: 22px !important;
-  border-radius: 999px !important;
-  font-size: 11px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-customer-row p,
-html body .quotation-contract-ui .quotation-copy-customer-row p {
-  font-size: 13px !important;
-  line-height: 18px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-customer-row .text-\[12px\],
-html body .quotation-contract-ui .quotation-copy-customer-row .text-\[12px\] {
-  font-size: 12px !important;
-  line-height: 17px !important;
-}
-
-/* Copy quotation modal: unified flat system style. */
-html body .dashboard-scale-root .fixed .quotation-copy-modal,
-html body .quotation-contract-ui .quotation-copy-modal {
-  max-width: 540px !important;
-  padding: 0 !important;
-  border: 1px solid #dfe6ef !important;
-  border-radius: 14px !important;
-  background: #ffffff !important;
-  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.14) !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-header,
-html body .quotation-contract-ui .quotation-copy-header {
-  border-bottom: 1px solid #e7edf4 !important;
-  background: #ffffff !important;
-  padding: 16px 18px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-header > div > span,
-html body .quotation-contract-ui .quotation-copy-header > div > span {
-  width: 36px !important;
-  height: 36px !important;
-  border-color: #d8e5ff !important;
-  border-radius: 10px !important;
-  background: #f4f7ff !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-header > div > span > span:first-child,
-html body .quotation-contract-ui .quotation-copy-header > div > span > span:first-child {
-  width: 8px !important;
-  height: 8px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-header > div > span > span:last-child,
-html body .quotation-contract-ui .quotation-copy-header > div > span > span:last-child {
-  width: 26px !important;
-  height: 26px !important;
-  border-radius: 8px !important;
-  box-shadow: none !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body,
-html body .quotation-contract-ui .quotation-copy-body {
-  flex: 0 0 auto !important;
-  margin-top: 0 !important;
-  border: 0 !important;
-  border-radius: 0 !important;
-  background: #f8fafc !important;
-  padding: 16px 18px 0 !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-static-area,
-html body .quotation-contract-ui .quotation-copy-static-area {
-  border: 1px solid #e1e8f0 !important;
-  border-radius: 12px !important;
-  background: #ffffff !important;
-  overflow: hidden !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-section-label,
-html body .quotation-contract-ui .quotation-copy-section-label {
-  display: flex;
-  align-items: center;
-  height: 28px;
-  padding: 0 14px;
-  background: #fbfcfe;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-section-label span,
-html body .quotation-contract-ui .quotation-copy-section-label span {
-  font-size: 11px;
-  font-weight: 650;
-  line-height: 1;
-  color: #7a8798;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-section-label.mt-4,
-html body .quotation-contract-ui .quotation-copy-section-label.mt-4 {
-  margin-top: 0 !important;
-  border-top: 1px solid #edf2f7;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-target-tabs,
-html body .quotation-contract-ui .quotation-copy-target-tabs {
-  height: auto !important;
-  margin: 0 !important;
-  border-bottom: 1px solid #edf2f7 !important;
-  border-radius: 0 !important;
-  background: #f3f6fa !important;
-  padding: 4px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-target-tabs button,
-html body .quotation-contract-ui .quotation-copy-target-tabs button {
-  height: 34px !important;
-  min-height: 34px !important;
-  border-radius: 8px !important;
-  font-size: 12px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-choice-panel,
-html body .quotation-contract-ui .quotation-copy-choice-panel {
-  margin: 0 !important;
-  border: 0 !important;
-  border-radius: 0 !important;
-  background: #ffffff !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-choice-panel > button,
-html body .quotation-contract-ui .quotation-copy-choice-panel > button {
-  min-height: 66px !important;
-  border-radius: 0 !important;
-  padding: 11px 14px !important;
-  background: #ffffff !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-choice-panel > button:hover,
-html body .quotation-contract-ui .quotation-copy-choice-panel > button:hover {
-  background: #f8fbff !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-choice-panel > button[class*="bg-[#f6f9ff]"],
-html body .quotation-contract-ui .quotation-copy-choice-panel > button[class*="bg-[#f6f9ff]"] {
-  background: #f4f8ff !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-choice-panel > button > span:first-child > span:first-child,
-html body .quotation-contract-ui .quotation-copy-choice-panel > button > span:first-child > span:first-child {
-  width: 34px !important;
-  height: 34px !important;
-  border-radius: 9px !important;
-  background: #f7f9fc !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-choice-panel > button[class*="bg-[#f6f9ff]"] > span:first-child > span:first-child,
-html body .quotation-contract-ui .quotation-copy-choice-panel > button[class*="bg-[#f6f9ff]"] > span:first-child > span:first-child {
-  border-color: #cbdcff !important;
-  background: #ffffff !important;
-  color: #407aff !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-target-card,
-html body .quotation-contract-ui .quotation-copy-target-card {
-  min-height: 0 !important;
-  margin-top: 12px !important;
-  border: 1px solid #d9e2ef !important;
-  border-bottom: 1px solid #d9e2ef !important;
-  border-radius: 12px !important;
-  background: #ffffff !important;
-  padding: 0 !important;
-  overflow: hidden !important;
-  box-shadow: none !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .quotation-copy-target-card,
-html body .quotation-contract-ui .quotation-copy-body > .quotation-copy-target-card {
-  border: 1px solid #d9e2ef !important;
-  border-top: 1px solid #d9e2ef !important;
-  border-right: 1px solid #d9e2ef !important;
-  border-bottom: 1px solid #d9e2ef !important;
-  border-left: 1px solid #d9e2ef !important;
-  border-radius: 12px !important;
-  box-shadow: none !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-current-summary,
-html body .quotation-contract-ui .quotation-copy-current-summary {
-  margin-top: 0 !important;
-  min-height: 74px !important;
-  padding: 12px 14px !important;
-  background: #ffffff !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-target-caption,
-html body .quotation-contract-ui .quotation-copy-target-caption {
-  margin: 0 0 4px !important;
-  color: #7a8798 !important;
-  font-size: 11px !important;
-  font-weight: 650 !important;
-  line-height: 1 !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-customer-avatar,
-html body .quotation-contract-ui .quotation-copy-customer-avatar {
-  display: inline-flex;
-  width: 38px;
-  height: 38px;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid #d8e5ff;
-  border-radius: 10px;
-  background: #f4f7ff;
-  color: #245ee8;
-  font-size: 15px;
-  font-weight: 750;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-result-meta span,
-html body .quotation-contract-ui .quotation-copy-result-meta span {
-  display: inline-flex;
-  height: 24px;
-  align-items: center;
-  border: 1px solid #bee8d2;
-  border-radius: 999px;
-  background: #f0fdf4;
-  padding: 0 9px;
-  color: #087443;
-  font-size: 11px;
-  font-weight: 650;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-result-meta p,
-html body .quotation-contract-ui .quotation-copy-result-meta p {
-  margin-top: 5px !important;
-  color: #667085 !important;
-  font-size: 11px !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-hint,
-html body .quotation-contract-ui .quotation-copy-hint {
-  margin-top: auto !important;
-  min-height: 0 !important;
-  border: 0 !important;
-  border-radius: 0 !important;
-  background: transparent !important;
-  padding: 0 2px 10px !important;
-  color: #5d6b7d !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-modal-fixed .quotation-copy-hint,
-html body .quotation-contract-ui .quotation-copy-modal-fixed .quotation-copy-hint {
-  margin-top: auto !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-body > .quotation-copy-footer,
-html body .quotation-contract-ui .quotation-copy-body > .quotation-copy-footer {
-  height: 64px !important;
-  min-height: 64px !important;
-  flex-basis: 64px !important;
-  margin: 0 !important;
-  padding: 12px 18px !important;
-  border-top: 1px solid #e3eaf2 !important;
-  border-radius: 0 !important;
-  background: #ffffff !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-modal.quotation-copy-modal-fixed,
-html body .quotation-contract-ui .quotation-copy-modal.quotation-copy-modal-fixed {
-  width: min(680px, calc(100vw - 32px)) !important;
-  max-width: 680px !important;
-  height: min(720px, calc(100dvh - 48px)) !important;
-  max-height: min(720px, calc(100dvh - 48px)) !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-modal.quotation-copy-modal-fixed .quotation-copy-body,
-html body .quotation-contract-ui .quotation-copy-modal.quotation-copy-modal-fixed .quotation-copy-body {
-  display: flex !important;
-  flex: 1 1 auto !important;
-  min-height: 0 !important;
-}
-
-html body .dashboard-scale-root .fixed .quotation-copy-modal.quotation-copy-modal-fixed .quotation-copy-footer,
-html body .quotation-contract-ui .quotation-copy-modal.quotation-copy-modal-fixed .quotation-copy-footer {
-  margin-top: 0 !important;
-}
-
 html body .dashboard-scale-root .fixed .quotation-record-card,
 html body .dashboard-scale-root .fixed .quotation-record-action-panel,
 html body .quotation-contract-ui .quotation-record-card,
@@ -11736,7 +11044,7 @@ html body .site-management-ui .vr-builder-primary-button {
 html body .site-management-ui .vr-builder-secondary-button {
   border-color: #d9dee7 !important;
   background: #ffffff !important;
-  color: #34445a !important;
+  color: #166534 !important;
 }
 
 html body .site-management-ui .vr-builder-secondary-button:hover {
@@ -16024,7 +15332,7 @@ html body .dashboard-scale-root .quota-management-ui.quota-library-page .quota-l
   align-items: center !important;
   justify-content: center !important;
   margin: 0 !important;
-  color: #34445a !important;
+  color: #166534 !important;
   font-size: 12px !important;
   font-weight: 500 !important;
   line-height: 36px !important;
@@ -27303,6 +26611,17 @@ html body .dashboard-scale-root .quota-management-ui.personalized-template-edito
 }
 
 /* End of personalized-template editor overrides. */
+
+/* Copy quotation dialog: one-piece flat white surface without inherited shadows or dividers. */
+html body .dashboard-scale-root .fixed [class*="copy-quotation-redesign"][class*="max-w-"][class*="bg-white"][class*="border"].flex,
+html body .dashboard-scale-root .fixed [class*="copy-quotation-redesign"][class*="max-w-"][class*="bg-white"][class*="border"].flex * {
+  box-shadow: none !important;
+}
+
+html body .dashboard-scale-root .fixed [class*="copy-quotation-redesign"][class*="max-w-"][class*="bg-white"][class*="border"].flex > * {
+  border-top: 0 !important;
+  border-bottom: 0 !important;
+}
 
 /* Quotation base quota update dialog */
 .quote-quota-update-overlay {

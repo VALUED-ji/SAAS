@@ -3,6 +3,7 @@
 import {
   downloadQuotaImportErrors,
   downloadQuotaImportTemplate,
+  downloadQuotaItems,
   readExcelFileAsImportText,
   DEFAULT_QUOTA_SCOPE,
   DEFAULT_PRICE_SCENE,
@@ -97,6 +98,7 @@ export default function QuotaLibraryPage() {
   const [importIsExample, setImportIsExample] = useState(false);
   const [hasRealImportFile, setHasRealImportFile] = useState(false);
   const [importErrors, setImportErrors] = useState<QuotaImportError[]>([]);
+  const [exportingQuota, setExportingQuota] = useState(false);
   const [importScope, setImportScope] = useState("");
   const [unitOptionsOpen, setUnitOptionsOpen] = useState(false);
   const [priceSceneHelpOpen, setPriceSceneHelpOpen] = useState(false);
@@ -776,6 +778,21 @@ export default function QuotaLibraryPage() {
     setImportErrors([]);
     setImportMessage("当前为示例内容，仅用于查看导入格式，不会被导入。");
   };
+  const exportQuotaItems = async () => {
+    if (filteredItems.length === 0) {
+      setNotice("当前筛选条件下没有可导出的定额");
+      return;
+    }
+    setExportingQuota(true);
+    try {
+      await downloadQuotaItems(filteredItems, storeFilter ? `${storeFilter}基装定额` : "基装定额");
+      setNotice(`已导出 ${filteredItems.length} 条定额`);
+    } catch {
+      setNotice("导出定额失败，请稍后重试");
+    } finally {
+      setExportingQuota(false);
+    }
+  };
   const editingInternalLaborCost = Number(editingItem?.internalLaborCost || 0);
   const editingInternalMaterialCost = Number(editingItem?.internalMaterialCost || 0);
   const isWorkTypeRequired = editingInternalLaborCost > 0;
@@ -861,6 +878,10 @@ export default function QuotaLibraryPage() {
               <option value="enabled">启用</option>
               <option value="disabled">停用</option>
             </SystemSelect>
+            <button type="button" onClick={() => void exportQuotaItems()} disabled={exportingQuota || filteredItems.length === 0} className="btn-secondary quota-toolbar-action min-h-10 px-3">
+              {exportingQuota ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              {exportingQuota ? "导出中" : "导出定额"}
+            </button>
             <button type="button" onClick={() => { setImportOpen(true); setImportMessage(""); }} className="btn-secondary quota-toolbar-action min-h-10 px-3"><Upload className="h-4 w-4" />导入定额</button>
             <button type="button" onClick={openCreateDialog} className="btn-primary quota-toolbar-action min-h-10 px-3"><Plus className="h-4 w-4" />新增定额</button>
           </div>
@@ -898,7 +919,6 @@ export default function QuotaLibraryPage() {
                 </th>
                 <th className="px-3 py-3 text-center">定额编码</th>
                 <th className="px-3 py-3 text-center">分类</th>
-                <th className="px-3 py-3 text-center">价格类型</th>
                 <th className="px-3 py-3 text-left">项目名称</th>
                 <th className="px-3 py-3 text-center">单位</th>
                 <th className="px-3 py-3 text-center">材料单价</th>
@@ -906,6 +926,7 @@ export default function QuotaLibraryPage() {
                 <th className="px-3 py-3 text-center">客户单价</th>
                 <th className="px-3 py-3 text-left">施工说明</th>
                 <th className="px-3 py-3 text-center">适用门店</th>
+                <th className="px-3 py-3 text-center">价格类型</th>
                 <th className="px-3 py-3 text-center">状态</th>
                 <th className="px-3 py-3 text-center">操作</th>
               </tr>
@@ -943,7 +964,6 @@ export default function QuotaLibraryPage() {
                   </td>
 	                  <td className="quota-code-cell px-3 py-3 text-center">{item.code}</td>
 	                  <td className="quota-category-cell px-3 py-3 text-center">{item.category}</td>
-                  <td className="quota-category-cell px-3 py-3 text-center">{item.priceScene || DEFAULT_PRICE_SCENE}</td>
                   <td className="quota-primary-cell px-3 py-3">
                     <p className="quota-item-name">{item.name}</p>
                   </td>
@@ -964,6 +984,7 @@ export default function QuotaLibraryPage() {
                     <p className="line-clamp-2 leading-5" title={item.constructionDescription || undefined}>{item.constructionDescription || "-"}</p>
                   </td>
                   <td className="quota-scope-cell px-3 py-3 text-center text-surface-700">{item.scope || DEFAULT_QUOTA_SCOPE}</td>
+                  <td className="quota-category-cell px-3 py-3 text-center">{item.priceScene || DEFAULT_PRICE_SCENE}</td>
                   <td className="px-3 py-3 text-center">
                     <span className={item.status === "enabled" ? "quota-status-tag quota-status-tag-enabled bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700" : "quota-status-tag quota-status-tag-disabled bg-surface-100 px-2 py-1 text-xs font-semibold text-surface-500"}>
                       {item.status === "enabled" ? "启用" : "停用"}

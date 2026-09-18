@@ -30,6 +30,9 @@ export type QuotationItem = {
   quota_source_id?: string | null;
   quota_source_type?: string | null;
   quota_source_synced_at?: string | null;
+  quota_source_material_price?: number | null;
+  quota_source_labor_price?: number | null;
+  price_manually_edited?: boolean | number | null;
   profit_margin?: number;
   row_color?: string | null;
   fee_calc_method?: FeeCalcMethod;
@@ -72,6 +75,31 @@ export function isCustomCabinetCategory(category: string) {
 
 export function isDirectItemCategory(category: string) {
   return !isOtherCategory(category);
+}
+
+export function canTrackManualPriceEdit(item?: Partial<QuotationItem> | null) {
+  if (!item || isOtherCategory(String(item.category || ""))) return false;
+  return Boolean(
+    String(item.quota_source_id || "").trim()
+    || String(item.quota_source_type || "").trim()
+    || String(item.cost_source || "").trim()
+    || item.source,
+  );
+}
+
+export function getManualPriceEditFlags(value: unknown) {
+  const mask = Math.max(0, Math.min(3, Number(value || 0)));
+  return {
+    material: (mask & 1) === 1,
+    labor: (mask & 2) === 2,
+  };
+}
+
+export function setManualPriceEditFlag(value: unknown, field: "material" | "labor") {
+  const flags = getManualPriceEditFlags(value);
+  if (field === "material") flags.material = true;
+  else flags.labor = true;
+  return (flags.material ? 1 : 0) | (flags.labor ? 2 : 0);
 }
 
 export function sameQuoteCategory(left: unknown, right: unknown) {

@@ -1063,6 +1063,37 @@ function getCustomerPicker(req: NextRequest) {
   const where = ["c.company_id = ?", "c.deleted_at IS NULL"];
   const params: unknown[] = [currentUser.companyId];
   if (usage === "quotation-copy-target") applyQuotationCopyTargetFilter(where, params, currentUser.companyId);
+  const store = getTrimmedParam(searchParams, "store");
+  if (store) {
+    where.push("COALESCE(c.service_store, '') = ?");
+    params.push(store);
+  }
+  const advisor = getTrimmedParam(searchParams, "advisor");
+  if (advisor) {
+    where.push(`(
+      EXISTS (
+        SELECT 1
+        FROM customer_team advisor_filter_team
+        WHERE advisor_filter_team.customer_id = c.id
+          AND advisor_filter_team.user_id = ?
+          AND UPPER(advisor_filter_team.role) = 'ADVISOR'
+      )
+      OR c.inviter_id = ?
+      OR (TRIM(COALESCE(c.inviter_id, '')) = '' AND c.created_by_id = ?)
+    )`);
+    params.push(advisor, advisor, advisor);
+  }
+  const designer = getTrimmedParam(searchParams, "designer");
+  if (designer) {
+    where.push(`EXISTS (
+      SELECT 1
+      FROM customer_team designer_filter_team
+      WHERE designer_filter_team.customer_id = c.id
+        AND designer_filter_team.user_id = ?
+        AND UPPER(designer_filter_team.role) = 'DESIGNER'
+    )`);
+    params.push(designer);
+  }
   if (search) {
     const like = `%${search}%`;
     const normalizedRoomLike = `%${normalizeRoomSearchText(search)}%`;
@@ -1104,6 +1135,11 @@ function getCustomerPicker(req: NextRequest) {
     customers: maskUnauthorizedCustomerPhones(db, rows, currentUser.userId),
     total,
     hasMore,
+    filters: {
+      stores: getDistinctCustomerOptions(db, "service_store", currentUser.companyId),
+      advisors: getAdvisorOptions(db, currentUser.companyId),
+      designers: getDesignerOptions(db, currentUser.companyId),
+    },
   });
 }
 

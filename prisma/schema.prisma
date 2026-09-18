@@ -260,6 +260,7 @@ model QuotationItem {
   materialCost Float? // 材料成本
   laborCost    Float? // 人工成本
   profitMargin Float? // 利润率
+  priceManuallyEdited Boolean @default(false) @map("price_manually_edited")
   sortOrder    Int       @default(0)
   createdAt    DateTime  @default(now())
 

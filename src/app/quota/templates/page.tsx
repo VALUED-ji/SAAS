@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent as ReactChangeEvent, type ClipboardEvent as ReactClipboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { AlignCenter, AlignLeft, Bold, Building2, Check, ChevronDown, Copy, Eraser, GripVertical, Italic, LayoutTemplate, List, ListOrdered, Loader2, Pencil, Plus, Power, Search, SlidersHorizontal, Trash2, Underline, X } from "lucide-react";
+import { AlertTriangle, AlignCenter, AlignLeft, Bold, Building2, Check, ChevronDown, Copy, Eraser, GripVertical, Italic, LayoutTemplate, List, ListOrdered, Loader2, Pencil, Plus, Power, Search, SlidersHorizontal, Trash2, Underline, X } from "lucide-react";
 import DataPagination, { useDataPagination } from "@/components/ui/DataPagination";
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
 import { useAuth } from "@/lib/auth";
@@ -147,6 +147,35 @@ const templateFeeScopeModeOptions: Array<{ value: FeeScopeMode; label: string }>
   { value: "exclude", label: "不计入选中的空间/类别" },
   { value: "include", label: "只计入选中的空间/类别" },
 ];
+
+const quotaSourceComparableFields = [
+  ["code", "定额编码"],
+  ["category", "分类"],
+  ["priceScene", "价格类型"],
+  ["name", "项目名称"],
+  ["constructionDescription", "施工说明"],
+  ["unit", "单位"],
+  ["laborPrice", "人工单价"],
+  ["materialPrice", "材料单价"],
+  ["totalPrice", "客户单价"],
+  ["isSpecialPrice", "特价标记"],
+] as const;
+type QuotaSourceField = typeof quotaSourceComparableFields[number][0];
+
+function comparableQuotaSourceValue(field: string, value: any) {
+  if (["laborPrice", "materialPrice", "totalPrice"].includes(field)) {
+    const amount = Number(value || 0);
+    return Number.isFinite(amount) ? Number(amount.toFixed(4)) : 0;
+  }
+  if (field === "isSpecialPrice") return Boolean(value);
+  return String(value ?? "").trim();
+}
+
+function formatQuotaSourceValue(field: string, value: any) {
+  if (["laborPrice", "materialPrice", "totalPrice"].includes(field)) return formatAmount(value);
+  if (field === "isSpecialPrice") return Boolean(value) ? "是" : "否";
+  return String(value ?? "").trim() || "-";
+}
 
 function TemplateFeeScopeSelector({
   mode,
@@ -305,6 +334,8 @@ export default function QuotaTemplatesPage() {
   const [quotaLibraryStoreOptions, setQuotaLibraryStoreOptions] = useState<Array<{ id: string; name: string; itemCount: number }>>([]);
   const [quotaLibraryLoading, setQuotaLibraryLoading] = useState(false);
   const [quotaLibraryError, setQuotaLibraryError] = useState("");
+  const [quotaDiffOpen, setQuotaDiffOpen] = useState(false);
+  const [quotaDiffExpandedFields, setQuotaDiffExpandedFields] = useState<string[]>([]);
   const [constructionTemplateOptions, setConstructionTemplateOptions] = useState<ConstructionTemplateOption[]>([]);
   const [templateScopeOptions, setTemplateScopeOptions] = useState<Array<{ id: string; name: string; path: string; type: string }>>([]);
   const [constructionTemplateLoading, setConstructionTemplateLoading] = useState(false);
@@ -522,6 +553,7 @@ export default function QuotaTemplatesPage() {
               totalPrice: Number.isFinite(Number(item.totalPrice)) ? Math.max(0, Number(item.totalPrice)) : Math.max(0, laborPrice + materialPrice),
               isSpecialPrice: Boolean(item.isSpecialPrice),
               status: String(item.status || ""),
+              updatedAt: String(item.updatedAt || item.updated_at || ""),
             };
           })
           .filter((item: QuotaLibraryItem | null): item is QuotaLibraryItem => Boolean(item?.id && item.name && item.status !== "disabled"))
@@ -658,6 +690,80 @@ export default function QuotaTemplatesPage() {
   const pagination = useDataPagination(filteredTemplates, [search, pricingModeFilter, statusFilter, branchScopeFilter].join("|"));
   const selectedTemplate = visibleTemplates.find((template) => template.id === selectedId) || filteredTemplates[0] || visibleTemplates[0];
   const activeSpace = editingTemplate?.spaces.find((space) => space.id === activeSpaceId) || editingTemplate?.spaces[0] || null;
+
+  const quotaSourceUpdates = useMemo(() => {
+    if (!editingTemplate || quotaLibraryItems.length === 0) return [] as Array<{
+      spaceId: string;
+      itemId: string;
+      changedFields: QuotaSourceField[];
+      preservedFields: QuotaSourceField[];
+      latest: QuotaLibraryItem;
+    }>;
+    const quotaById = new Map(quotaLibraryItems.map((quota) => [String(quota.id || ""), quota]));
+    const updates: Array<{
+      spaceId: string;
+      itemId: string;
+      changedFields: QuotaSourceField[];
+      preservedFields: QuotaSourceField[];
+      latest: QuotaLibraryItem;
+    }> = [];
+    editingTemplate.spaces.forEach((space) => {
+      space.quotaItems.forEach((item) => {
+        const quotaId = String(item.quotaId || "").trim();
+        if (!quotaId) return;
+        const latest = quotaById.get(quotaId);
+        if (!latest) return;
+        const base = item.sourceSnapshot || item;
+        const changedFields = quotaSourceComparableFields
+          .map(([field]) => field)
+          .filter((field) => comparableQuotaSourceValue(field, (base as any)[field]) !== comparableQuotaSourceValue(field, (latest as any)[field]));
+        if (changedFields.length === 0) return;
+        const overrideSet = new Set(item.overriddenFields || []);
+        updates.push({
+          spaceId: space.id,
+          itemId: item.id,
+          changedFields,
+          preservedFields: changedFields.filter((field) => overrideSet.has(field)),
+          latest,
+        });
+      });
+    });
+    return updates;
+  }, [editingTemplate, quotaLibraryItems]);
+
+  const quotaDiffRows = useMemo(() => {
+    if (!editingTemplate || quotaSourceUpdates.length === 0) return [];
+    const labelByField = new Map(quotaSourceComparableFields.map(([field, label]) => [field, label]));
+    return quotaSourceUpdates
+      .map((update) => {
+        const space = editingTemplate.spaces.find((item) => item.id === update.spaceId);
+        const item = space?.quotaItems.find((quotaItem) => quotaItem.id === update.itemId);
+        if (!space || !item) return null;
+        const source = item.sourceSnapshot || item;
+        const overrideSet = new Set(item.overriddenFields || []);
+        const hasPriceInputChange = update.changedFields.includes("laborPrice") || update.changedFields.includes("materialPrice");
+        const visibleChangedFields = update.changedFields.filter((field) => field !== "totalPrice" || !hasPriceInputChange);
+        if (visibleChangedFields.length === 0) return null;
+        return {
+          id: `${update.spaceId}:${update.itemId}`,
+          spaceName: space.name,
+          itemName: item.name || update.latest.name || "未命名项目",
+          fields: visibleChangedFields.map((field) => ({
+            field,
+            label: labelByField.get(field) || field,
+            before: formatQuotaSourceValue(field, (source as any)[field]),
+            after: formatQuotaSourceValue(field, (update.latest as any)[field]),
+            preserved: overrideSet.has(field),
+          })),
+        };
+      })
+      .filter(Boolean) as Array<{
+        id: string;
+        spaceName: string;
+        itemName: string;
+        fields: Array<{ field: QuotaSourceField; label: string; before: string; after: string; preserved: boolean }>;
+      }>;
+  }, [editingTemplate, quotaSourceUpdates]);
   const editingTemplateBranchId = String(editingTemplate?.autoScope?.orgUnitId || editingTemplate?.autoScope?.branchOrgUnitId || "").trim();
   const editingTemplateBranchName = String(editingTemplate?.autoScope?.orgUnitName || editingTemplate?.autoScope?.branchOrgUnitName || "").trim();
   const storeFilteredQuotaLibraryItems = useMemo(() => (
@@ -867,6 +973,7 @@ export default function QuotaTemplatesPage() {
     setPickedQuotaIds([]);
     setConstructionTemplatePickerOpen(false);
     setConstructionTemplateSearch("");
+    setQuotaDiffOpen(false);
     setSelectedId(template.id);
     lastSpaceAutoSavePayloadRef.current = getTemplateAutoSavePayload(template, "create");
     setSpaceAutoSaveStatus("idle");
@@ -883,9 +990,11 @@ export default function QuotaTemplatesPage() {
     setPickedQuotaIds([]);
     setConstructionTemplatePickerOpen(false);
     setConstructionTemplateSearch("");
+    setQuotaDiffOpen(false);
     setSelectedId(template.id);
     lastSpaceAutoSavePayloadRef.current = getTemplateAutoSavePayload(template, "edit");
     setSpaceAutoSaveStatus("idle");
+    void loadQuotaLibraryOptions(template.autoScope?.branchOrgUnitId || template.autoScope?.orgUnitId || "");
   };
 
   const buildCopiedTemplate = (template: QuotaTemplate, name: string): QuotaTemplate => {
@@ -1423,13 +1532,67 @@ export default function QuotaTemplatesPage() {
     void loadQuotaLibraryOptions(editingTemplateBranchId);
   };
 
-  const updateSpaceQuota = (spaceId: string, quotaItemId: string, patch: Partial<TemplateSpaceQuota>) => {
+  const updateSpaceQuota = (
+    spaceId: string,
+    quotaItemId: string,
+    patch: Partial<TemplateSpaceQuota>,
+    options?: { markOverride?: boolean },
+  ) => {
     setEditingTemplate((current) => current ? {
       ...current,
       spaces: current.spaces.map((space) => space.id === spaceId ? {
         ...("quoteScope" in patch && patch.quoteScope ? withSpaceProjectGroup(space, normalizeQuotaScope(patch.quoteScope)) : space),
-        quotaItems: space.quotaItems.map((item) => item.id === quotaItemId ? { ...item, ...patch } : item),
+        quotaItems: space.quotaItems.map((item) => {
+          if (item.id !== quotaItemId) return item;
+          const overriddenFields = new Set(item.overriddenFields || []);
+          if (item.quotaId && options?.markOverride !== false) {
+            Object.keys(patch).forEach((field) => {
+              if (quotaSourceComparableFields.some(([sourceField]) => sourceField === field)) overriddenFields.add(field);
+            });
+          }
+          return { ...item, ...patch, overriddenFields: Array.from(overriddenFields) };
+        }),
       } : space),
+    } : current);
+  };
+
+  const applyQuotaSourceUpdates = () => {
+    if (quotaSourceUpdates.length === 0) return;
+    const updateMap = new Map(quotaSourceUpdates.map((update) => [`${update.spaceId}:${update.itemId}`, update]));
+    setEditingTemplate((current) => current ? {
+      ...current,
+      spaces: current.spaces.map((space) => ({
+        ...space,
+        quotaItems: space.quotaItems.map((item) => {
+          const update = updateMap.get(`${space.id}:${item.id}`);
+          if (!update) return item;
+          const overrideSet = new Set(item.overriddenFields || []);
+          const patch: Partial<TemplateSpaceQuota> = {};
+          const hasPriceOverride = overrideSet.has("laborPrice") || overrideSet.has("materialPrice");
+          update.changedFields.forEach((field) => {
+            if (field === "totalPrice" && hasPriceOverride) return;
+            if (!overrideSet.has(field)) (patch as any)[field] = (update.latest as any)[field];
+          });
+          const latestSnapshot = {
+            code: update.latest.code,
+            category: update.latest.category,
+            priceScene: update.latest.priceScene,
+            name: update.latest.name,
+            constructionDescription: update.latest.constructionDescription,
+            unit: update.latest.unit,
+            laborPrice: update.latest.laborPrice,
+            materialPrice: update.latest.materialPrice,
+            totalPrice: update.latest.totalPrice,
+            isSpecialPrice: update.latest.isSpecialPrice,
+          };
+          return {
+            ...item,
+            ...patch,
+            sourceVersion: update.latest.updatedAt || item.sourceVersion,
+            sourceSnapshot: latestSnapshot,
+          };
+        }),
+      })),
     } : current);
   };
 
@@ -1907,7 +2070,9 @@ export default function QuotaTemplatesPage() {
     updateSpaceQuota(spaceId, quotaItemId, quota ? {
       quotaId: quota.id,
       code: quota.code,
+      source: quota.source === "custom" ? "custom" : "standard",
       category: quota.category,
+      priceScene: quota.priceScene,
       name: quota.name,
       constructionDescription: quota.constructionDescription,
       unit: quota.unit,
@@ -1916,7 +2081,21 @@ export default function QuotaTemplatesPage() {
       materialPrice: quota.materialPrice,
       totalPrice: quota.totalPrice,
       isSpecialPrice: quota.isSpecialPrice,
-    } : { quotaId, code: "", category: "", name: "", constructionDescription: "", unit: "", quoteScope: quoteScope || "foundation", laborPrice: 0, materialPrice: 0, totalPrice: 0, isSpecialPrice: false });
+      sourceVersion: quota.updatedAt || "",
+      sourceSnapshot: {
+        code: quota.code,
+        category: quota.category,
+        priceScene: quota.priceScene,
+        name: quota.name,
+        constructionDescription: quota.constructionDescription,
+        unit: quota.unit,
+        laborPrice: quota.laborPrice,
+        materialPrice: quota.materialPrice,
+        totalPrice: quota.totalPrice,
+        isSpecialPrice: quota.isSpecialPrice,
+      },
+      overriddenFields: [],
+    } : { quotaId, code: "", category: "", name: "", constructionDescription: "", unit: "", quoteScope: quoteScope || "foundation", laborPrice: 0, materialPrice: 0, totalPrice: 0, isSpecialPrice: false, sourceVersion: "", sourceSnapshot: undefined, overriddenFields: [] }, { markOverride: false });
   };
 
   const togglePickedQuota = (quotaId: string) => {
@@ -2070,6 +2249,7 @@ export default function QuotaTemplatesPage() {
     setPickedQuotaIds([]);
     setConstructionTemplatePickerOpen(false);
     setConstructionTemplateSearch("");
+    setQuotaDiffOpen(false);
     setSpaceAutoSaveStatus("idle");
     setTemplateSaveStatus("idle");
   };
@@ -2415,6 +2595,38 @@ export default function QuotaTemplatesPage() {
               </button>
             </div>
             <div className="quota-template-editor-body min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
+              {quotaSourceUpdates.length > 0 ? (
+                <div className="flex items-center justify-between gap-4 rounded-[10px] border border-[#f7b955] bg-[#fff7e6] px-4 py-3.5 ring-1 ring-[#ffd88a]">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] bg-[#f79009] text-white">
+                      <AlertTriangle className="h-[18px] w-[18px]" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-[13px] font-semibold text-[#92400e]">检测到 {quotaSourceUpdates.length} 个模板项目对应的基装定额已更新</p>
+                      <p className="mt-1 text-[11px] text-[#8a5a16]">更新时只同步未手动修改的字段，已手动修改的内容会保留。已有报价不会发生变化。</p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setQuotaDiffExpandedFields([]);
+                        setQuotaDiffOpen(true);
+                      }}
+                      className="inline-flex h-9 items-center rounded-[8px] border border-[#f0a23a] bg-white px-4 text-[12px] font-semibold text-[#a85a00] transition hover:bg-[#fff3d8]"
+                    >
+                      查看差异
+                    </button>
+                    <button
+                      type="button"
+                      onClick={applyQuotaSourceUpdates}
+                      className="inline-flex h-9 items-center rounded-[8px] border border-[#e27b00] bg-[#f79009] px-4 text-[12px] font-semibold text-white transition hover:border-[#c96b00] hover:bg-[#dc7a00]"
+                    >
+                      更新到最新
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               <div className="quota-template-top-config-grid grid items-stretch gap-4 lg:grid-cols-2">
                 <section className="quota-template-editor-section flex h-full flex-col rounded-lg border border-surface-200 bg-white">
                   <div className="border-b border-surface-200 bg-surface-100 px-4 py-2.5 text-sm font-semibold text-surface-900">基础配置</div>
@@ -3531,6 +3743,82 @@ export default function QuotaTemplatesPage() {
                   <button type="button" onClick={saveEditingTemplate} className="btn-primary min-h-9 px-3 text-xs" disabled={templateSaveStatus !== "idle"}>
                     {templateSaveStatus === "saving" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                     <span>保存并关闭</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {quotaDiffOpen && (
+            <div className="fixed inset-0 z-[95] flex items-center justify-center bg-[#111827]/36 px-4 py-6">
+              <div role="dialog" aria-modal="true" aria-labelledby="quota-source-diff-title" className="flex max-h-[min(720px,calc(100dvh-48px))] w-full max-w-[760px] flex-col overflow-hidden rounded-[14px] border border-[#f0c36d] bg-white">
+                <div className="flex shrink-0 items-center justify-between gap-4 border-b border-[#f1e2c2] bg-[#fff8e8] px-5 py-4">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] bg-[#f79009] text-white">
+                      <AlertTriangle className="h-[18px] w-[18px]" />
+                    </span>
+                    <div className="min-w-0">
+                      <p id="quota-source-diff-title" className="text-[15px] font-semibold text-[#92400e]">基装定额更新差异</p>
+                      <p className="mt-1 text-[11px] text-[#8a5a16]">共 {quotaDiffRows.length} 个模板项目发生变化，手动修改过的字段会保留。</p>
+                    </div>
+                  </div>
+                  <button type="button" onClick={() => setQuotaDiffOpen(false)} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[#9a6a1f] hover:bg-[#ffedc7]" aria-label="关闭差异弹窗">
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-[#fbfcfe] px-5 py-4">
+                  {quotaDiffRows.map((row) => (
+                    <section key={row.id} className="overflow-hidden rounded-[10px] border border-surface-200 bg-white">
+                      <div className="flex items-center justify-between gap-3 border-b border-surface-100 px-4 py-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-[13px] font-semibold text-surface-900">{row.itemName}</p>
+                          <p className="mt-0.5 truncate text-[11px] text-surface-500">{row.spaceName}</p>
+                        </div>
+                        <span className="shrink-0 rounded-full bg-[#fff1d6] px-2.5 py-1 text-[10px] font-semibold text-[#a85a00]">{row.fields.length} 项变化</span>
+                      </div>
+                      <div className="divide-y divide-surface-100">
+                        {row.fields.map((field) => {
+                          const fieldKey = `${row.id}:${field.field}`;
+                          const expanded = quotaDiffExpandedFields.includes(fieldKey);
+                          const canExpand = field.before.length > 32 || field.after.length > 32;
+                          return (
+                            <div key={field.field} className="grid grid-cols-[96px_minmax(0,1fr)_20px_minmax(0,1fr)] items-start gap-2.5 px-4 py-3 text-[11px]">
+                              <span className="font-medium text-surface-500">{field.label}</span>
+                              <span className={`min-w-0 break-words leading-5 text-surface-700 ${expanded ? "whitespace-normal" : "line-clamp-2"}`} title={field.before}>{field.before}</span>
+                              <span className="pt-0.5 text-center text-surface-300">→</span>
+                              <span className="flex min-w-0 flex-col items-start">
+                                <span className={`w-full break-words font-semibold leading-5 text-surface-900 ${expanded ? "whitespace-normal" : "line-clamp-2"}`} title={field.after}>{field.after}</span>
+                                {canExpand ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => setQuotaDiffExpandedFields((current) => (
+                                      current.includes(fieldKey)
+                                        ? current.filter((key) => key !== fieldKey)
+                                        : [...current, fieldKey]
+                                    ))}
+                                    className="mt-1 self-end text-[10px] font-semibold text-[#356df3] hover:text-[#245ee8]"
+                                  >
+                                    {expanded ? "收起" : "展开"}
+                                  </button>
+                                ) : null}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+                <div className="flex shrink-0 items-center justify-end gap-2 border-t border-surface-200 px-5 py-4">
+                  <button type="button" onClick={() => setQuotaDiffOpen(false)} className="btn-secondary min-h-9 px-4 text-xs">关闭</button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      applyQuotaSourceUpdates();
+                      setQuotaDiffOpen(false);
+                    }}
+                    className="min-h-9 rounded-[8px] border border-[#e27b00] bg-[#f79009] px-4 text-xs font-semibold text-white transition hover:border-[#c96b00] hover:bg-[#dc7a00]"
+                  >
+                    更新未修改字段
                   </button>
                 </div>
               </div>

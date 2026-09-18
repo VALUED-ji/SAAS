@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { BookmarkPlus, Calculator, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Eraser, Eye, FileText, GripVertical, Home, LayoutGrid, List, Loader2, MapPin, Maximize2, Minimize2, Palette, Pencil, Phone, Plus, RefreshCw, Replace, Ruler, Search, Tags, Trash2, X } from "lucide-react";
+import { AlertTriangle, BookmarkPlus, Calculator, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Eraser, Eye, FileText, GripVertical, History, Home, LayoutGrid, List, Loader2, MapPin, Maximize2, Minimize2, Palette, Pencil, Phone, Plus, RefreshCw, Replace, Ruler, Search, Tags, Trash2, X } from "lucide-react";
 import {
   bindStableFeeFormula,
   calculateChargeableOtherFeeTotals,
@@ -39,11 +39,16 @@ const QuotationPrintDocument = dynamic(() => import("@/components/QuotationPrint
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
 import SystemSelect from "@/components/ui/SystemSelect";
 import NativeImage from "@/components/ui/NativeImage";
+import QuotationChangeLogModal from "@/components/QuotationChangeLogModal";
 import { AmapLocationPicker, type LocationPick } from "@/components/ui/AddCustomerModal";
 import { createQuotationPrintPreviewUrl, createQuotationShareUrl } from "@/lib/quotationShareClient";
 import { QUOTATION_PRESENCE_HEARTBEAT_MS } from "@/lib/quotationPresenceClient";
 import { parseProductAttributes } from "@/app/materials/library/material-editor-shared";
 import { getPersonalizedTemplateCategoryLabel, normalizePersonalizedTemplate, type PersonalizedQuotationTemplate } from "@/lib/personalizedQuotationTemplate";
+import { getQuotationCustomerGroupKey } from "@/lib/quotationCustomerKey";
+import {
+  type QuotationChangeLog,
+} from "@/lib/quotationChangeLogDisplay";
 import {
   FeeFormulaHelp,
   QuoteNameDialogModal,
@@ -55,6 +60,9 @@ import {
 import {
   DictionaryOption,
   QuotationItem,
+  canTrackManualPriceEdit,
+  getManualPriceEditFlags,
+  setManualPriceEditFlag,
   formatQuoteAmount,
   getCategoryKey,
   isBaseCategory,
@@ -268,6 +276,7 @@ type BudgetCompilationUpdateNotice = {
   templateId?: string;
   templateName?: string;
   currentExists?: boolean;
+  signature?: string;
 };
 type FindReplaceSearchScope = "name" | "description";
 type FindReplaceMatchField = "name" | "spec" | "remark";
@@ -1291,6 +1300,9 @@ function createQuotationItemFromQuota(quota: QuotaLibraryItem, category: Quotati
     quota_source_id: quota.id,
     quota_source_type: quota.source === "custom" ? "custom" : "standard",
     quota_source_synced_at: new Date().toISOString(),
+    quota_source_material_price: materialPrice,
+    quota_source_labor_price: laborPrice,
+    price_manually_edited: false,
     profit_margin: 0,
     row_color: quota.isSpecialPrice ? "special" : null,
   };
@@ -1471,6 +1483,7 @@ function normalizeQuotationItems(items: QuotationItem[], options: { inferMissing
     return {
       ...item,
       client_key: item.client_key || item.id || makeClientItemKey(),
+      price_manually_edited: Math.max(0, Math.min(3, Number(item.price_manually_edited || 0))),
       space: inferItemSpace(item) || (options.inferMissingSpace ? guessItemSpace(item) : ""),
       ...(isOther ? {
         fee_calc_method: feeMethod,
@@ -1919,6 +1932,10 @@ export default function QuotationDetailPage() {
   const [customerVisibleNote, setCustomerVisibleNote] = useState("");
   const [status, setStatus] = useState("DRAFT");
   const [loading, setLoading] = useState(true);
+  const [quotationChangeLogOpen, setQuotationChangeLogOpen] = useState(false);
+  const [quotationChangeLogs, setQuotationChangeLogs] = useState<QuotationChangeLog[]>([]);
+  const [quotationChangeLogsLoading, setQuotationChangeLogsLoading] = useState(false);
+  const [quotationChangeLogsError, setQuotationChangeLogsError] = useState("");
   const presenceSessionIdRef = useRef("");
   const [autoSaveStatus, setAutoSaveStatus] = useState<"idle" | "pending" | "saving" | "saved" | "error">("idle");
   const [autoSaveErrorMessage, setAutoSaveErrorMessage] = useState("");
@@ -2049,6 +2066,40 @@ export default function QuotationDetailPage() {
   const quotationTotalBreakdownRef = useRef<HTMLDivElement | null>(null);
   const isReadonly = !!data?.readonly;
   const readonlyNoticeText = data?.readonlyMessage || "该报价已锁定，仅支持查看、打印和导出，不能修改报价内容。";
+
+  useEffect(() => {
+    if (items.length === 0) return;
+    setItems((current) => {
+      let changed = false;
+      const nextItems = current.map((item) => {
+        const flags = getManualPriceEditFlags(item.price_manually_edited);
+        const nextFlags = { ...flags };
+        const sourceMaterialPrice = Number(item.quota_source_material_price);
+        const sourceLaborPrice = Number(item.quota_source_labor_price);
+        if (
+          flags.material
+          && item.quota_source_material_price != null
+          && Number.isFinite(sourceMaterialPrice)
+          && Math.abs(toNumber(item.material_cost) - sourceMaterialPrice) < 0.005
+        ) {
+          nextFlags.material = false;
+        }
+        if (
+          flags.labor
+          && item.quota_source_labor_price != null
+          && Number.isFinite(sourceLaborPrice)
+          && Math.abs(toNumber(item.labor_cost) - sourceLaborPrice) < 0.005
+        ) {
+          nextFlags.labor = false;
+        }
+        const nextValue = (nextFlags.material ? 1 : 0) | (nextFlags.labor ? 2 : 0);
+        if (nextValue === Number(item.price_manually_edited || 0)) return item;
+        changed = true;
+        return { ...item, price_manually_edited: nextValue };
+      });
+      return changed ? nextItems : current;
+    });
+  }, [items]);
 
   useEffect(() => {
     if (!quotationTotalBreakdownOpen) return;
@@ -2878,7 +2929,7 @@ export default function QuotationDetailPage() {
     const savedReturnState = readBudgetRecordReturnState();
     const savedMatchesCurrentQuotation = savedReturnState?.quotationId === String(quotationId);
     const customerId = (savedMatchesCurrentQuotation ? savedReturnState?.customerId || "" : "") || (returnTo === "budgetRecords" ? customerIdFromQuery : "") || String(latestQuotation?.customer_id || "").trim();
-    const recordKey = (savedMatchesCurrentQuotation ? savedReturnState?.recordKey || "" : "") || (returnTo === "budgetRecords" ? recordKeyFromQuery : "") || (latestQuotation?.is_unbound ? `unbound:${quotationId}` : customerId);
+    const recordKey = (savedMatchesCurrentQuotation ? savedReturnState?.recordKey || "" : "") || (returnTo === "budgetRecords" ? recordKeyFromQuery : "") || (latestQuotation?.is_unbound ? getQuotationCustomerGroupKey(latestQuotation as any) : customerId);
     if (customerId) {
       router.push(`/quotations?openRecords=1&refreshRecords=1&ignoreOrgFilter=1&customerId=${encodeURIComponent(customerId)}&recordKey=${encodeURIComponent(recordKey)}&fromQuotationId=${encodeURIComponent(quotationId)}&t=${Date.now()}`);
       return;
@@ -3563,6 +3614,48 @@ export default function QuotationDetailPage() {
     setSystemDialog({ title, message, tone, confirmText, cancelText, onConfirm });
   };
 
+  const ignoreBudgetCompilationUpdate = async () => {
+    if (isReadonly || !budgetCompilationUpdateNotice) return;
+    try {
+      await waitForLatestAutoSave();
+      const res = await fetch(`/api/quotations/${quotationId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          action: "ignoreTemplateBudgetCompilation",
+          signature: budgetCompilationUpdateNotice.signature,
+        }),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result?.message || "忽略提醒失败");
+      const nextSettings = { ...settings, ...(result.settings || {}) };
+      setSettings(nextSettings);
+      setData((current) => current ? { ...current, settings: nextSettings } : current);
+      setBudgetCompilationUpdateNotice(null);
+      setBudgetCompilationNoticeDismissed(true);
+      const nextSavedPayload = JSON.stringify(makeSavePayload(title, quotationType, terms, notes, customerVisibleNote, status, nextSettings, customSpaces, items));
+      lastSavedPayloadRef.current = nextSavedPayload;
+      latestSavePayloadTextRef.current = nextSavedPayload;
+      setAutoSaveStatus("saved");
+      setAutoSaveErrorMessage("");
+    } catch (error: any) {
+      showAlert("忽略失败", error?.message || "忽略预算编制提醒失败，请稍后再试。", "danger");
+    }
+  };
+
+  const confirmIgnoreBudgetCompilationUpdate = () => {
+    if (isReadonly || !budgetCompilationUpdateNotice) return;
+    showConfirm({
+      title: "忽略预算编制更新提醒",
+      message: "忽略后，本次预算编制更新提醒不再显示。若关联模板后续再次修改，系统仍会重新提醒。",
+      tone: "info",
+      confirmText: "确认忽略",
+      onConfirm: () => {
+        void ignoreBudgetCompilationUpdate();
+      },
+    });
+  };
+
   const applyTemplateBudgetCompilation = async () => {
     if (isReadonly || budgetCompilationApplying) return;
     setBudgetCompilationApplying(true);
@@ -3954,6 +4047,33 @@ export default function QuotationDetailPage() {
     } finally {
       setPersonalizedTemplateLoading(false);
     }
+  };
+
+  const openQuotationChangeLogs = async () => {
+    setQuotationChangeLogOpen(true);
+    setQuotationChangeLogs([]);
+    setQuotationChangeLogsError("");
+    setQuotationChangeLogsLoading(true);
+    try {
+      const response = await fetch(`/api/quotations/${encodeURIComponent(quotationId)}/change-logs`, {
+        headers: authHeaders(),
+        cache: "no-store",
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result?.message || "读取报价修改记录失败");
+      setQuotationChangeLogs(Array.isArray(result?.logs) ? result.logs : []);
+    } catch (error: any) {
+      setQuotationChangeLogsError(error?.message || "读取报价修改记录失败");
+    } finally {
+      setQuotationChangeLogsLoading(false);
+    }
+  };
+
+  const closeQuotationChangeLogs = () => {
+    setQuotationChangeLogOpen(false);
+    setQuotationChangeLogs([]);
+    setQuotationChangeLogsError("");
+    setQuotationChangeLogsLoading(false);
   };
 
   const importPersonalizedTemplate = () => {
@@ -4694,6 +4814,14 @@ export default function QuotationDetailPage() {
           onClose={() => setSystemDialog(null)}
         />
       )}
+      <QuotationChangeLogModal
+        open={quotationChangeLogOpen}
+        title={title || data?.customer_name || data?.project_name || "当前报价"}
+        logs={quotationChangeLogs}
+        loading={quotationChangeLogsLoading}
+        error={quotationChangeLogsError}
+        onClose={closeQuotationChangeLogs}
+      />
       {personalizedTemplateDialogOpen && (
         <div
           className="fixed inset-0 z-[10000] flex items-center justify-center bg-[#0b1220]/45 px-4 py-4 backdrop-blur-[3px] no-print"
@@ -6245,6 +6373,15 @@ export default function QuotationDetailPage() {
                   <span>导入个性化模板</span>
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => void openQuotationChangeLogs()}
+                className="quote-project-info-edit inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md border px-3 font-semibold transition"
+                title="查看当前报价的修改记录"
+              >
+                <History className="h-3.5 w-3.5" />
+                <span>修改记录</span>
+              </button>
               </div>
               <div className="quote-action-group quote-action-group-metrics">
               <button
@@ -6615,21 +6752,21 @@ export default function QuotationDetailPage() {
         )}
 
         {quotaUpdateNotices.length > 0 && !quotaUpdateNoticeDismissed && !isReadonly && (
-          <div className="no-print relative z-[1] mb-3 mt-3 flex flex-wrap items-center justify-between gap-3 overflow-visible rounded-[12px] border border-[#dbeadf] bg-[#f5fbf7] px-4 py-3 text-[#173426]">
+          <div className="no-print relative z-[1] mb-3 mt-3 flex flex-wrap items-center justify-between gap-4 overflow-visible rounded-[10px] border border-[#8fd8b0] bg-[#f0fbf5] px-4 py-3.5 ring-1 ring-[#b7e9ca]">
             <div className="flex min-w-0 items-center gap-3">
-              <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-[#bee4cc] bg-white text-[#159863]">
-                <Replace className="h-4 w-4" />
+              <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] bg-[#159863] text-white">
+                <AlertTriangle className="h-[18px] w-[18px]" />
               </span>
               <div className="min-w-0">
-                <div className="text-sm font-semibold leading-5">定额库有更新，当前报价中 {quotaUpdateNotices.length} 条基装项目可同步</div>
-                <div className="mt-0.5 text-xs font-medium text-[#5f7468]">点“查看差异”先看看哪些内容变了，再决定是否更新当前报价。</div>
+                <div className="text-[13px] font-semibold leading-5 text-[#0f5f47]">定额库有更新，当前报价中 {quotaUpdateNotices.length} 条基装项目可同步</div>
+                <div className="mt-1 text-[11px] font-medium text-[#3f6f5b]">点“查看差异”先看看哪些内容变了，再决定是否更新当前报价。</div>
               </div>
             </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => setQuotaUpdateDialogOpen(true)}
-                className="inline-flex h-8 items-center gap-1.5 rounded-[9px] border border-[#bdd8c9] bg-white px-3 text-xs font-medium text-[#137a4a] transition hover:bg-[#eef8f2]"
+                className="inline-flex h-9 items-center gap-1.5 rounded-[8px] border border-[#8fd8b0] bg-white px-4 text-[12px] font-semibold text-[#137a4a] transition hover:bg-[#e9f8ef]"
               >
                 <Search className="h-3.5 w-3.5" />
                 查看差异
@@ -6638,7 +6775,7 @@ export default function QuotationDetailPage() {
                 type="button"
                 onClick={() => setQuotaUpdateDialogOpen(true)}
                 disabled={quotaUpdateSyncingIds.length > 0}
-                className="inline-flex h-8 items-center gap-1.5 rounded-[9px] bg-[#159863] px-3 text-xs font-semibold text-white transition hover:bg-[#0f8155] disabled:cursor-not-allowed disabled:bg-[#c9d4e2]"
+                className="inline-flex h-9 items-center gap-1.5 rounded-[8px] border border-[#0f8155] bg-[#159863] px-4 text-[12px] font-semibold text-white transition hover:border-[#0b6f48] hover:bg-[#0f8155] disabled:cursor-not-allowed disabled:border-[#dfd3c1] disabled:bg-[#dfd3c1]"
               >
                 <Check className="h-3.5 w-3.5" />
                 全部更新
@@ -6646,7 +6783,7 @@ export default function QuotationDetailPage() {
               <button
                 type="button"
                 onClick={() => setQuotaUpdateNoticeDismissed(true)}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-[9px] text-[#6b7f73] transition hover:bg-white hover:text-[#173426]"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-[8px] text-[#557c69] transition hover:bg-[#dcf5e6] hover:text-[#0f5f47]"
                 aria-label="关闭基装定额更新提醒"
                 title="关闭提醒"
               >
@@ -6656,16 +6793,16 @@ export default function QuotationDetailPage() {
           </div>
         )}
         {shouldShowBudgetCompilationApplyNotice && (
-          <div className="no-print relative z-[1] mb-3 mt-3 flex flex-wrap items-center justify-between gap-3 overflow-visible rounded-[12px] border border-[#f1d7a8] bg-[#fff8ec] px-4 py-3 text-[#3b2a12]">
+          <div className="no-print relative z-[1] mb-3 mt-3 flex flex-wrap items-center justify-between gap-4 overflow-visible rounded-[10px] border border-[#f7b955] bg-[#fff7e6] px-4 py-3.5 ring-1 ring-[#ffd88a]">
             <div className="flex min-w-0 items-center gap-3">
-              <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-[#efd093] bg-white text-[#c47a16]">
-                <FileText className="h-4 w-4" />
+              <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] bg-[#f79009] text-white">
+                <AlertTriangle className="h-[18px] w-[18px]" />
               </span>
               <div className="min-w-0">
-                <div className="text-sm font-semibold leading-5">
+                <div className="text-[13px] font-semibold leading-5 text-[#92400e]">
                   {budgetCompilationUpdateNotice?.currentExists ? "预算编制有更新" : "当前报价还没有预算编制"}
                 </div>
-                <div className="mt-0.5 text-xs font-medium text-[#7d663f]">
+                <div className="mt-1 text-[11px] font-medium text-[#8a5a16]">
                   {budgetCompilationUpdateNotice?.currentExists
                     ? "关联定额模板中的预算编制已调整，可手动更新到当前报价。"
                     : "关联定额模板后续已补充预算编制，可手动补入到当前报价。"}
@@ -6675,9 +6812,17 @@ export default function QuotationDetailPage() {
             <div className="flex items-center gap-2">
               <button
                 type="button"
+                onClick={confirmIgnoreBudgetCompilationUpdate}
+                disabled={budgetCompilationApplying}
+                className="inline-flex h-9 shrink-0 items-center rounded-[8px] border border-[#e8c27f] bg-white px-4 text-[12px] font-semibold text-[#a96208] transition hover:bg-[#fff2d8] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                忽略
+              </button>
+              <button
+                type="button"
                 onClick={confirmApplyTemplateBudgetCompilation}
                 disabled={budgetCompilationApplying}
-                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[9px] border border-[#e8c27f] bg-white px-3 text-xs font-semibold text-[#a96208] transition hover:bg-[#fff2d8] disabled:cursor-not-allowed disabled:border-[#eadfca] disabled:text-[#b8ad98]"
+                className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-[8px] border border-[#e27b00] bg-[#f79009] px-4 text-[12px] font-semibold text-white transition hover:border-[#c96b00] hover:bg-[#dc7a00] disabled:cursor-not-allowed disabled:border-[#dfd3c1] disabled:bg-[#dfd3c1]"
               >
                 {budgetCompilationApplying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                 {budgetCompilationUpdateNotice?.currentExists ? "更新预算编制" : "补入预算编制"}
@@ -6685,7 +6830,7 @@ export default function QuotationDetailPage() {
               <button
                 type="button"
                 onClick={() => setBudgetCompilationNoticeDismissed(true)}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-[9px] text-[#8a7148] transition hover:bg-white hover:text-[#3b2a12]"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-[8px] text-[#9a6a1f] transition hover:bg-[#ffedc7] hover:text-[#6b4200]"
                 aria-label="关闭预算编制更新提醒"
                 title="关闭提醒"
               >
@@ -8442,6 +8587,32 @@ export default function QuotationDetailPage() {
           background: #fff7ed;
           color: #c2410c;
           font-size: 11px;
+          font-weight: 750;
+          line-height: 1;
+          pointer-events: none;
+        }
+        .quotation-detail-ui .quote-price-input-wrap {
+          position: relative;
+          display: flex;
+          min-height: 40px;
+          align-items: center;
+          justify-content: center;
+        }
+        .quotation-detail-ui .quote-price-edit-mark {
+          position: absolute;
+          right: 3px;
+          top: 3px;
+          z-index: 2;
+          display: inline-flex;
+          height: 16px;
+          min-width: 16px;
+          align-items: center;
+          justify-content: center;
+          border-radius: 4px;
+          border: 1px solid #fca5a5;
+          background: #fef2f2;
+          color: #dc2626;
+          font-size: 10px;
           font-weight: 750;
           line-height: 1;
           pointer-events: none;
@@ -12983,6 +13154,7 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
   const quantity = toNumber(item.quantity);
   const materialUnit = toNumber(item.material_cost);
   const laborUnit = materialUnit || toNumber(item.labor_cost) ? toNumber(item.labor_cost) : toNumber(item.unit_price);
+  const manualPriceEditFlags = getManualPriceEditFlags(item.price_manually_edited);
   const materialTotal = quantity * materialUnit;
   const laborTotal = quantity * laborUnit;
   const itemKey = getQuotationItemKey(item, index);
@@ -13028,13 +13200,35 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
       </td>
       <td className="border border-surface-200 p-0" style={cellStyle}><QuoteNumberInput value={item.quantity} onChange={(value) => handleChange({ quantity: value })} className="text-center font-semibold text-red-600" disabled={readOnly} allowFormula /></td>
       <td className="border border-surface-200 p-0" style={cellStyle}><UnitInputCell value={item.unit} onChange={(value) => handleChange({ unit: value })} className="text-center" readOnly={readOnly} /></td>
-      <td className="border border-surface-200 p-0" style={cellStyle}><QuoteNumberInput value={item.material_cost || 0} onChange={(value) => {
-        handleChange({ material_cost: value, unit_price: value + laborUnit });
-      }} className="text-center" disabled={readOnly} /></td>
+      <td className="border border-surface-200 p-0" style={cellStyle}>
+        <div className="quote-price-input-wrap">
+          <QuoteNumberInput value={item.material_cost || 0} onChange={(value) => {
+            handleChange({
+              material_cost: value,
+              unit_price: value + laborUnit,
+              price_manually_edited: canTrackManualPriceEdit(item)
+                ? setManualPriceEditFlag(item.price_manually_edited, "material")
+                : item.price_manually_edited,
+            });
+          }} className="text-center" disabled={readOnly} />
+          {manualPriceEditFlags.material ? <span className="quote-price-edit-mark" title="材料单价已手动修改">改</span> : null}
+        </div>
+      </td>
       <td className="border border-surface-200 px-2 py-1 text-center font-medium text-surface-700" style={cellStyle}>{formatQuoteAmount(materialTotal)}</td>
-      <td className="border border-surface-200 p-0" style={cellStyle}><QuoteNumberInput value={laborUnit} onChange={(value) => {
-        handleChange({ labor_cost: value, unit_price: materialUnit + value });
-      }} className="text-center" disabled={readOnly} /></td>
+      <td className="border border-surface-200 p-0" style={cellStyle}>
+        <div className="quote-price-input-wrap">
+          <QuoteNumberInput value={laborUnit} onChange={(value) => {
+            handleChange({
+              labor_cost: value,
+              unit_price: materialUnit + value,
+              price_manually_edited: canTrackManualPriceEdit(item)
+                ? setManualPriceEditFlag(item.price_manually_edited, "labor")
+                : item.price_manually_edited,
+            });
+          }} className="text-center" disabled={readOnly} />
+          {manualPriceEditFlags.labor ? <span className="quote-price-edit-mark" title="人工单价已手动修改">改</span> : null}
+        </div>
+      </td>
       <td className="border border-surface-200 px-2 py-1 text-center font-medium text-surface-700" style={cellStyle}>{formatQuoteAmount(laborTotal)}</td>
       <td className="border border-surface-200 px-2 py-1 text-center font-semibold text-red-600" style={cellStyle}>{formatQuoteAmount(materialTotal + laborTotal)}</td>
       <td className="border border-surface-200 p-0 align-middle" style={cellStyle}>
@@ -13232,7 +13426,14 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
       </td>
       <td className="border border-surface-200 px-2 py-1 text-center font-semibold text-red-600" style={cellStyle}>{formatQuoteAmount(area)}</td>
       <td className="border border-surface-200 p-0" style={cellStyle}>
-        <QuoteNumberInput value={item.unit_price} onChange={(value) => handleChange({ unit_price: value })} className="text-center" disabled={readOnly} />
+        <div className="quote-price-input-wrap">
+          <QuoteNumberInput
+            value={item.unit_price}
+            onChange={(value) => handleChange({ unit_price: value })}
+            className="text-center"
+            disabled={readOnly}
+          />
+        </div>
       </td>
       <td className="border border-surface-200 px-2 py-1 text-center font-semibold text-red-600" style={cellStyle}>{formatQuoteAmount(itemTotal)}</td>
       <td className="border border-surface-200 p-0 align-middle" style={cellStyle}>
@@ -13616,6 +13817,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
             const recentlyMoved = recentlyMovedItemKey === itemKey;
             const findReplaceHighlight = activeFindReplaceHighlight?.itemKey === itemKey ? activeFindReplaceHighlight : null;
             const rowColor = getQuotationRowColor(item.row_color);
+            const manualPriceEditFlags = getManualPriceEditFlags(item.price_manually_edited);
             const cellStyle = rowColor.background ? { backgroundColor: rowColor.background } : undefined;
             const feeMethod = normalizeFeeCalcMethod(item.fee_calc_method);
             const feeMeta = otherFeeRowMeta.get(index);
@@ -13731,7 +13933,20 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                 ) : (
                   <>
                     <td className="border border-surface-200 py-0" style={cellStyle}><UnitInputCell value={item.unit} onChange={(value) => onChange(index, { unit: value })} className="w-20 text-center" readOnly={readOnly} /></td>
-                    <td className="border border-surface-200 py-0" style={cellStyle}><QuoteNumberInput value={item.unit_price} onChange={(value) => onChange(index, { unit_price: value })} className="w-28 text-center" disabled={readOnly} /></td>
+                    <td className="border border-surface-200 py-0" style={cellStyle}>
+                      <div className="quote-price-input-wrap">
+                        <QuoteNumberInput
+                          value={item.unit_price}
+                          onChange={(value) => onChange(index, {
+                            unit_price: value,
+                            price_manually_edited: setManualPriceEditFlag(item.price_manually_edited, "material"),
+                          })}
+                          className="w-28 text-center"
+                          disabled={readOnly}
+                        />
+                        {manualPriceEditFlags.material ? <span className="quote-price-edit-mark" title="单价已手动修改">改</span> : null}
+                      </div>
+                    </td>
                     <td className="border border-surface-200 py-0" style={cellStyle}><QuoteNumberInput value={item.quantity} onChange={(value) => onChange(index, { quantity: value })} className="w-40 text-center font-semibold text-red-600" disabled={readOnly} allowFormula /></td>
                   </>
                 )}

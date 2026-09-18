@@ -67,6 +67,7 @@ function ensureQuotationItemColumns(db: any) {
   if (!names.has("quota_source_id")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_id TEXT").run();
   if (!names.has("quota_source_type")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_type TEXT").run();
   if (!names.has("quota_source_synced_at")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_synced_at TEXT").run();
+  if (!names.has("price_manually_edited")) db.prepare("ALTER TABLE quotation_items ADD COLUMN price_manually_edited INTEGER DEFAULT 0").run();
   ensureProjectCostControlSchema(db);
 }
 
@@ -675,6 +676,7 @@ export async function GET(req: NextRequest) {
 
   const customerIds = uniqueValues(list.map((quotation) => String(quotation.customer_id || "")));
   const designerByCustomer = new Map<string, string>();
+  const advisorByCustomer = new Map<string, string>();
   const signedByCustomer = new Map<string, { count: number; amount: number }>();
   const quotationCreatedCustomerIds = new Set<string>();
   if (customerIds.length > 0) {
@@ -701,6 +703,18 @@ export async function GET(req: NextRequest) {
     manualDesignerRows.forEach((row) => {
       const customerId = String(row.customer_id || "");
       if (customerId && !designerByCustomer.has(customerId)) designerByCustomer.set(customerId, String(row.designer_name_manual || ""));
+    });
+    const advisorRows = db.prepare(`
+      SELECT advisor_team.customer_id, advisor.name as advisor_name
+      FROM customer_team advisor_team
+      LEFT JOIN users advisor ON advisor.id = advisor_team.user_id
+      WHERE advisor_team.customer_id IN (${customerPlaceholders})
+        AND UPPER(advisor_team.role) = 'ADVISOR'
+      ORDER BY advisor_team.customer_id ASC, datetime(COALESCE(advisor_team.assigned_at, '1970-01-01')) DESC, advisor_team.id DESC
+    `).all(...customerIds) as any[];
+    advisorRows.forEach((row) => {
+      const customerId = String(row.customer_id || "");
+      if (customerId && !advisorByCustomer.has(customerId)) advisorByCustomer.set(customerId, String(row.advisor_name || ""));
     });
 
     const signedRows = db.prepare(`
@@ -802,8 +816,9 @@ export async function GET(req: NextRequest) {
 	      quota_template_id: quotaTemplateId,
 	      quota_template_name: quotaTemplateName,
 	      quote_spaces: quoteSpaces,
-	      quotation_type: getQuotationType(quotation, settings),
-	      designer_name: designerByCustomer.get(String(quotation.customer_id || "")) || "",
+      quotation_type: getQuotationType(quotation, settings),
+      designer_name: designerByCustomer.get(String(quotation.customer_id || "")) || "",
+      advisor_name: advisorByCustomer.get(String(quotation.customer_id || "")) || "",
       customer_created_from_quotation: quotationCreatedCustomerIds.has(String(quotation.customer_id || "")) ? 1 : 0,
       signed_contract_count: signedByCustomer.get(String(quotation.customer_id || ""))?.count || 0,
       signed_contract_amount: signedByCustomer.get(String(quotation.customer_id || ""))?.amount || 0,
@@ -1048,8 +1063,8 @@ export async function POST(req: NextRequest) {
 
       if (normalizedTemplateItems.length > 0) {
         const insertItem = db.prepare(`
-          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, price_manually_edited, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         normalizedTemplateItems.forEach((item) => {
           insertItem.run(
@@ -1086,6 +1101,7 @@ export async function POST(req: NextRequest) {
             isBaseCategory(item.category) ? String((item as any).quota_source_id || "").trim() || null : null,
             isBaseCategory(item.category) && String((item as any).quota_source_type || "").trim() ? String((item as any).quota_source_type || "").trim() : null,
             isBaseCategory(item.category) ? String((item as any).quota_source_synced_at || "").trim() || null : null,
+            Math.max(0, Math.min(3, Number((item as any).price_manually_edited || 0))),
             item.sort_order
           );
         });

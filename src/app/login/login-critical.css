@@ -1,0 +1,164 @@
+.zxgj-login-page {
+  display: grid;
+  min-height: 100dvh;
+  grid-template-columns: minmax(0, 1.15fr) minmax(430px, .85fr);
+  overflow: hidden;
+  background: #f3f5f5;
+  color: #17201b;
+  font-family: "Geist", "Plus Jakarta Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.zxgj-login-visual {
+  position: relative;
+  min-height: 100dvh;
+  overflow: hidden;
+  background: #1d2b3d;
+}
+
+.zxgj-login-visual > img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 62% center;
+  filter: saturate(.68) contrast(1.05);
+}
+
+.zxgj-login-visual-wash {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, rgba(12,25,43,.82), rgba(12,25,43,.24) 62%, rgba(12,25,43,.54)),
+    linear-gradient(180deg, rgba(12,25,43,.3), rgba(12,25,43,.52));
+}
+
+.zxgj-login-visual::after {
+  position: absolute;
+  inset: 0;
+  opacity: .18;
+  background-image:
+    linear-gradient(rgba(255,255,255,.4) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.4) 1px, transparent 1px);
+  background-size: 36px 36px;
+  content: "";
+}
+
+.zxgj-login-brand {
+  position: absolute;
+  z-index: 2;
+  top: 42px;
+  left: 48px;
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 760;
+  line-height: 1;
+}
+
+.zxgj-login-brand img {
+  display: block;
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+}
+
+.zxgj-login-visual-foot {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  left: 48px;
+  bottom: 42px;
+}
+
+.zxgj-login-swatches {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.zxgj-login-swatches i {
+  display: block;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(255,255,255,.2);
+  border-radius: 4px;
+}
+
+.zxgj-login-swatches .swatch-wood {
+  background-image: linear-gradient(90deg, #9f7650, #d0aa83 48%, #9b704b);
+}
+
+.zxgj-login-swatches .swatch-stone {
+  background: #d5d2ca;
+}
+
+.zxgj-login-swatches .swatch-metal {
+  background: linear-gradient(135deg, #8a9397, #e5e8e8 48%, #737d80);
+}
+
+.zxgj-login-swatches .swatch-fabric {
+  background: #596157;
+}
+
+.zxgj-login-visual-foot > span {
+  color: rgba(255,255,255,.56);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: .14em;
+}
+
+.zxgj-login-panel {
+  position: relative;
+  display: flex;
+  min-height: 100dvh;
+  flex-direction: column;
+  justify-content: center;
+  padding: 56px clamp(44px, 7vw, 100px) 34px;
+}
+
+.zxgj-login-form-wrap {
+  width: 100%;
+  max-width: 370px;
+  margin: auto;
+}
+
+@media (max-width: 960px) {
+  .zxgj-login-page {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .zxgj-login-visual {
+    min-height: 38dvh;
+  }
+
+  .zxgj-login-brand {
+    top: 26px;
+    left: 26px;
+  }
+
+  .zxgj-login-visual-foot {
+    right: 26px;
+    bottom: 26px;
+    left: 26px;
+    justify-content: space-between;
+  }
+
+  .zxgj-login-panel {
+    min-height: 62dvh;
+    padding: 48px 26px 88px;
+  }
+}
+
+@media (max-width: 560px) {
+  .zxgj-login-panel {
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+}

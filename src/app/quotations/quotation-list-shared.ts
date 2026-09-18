@@ -116,7 +116,7 @@ export function hasSignedContract(record: any) {
 }
 
 export function formatContractStatus(record: any) {
-  if (record?.is_unbound) return "未绑定客户";
+  if (record?.is_unbound) return "临时客户";
   return hasSignedContract(record) ? "已签合同" : "未签合同";
 }
 
