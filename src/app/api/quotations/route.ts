@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { syncCustomerProgress } from "@/lib/customerProgress";
-import { getQuotationPrintSettingsForCustomer } from "@/lib/branchSettingsLookup";
+import { getQuotationPrintSettingsForOrgUnit } from "@/lib/branchSettingsLookup";
 import { normalizeQuotationSignatureLabels } from "@/lib/quotationPrintSettings";
 import { getRequestIp, recordCustomerOperation } from "@/lib/operationLog";
 import {
@@ -16,6 +16,12 @@ import {
   type FeeFormulaContext,
 } from "@/lib/quotationFeeFormulas";
 import { calculatePackageQuotePrice, formatPricingAmount, toPricingAmount } from "@/lib/quotaTemplatePricing";
+import {
+  applyQuotationQuantityLinks,
+  getQuotationQuantityFormulaError,
+  parseQuotationQuantityFormula,
+  remapQuotationQuantityFormulaIds,
+} from "@/lib/quotationQuantityLinks";
 import { getAuthContext, hasPermission } from "@/lib/security/authorization";
 import { ensureQuotationSchema } from "@/lib/quotationSchema";
 import { ensureProjectCostControlSchema } from "@/lib/projectCostControl";
@@ -68,6 +74,7 @@ function ensureQuotationItemColumns(db: any) {
   if (!names.has("quota_source_type")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_type TEXT").run();
   if (!names.has("quota_source_synced_at")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_synced_at TEXT").run();
   if (!names.has("price_manually_edited")) db.prepare("ALTER TABLE quotation_items ADD COLUMN price_manually_edited INTEGER DEFAULT 0").run();
+  if (!names.has("quantity_formula")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quantity_formula TEXT").run();
   ensureProjectCostControlSchema(db);
 }
 
@@ -284,23 +291,6 @@ function getBaseMaterialSubtotal(item: any) {
   return toMoney(safeNonNegativeNumber(item.quantity) * safeNonNegativeNumber(item.material_cost));
 }
 
-function getCategoryKey(category: unknown) {
-  if (isBaseCategory(category)) return "base";
-  if (isOtherCategory(category)) return "other";
-  if (isCustomCabinetCategory(category)) return "custom_cabinet";
-  if (isMainMaterialCategory(category)) return "main_material";
-  return String(category || "").trim();
-}
-
-function getCategoryLabel(category: unknown) {
-  const key = getCategoryKey(category);
-  if (key === "base") return "基装";
-  if (key === "main_material") return "产品";
-  if (key === "custom_cabinet") return "定制柜";
-  if (key === "other") return "综合费用";
-  return String(category || "").trim();
-}
-
 function getFeeScopeCategoryKey(category: unknown) {
   const name = String(category || "").trim();
   if (isBaseCategory(name)) return "base";
@@ -441,6 +431,7 @@ function buildTemplateQuotationItems(template: any) {
         const quotaCode = String(quota?.code || "").trim();
         const isStandardQuotaSource = isBase && quotaSourceType !== "custom" && Boolean(quotaSourceId || quotaCode);
         rows.push({
+          template_item_id: String(quota?.id || "").trim() || null,
           category,
           space: spaceName,
           name,
@@ -448,7 +439,8 @@ function buildTemplateQuotationItems(template: any) {
           material_model: "",
           remark: isBase && quotaCode ? `定额编号：${quotaCode}` : isBase ? "" : constructionDescription,
           unit: String(quota?.unit || "").trim(),
-          quantity: 0,
+          quantity: safeNonNegativeNumber(quota?.quantity),
+          quantity_formula: String(quota?.quantityFormula || quota?.quantity_formula || "").trim() || null,
           unit_price: toMoney(isBase ? (materialPrice || laborPrice ? materialPrice + laborPrice : unitPrice) : unitPrice),
           total_price: 0,
           material_cost: isBase ? materialPrice : 0,
@@ -948,7 +940,7 @@ export async function POST(req: NextRequest) {
       ? db.prepare("SELECT COALESCE(MAX(version), 0) as version FROM quotations WHERE project_id = ? AND deleted_at IS NULL").get(project.id) as any
       : { version: 0 };
     const quotationId = makeId("QUO");
-    const branchPrintSettings = getQuotationPrintSettingsForCustomer(db, effectiveCustomer?.id);
+    const branchPrintSettings = getQuotationPrintSettingsForOrgUnit(db, quotationOrg.id, companyId);
     const templateItems = buildTemplateQuotationItems(body.template);
     const templatePricingArea = getTemplatePricingArea(body, project, effectiveCustomer || { area_size: temporaryCustomer.area });
     const packagePricingItem = buildPackagePricingQuotationItem(body.template, templatePricingArea, 1);
@@ -959,16 +951,32 @@ export async function POST(req: NextRequest) {
       ]
       : templateItems;
     const templateFeeIdToQuotationItemId = new Map<string, string>();
+    const templateItemIdToQuotationItemId = new Map<string, string>();
     const identifiedTemplateItems = pricedTemplateItems.map((item) => {
       const id = makeId("QITEM");
       const templateFeeId = String((item as any).template_fee_id || "").trim();
       if (templateFeeId) templateFeeIdToQuotationItemId.set(templateFeeId, id);
+      const templateItemId = String((item as any).template_item_id || "").trim();
+      if (templateItemId) templateItemIdToQuotationItemId.set(templateItemId, id);
       return { ...item, id };
     });
     identifiedTemplateItems.forEach((item) => {
       if (isOtherCategory(item.category) && item.fee_calc_base) {
         item.fee_calc_base = remapStableFeeFormulaIds(item.fee_calc_base, templateFeeIdToQuotationItemId);
       }
+      if (item.quantity_formula) {
+        item.quantity_formula = remapQuotationQuantityFormulaIds(
+          item.quantity_formula,
+          templateItemIdToQuotationItemId,
+        );
+      }
+    });
+    const appliedTemplateItems = applyQuotationQuantityLinks(identifiedTemplateItems);
+    const linkedTemplateItems = appliedTemplateItems.map((item, itemIndex) => {
+      const formula = parseQuotationQuantityFormula(item.quantity_formula);
+      if (!formula) return item;
+      const formulaError = getQuotationQuantityFormulaError(appliedTemplateItems, itemIndex, formula);
+      return formulaError ? { ...item, quantity_formula: null } : item;
     });
     const templateSpaces = getTemplateSpaceNames(body.template);
 	    const templateCategories = orderQuoteCategories(pricedTemplateItems.map((item) => String(item.category || "").trim()));
@@ -1025,7 +1033,7 @@ export async function POST(req: NextRequest) {
       } : undefined,
       signatureLabels: normalizeQuotationSignatureLabels(branchPrintSettings.quotationSignatureLabels),
     };
-    const normalizedTemplateItems = applyOtherFeeTotals(identifiedTemplateItems, settings, templatePricingArea);
+    const normalizedTemplateItems = applyOtherFeeTotals(linkedTemplateItems, settings, templatePricingArea);
     const totals = calculate(normalizedTemplateItems, settings, templatePricingArea);
     const tx = (db as any).transaction(() => {
       db.prepare(`
@@ -1063,8 +1071,8 @@ export async function POST(req: NextRequest) {
 
       if (normalizedTemplateItems.length > 0) {
         const insertItem = db.prepare(`
-          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, price_manually_edited, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, quantity_formula, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, price_manually_edited, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         normalizedTemplateItems.forEach((item) => {
           insertItem.run(
@@ -1081,7 +1089,8 @@ export async function POST(req: NextRequest) {
             item.material_model || null,
             item.remark || null,
             item.unit,
-            item.quantity,
+            toMoney(Number(item.quantity || 0)),
+            item.quantity_formula || null,
             item.unit_price,
             item.total_price,
             item.material_cost,

@@ -15,9 +15,10 @@ import {
   type FeeFormulaContext,
 } from "@/lib/quotationFeeFormulas";
 import { quotationRowColors } from "@/lib/quotationRowColors";
-import { getBranchSettingsForCustomer } from "@/lib/branchSettingsLookup";
+import { getBranchSettingsForCustomer, getBranchSettingsForOrgUnit } from "@/lib/branchSettingsLookup";
 import { normalizeQuotationSignatureLabels } from "@/lib/quotationPrintSettings";
 import { getRequestIp, recordCustomerOperation } from "@/lib/operationLog";
+import { applyQuotationQuantityLinks, remapQuotationQuantityFormulaIds, serializeQuotationQuantityFormula } from "@/lib/quotationQuantityLinks";
 import { getAuthContext, hasPermission } from "@/lib/security/authorization";
 import { verifyQuotationShareToken } from "@/lib/security/quotationShare";
 import { ensureQuotationSchema } from "@/lib/quotationSchema";
@@ -48,6 +49,7 @@ type ItemInput = {
   remark?: string;
   unit?: string;
   quantity?: number;
+  quantity_formula?: unknown;
   unit_price?: number;
   material_cost?: number;
   labor_cost?: number;
@@ -124,6 +126,7 @@ function ensureQuotationItemColumns(db: any) {
   if (!names.has("quota_source_material_price")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_material_price REAL").run();
   if (!names.has("quota_source_labor_price")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_labor_price REAL").run();
   if (!names.has("price_manually_edited")) db.prepare("ALTER TABLE quotation_items ADD COLUMN price_manually_edited INTEGER DEFAULT 0").run();
+  if (!names.has("quantity_formula")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quantity_formula TEXT").run();
   db.exec(`
     CREATE TABLE IF NOT EXISTS standard_quota_items (
       id TEXT PRIMARY KEY,
@@ -1251,7 +1254,9 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
       : item
   ));
   const quotationHouseArea = safeNonNegativeNumber(quotation.customer_area_size ?? quotation.project_area);
-  const branchSettings = getBranchSettingsForCustomer(db, quotation.customer_id);
+  const branchSettings = quotation.quotation_org_unit_id
+    ? getBranchSettingsForOrgUnit(db, quotation.quotation_org_unit_id, quotation.company_id)
+    : getBranchSettingsForCustomer(db, quotation.customer_id);
   const recipientReadonly = Boolean(shareClaims) || isReadonlyQuotationRecipient(db, params.id, userId);
   const contentLockReason = getQuotationContentLockReason(db, quotation);
   const readonlyMessage = recipientReadonly
@@ -1911,6 +1916,9 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
       if (sourceItems.length === 0) {
         return NextResponse.json({ message: `「${sourceSpace}」下暂无可复制项目` }, { status: 400 });
       }
+      const copiedItemIdBySourceId = new Map<string, string>(
+        sourceItems.map((item: any) => [String(item.id || "").trim(), makeId("QITEM")]),
+      );
 
       const beforeItems = getQuotationItemsForChangeLog(db, targetQuotationId);
       let copiedCount = 0;
@@ -1932,13 +1940,14 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
           .get(targetQuotationId) as any;
         let nextSortOrder = Number(maxSortRow?.max_sort || 0);
         const insertItem = db.prepare(`
-          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, quota_source_material_price, quota_source_labor_price, price_manually_edited, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, quantity_formula, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, quota_source_material_price, quota_source_labor_price, price_manually_edited, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         sourceItems.forEach((item: any) => {
           nextSortOrder += 1;
+          const copiedItemId = copiedItemIdBySourceId.get(String(item.id || "").trim()) || makeId("QITEM");
           insertItem.run(
-            makeId("QITEM"),
+            copiedItemId,
             targetQuotationId,
             item.category,
             targetSpace,
@@ -1951,7 +1960,8 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             item.material_model || null,
             item.remark || null,
             item.unit || "",
-            item.quantity,
+            toMoney(Number(item.quantity || 0)),
+            remapQuotationQuantityFormulaIds(item.quantity_formula, copiedItemIdBySourceId),
             item.unit_price,
             item.total_price,
             item.material_cost,
@@ -2145,8 +2155,8 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
         );
 
         const insertItem = db.prepare(`
-          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, quota_source_material_price, quota_source_labor_price, price_manually_edited, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, quantity_formula, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, quota_source_material_price, quota_source_labor_price, price_manually_edited, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         sourceItems.forEach((item) => {
           const copiedItemId = copiedItemIdBySourceId.get(String(item.id)) || makeId("QITEM");
@@ -2164,7 +2174,8 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             item.material_model,
             item.remark,
             item.unit || "",
-            copyItemsOnly ? 0 : item.quantity || 0,
+            copyItemsOnly ? 0 : toMoney(Number(item.quantity || 0)),
+            remapQuotationQuantityFormulaIds(item.quantity_formula, copiedItemIdBySourceId),
             item.unit_price || 0,
             copyItemsOnly ? 0 : item.total_price || 0,
             item.material_cost || 0,
@@ -2430,7 +2441,7 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
         const feeMethod = normalizeFeeCalcMethod(item.fee_calc_method);
         const feeCalcBase = isOther && feeMethod !== "fixed" ? (feeMethod === "area_unit" ? "房屋面积" : normalizeFeeCalcBase(item.fee_calc_base) || "直接费") : "";
         const feeRate = isOther && feeMethod === "percent" ? Number(item.fee_rate || 0) : 0;
-        const quantity = isOther ? Number(item.quantity || 0) : safeNonNegativeNumber(item.quantity);
+        const quantity = isOther ? Number(item.quantity || 0) : toMoney(safeNonNegativeNumber(item.quantity));
         const rawUnitPrice = isOther ? Number(item.unit_price || 0) : safeNonNegativeNumber(item.unit_price);
         const materialCost = isOther ? Number(item.material_cost || 0) : safeNonNegativeNumber(item.material_cost);
         const laborCost = isOther ? Number(item.labor_cost || 0) : safeNonNegativeNumber(item.labor_cost);
@@ -2461,6 +2472,7 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           remark: normalizeMultilineText(item.remark),
           unit: isCustomCabinet ? String(cabinetArea) : String(item.unit ?? "").trim(),
           quantity: isOther && (feeMethod === "percent" || feeMethod === "reference" || feeMethod === "area_unit") ? 1 : quantity,
+          quantity_formula: isOther ? null : serializeQuotationQuantityFormula(item.quantity_formula) || null,
           unit_price: unitPrice,
           total_price: totalPrice,
           material_cost: finalMaterialCost,
@@ -2494,6 +2506,7 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
 
     const migration = migrateManagementFeeToOtherItem(normalizedItems, { ...settings, managementFeeRate: Number(body.settings?.managementFeeRate || 0) });
     normalizedItems = migration.items;
+    normalizedItems = applyQuotationQuantityLinks(normalizedItems);
     const baseAmount = normalizedItems.filter((item) => isBaseCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
     const materialAmount = normalizedItems.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
     const customCategoryAmount = normalizedItems.filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
@@ -2531,8 +2544,8 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
     const tx = (db as any).transaction(() => {
       db.prepare("DELETE FROM quotation_items WHERE quotation_id = ?").run(params.id);
       const insertItem = db.prepare(`
-        INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, quota_source_material_price, quota_source_labor_price, price_manually_edited, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, quantity_formula, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, quota_source_material_price, quota_source_labor_price, price_manually_edited, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       `);
       normalizedItems.forEach((item) => {
         insertItem.run(
@@ -2550,6 +2563,7 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           item.remark || null,
           item.unit,
           item.quantity,
+          isOtherCategory(item.category) ? null : serializeQuotationQuantityFormula(item.quantity_formula) || null,
           item.unit_price,
           item.total_price,
           item.material_cost,

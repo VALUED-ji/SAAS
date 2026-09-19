@@ -255,6 +255,7 @@ model QuotationItem {
   remark       String? // 备注
   unit         String // 单位
   quantity     Float
+  quantityFormula String? @map("quantity_formula")
   unitPrice    Float
   totalPrice   Float
   materialCost Float? // 材料成本

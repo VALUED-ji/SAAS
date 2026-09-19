@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
@@ -28,6 +28,8 @@ import {
   ChevronDown,
   LogOut,
 } from "lucide-react";
+
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "zxgj_sidebar_collapsed";
 
 type SidebarNavItem = {
   href: string;
@@ -147,6 +149,7 @@ export default function Sidebar() {
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const [collapsedSubmenu, setCollapsedSubmenu] = useState<{ item: SidebarNavItem; top: number } | null>(null);
   const sidebarRef = useRef<HTMLElement | null>(null);
+  const sidebarPreferenceLoadedRef = useRef(false);
   const collapsedSubmenuTimerRef = useRef<number | null>(null);
   const todoCountRequestRef = useRef<Promise<void> | null>(null);
   const lastTodoCountFetchAtRef = useRef(0);
@@ -185,9 +188,27 @@ export default function Sidebar() {
   }, [user?.permissions, user?.role]);
   const defaultNavHref = visibleNavItems[0]?.href || "/dashboard";
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (!sidebarPreferenceLoadedRef.current) {
+      sidebarPreferenceLoadedRef.current = true;
+      let storedValue = "";
+      try {
+        storedValue = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) || "";
+      } catch {
+        // Ignore unavailable local storage and keep the in-memory preference.
+      }
+      if (storedValue === "1" && !collapsed) {
+        document.documentElement.style.setProperty("--active-sidebar-width", "76px");
+        setCollapsed(true);
+        return;
+      }
+    }
     document.documentElement.style.setProperty("--active-sidebar-width", collapsed ? "76px" : "var(--sidebar-width)");
-    if (!collapsed) setCollapsedSubmenu(null);
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? "1" : "0");
+    } catch {
+      // Ignore unavailable local storage and keep the in-memory preference.
+    }
   }, [collapsed]);
 
   useEffect(() => {
@@ -372,7 +393,7 @@ export default function Sidebar() {
     <aside
       ref={sidebarRef}
       className={cn(
-        "enterprise-shell-sidebar relative flex shrink-0 border-[#DDE6F2] text-[#182230] transition-all duration-300 md:flex-col md:border-r",
+        "enterprise-shell-sidebar relative flex shrink-0 border-[#DDE6F2] text-[#182230] md:flex-col md:border-r",
         collapsed ? "is-collapsed w-[76px]" : "w-[--sidebar-width]",
         "max-md:w-full max-md:border-b"
       )}
@@ -407,7 +428,10 @@ export default function Sidebar() {
           </Link>
         )}
         <button
-          onClick={() => setCollapsed(!collapsed)}
+          onClick={() => {
+            setCollapsedSubmenu(null);
+            setCollapsed((current) => !current);
+          }}
           className={cn(
             "enterprise-collapse-button flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] border border-[#DDE6F2] bg-white text-[#7c8aa0] transition-colors hover:bg-[#F6F8FB] hover:text-[#2f6feb]",
             collapsed && "mx-auto",

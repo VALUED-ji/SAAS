@@ -2,6 +2,7 @@
 // 存放报价编辑表格与页面主体共用的类型与纯计算函数。
 
 import type { FeeCalcBase, FeeCalcMethod, FeeScopeMode } from "@/lib/quotationFeeFormulas";
+import { getQuantityCategoryKey } from "@/lib/quotationQuantityLinks";
 
 export type QuotationItem = {
   id?: string;
@@ -19,6 +20,7 @@ export type QuotationItem = {
   remark?: string;
   unit: string;
   quantity: number;
+  quantity_formula?: string | null;
   unit_price: number;
   total_price?: number;
   material_cost?: number;
@@ -48,13 +50,7 @@ export function normalizeCategoryName(category: unknown) {
 }
 
 export function getCategoryKey(category: unknown) {
-  const name = normalizeCategoryName(category);
-  if (name === "base" || name === "基装" || name === "基装项目") return "base";
-  if (name === "main_material" || name === "主材" || name === "主材项目" || name === "产品" || name === "产品项目") return "main_material";
-  if (name === "custom_cabinet" || name === "定制柜" || name === "定制柜项目") return "custom_cabinet";
-  if (name === "other") return "other";
-  if (!name) return "";
-  return "main_material";
+  return getQuantityCategoryKey(category);
 }
 
 export function isOtherCategory(category: string) {

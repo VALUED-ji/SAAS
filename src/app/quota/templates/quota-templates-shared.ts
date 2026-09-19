@@ -22,6 +22,13 @@ import {
   normalizeQuotaTemplateAutoScope,
   type QuotaTemplateAutoScope,
 } from "@/lib/quotaTemplateScope";
+import {
+  applyQuotationQuantityLinks,
+  remapQuotationQuantityFormulaIds,
+  repairQuotationQuantityLinksAfterDeletion,
+  serializeQuotationQuantityFormula,
+  type QuotationQuantityLinkItem,
+} from "@/lib/quotationQuantityLinks";
 export type QuoteType = "半包" | "全包" | "清包";
 export type PricingMode = "package" | "area" | "foundation_material_area" | "list";
 export type TemplateStatus = "enabled" | "disabled";
@@ -135,6 +142,8 @@ export type TemplateSpaceQuota = {
   name: string;
   constructionDescription: string;
   unit: string;
+  quantity: number;
+  quantityFormula?: string | null;
   quoteScope: TemplateSpaceQuotaScope;
   laborPrice: number;
   materialPrice: number;
@@ -729,14 +738,24 @@ export function getNextSpaceCopyName(source: string, spaces: TemplateSpace[]) {
 
 export function makeSpaceCopy(source: TemplateSpace, spaces: TemplateSpace[]): TemplateSpace {
   const timestamp = Date.now();
+  const idMap = new Map<string, string>();
+  source.quotaItems.forEach((item, itemIndex) => {
+    idMap.set(item.id, `space-quota-copy-${timestamp}-${itemIndex}-${Math.random().toString(16).slice(2)}`);
+  });
   return {
     ...source,
     id: `space-copy-${timestamp}-${Math.random().toString(16).slice(2)}`,
     name: getNextSpaceCopyName(source.name, spaces),
-    quotaItems: source.quotaItems.map((item, itemIndex) => ({
-      ...item,
-      id: `space-quota-copy-${timestamp}-${itemIndex}-${Math.random().toString(16).slice(2)}`,
-    })),
+    quotaItems: source.quotaItems.map((item) => {
+      const id = idMap.get(item.id) || `space-quota-copy-${timestamp}-${Math.random().toString(16).slice(2)}`;
+      return {
+        ...item,
+        id,
+        quantityFormula: item.quantityFormula
+          ? remapQuotationQuantityFormulaIds(item.quantityFormula, idMap)
+          : null,
+      };
+    }),
   };
 }
 
@@ -749,6 +768,8 @@ export function makeSpaceQuotaItem(partial?: Partial<TemplateSpaceQuota>): Templ
     name: "",
     constructionDescription: "",
     unit: "",
+    quantity: 0,
+    quantityFormula: null,
     quoteScope: "foundation",
     laborPrice: 0,
     materialPrice: 0,
@@ -814,6 +835,60 @@ export function makeQuotaItemFromLibrary(quota: QuotaLibraryItem, quoteScope?: T
   });
 }
 
+function makeTemplateQuantityLinkItems(space: TemplateSpace): Array<QuotationQuantityLinkItem & { id: string }> {
+  return space.quotaItems.map((item) => ({
+    id: item.id,
+    category: normalizeQuotaScope(item.quoteScope),
+    name: item.name,
+    space: space.name,
+    unit: item.unit,
+    quantity: item.quantity,
+    quantity_formula: item.quantityFormula,
+  }));
+}
+
+function mergeTemplateQuantityLinkItems(
+  space: TemplateSpace,
+  linkedItems: QuotationQuantityLinkItem[],
+): TemplateSpace {
+  const linkedById = new Map(
+    linkedItems
+      .map((item) => [String(item.id || "").trim(), item] as const)
+      .filter(([id]) => Boolean(id)),
+  );
+  let changed = false;
+  const quotaItems = space.quotaItems.map((item) => {
+    const linked = linkedById.get(item.id);
+    if (!linked) return item;
+    const quantity = toAmount(linked.quantity);
+    const quantityFormula = serializeQuotationQuantityFormula(linked.quantity_formula) || null;
+    if (
+      Math.abs(item.quantity - quantity) < 0.000001
+      && String(item.quantityFormula || "") === String(quantityFormula || "")
+    ) {
+      return item;
+    }
+    changed = true;
+    return { ...item, quantity, quantityFormula };
+  });
+  return changed ? { ...space, quotaItems } : space;
+}
+
+export function applyTemplateSpaceQuantityLinks(space: TemplateSpace): TemplateSpace {
+  const linkedItems = makeTemplateQuantityLinkItems(space);
+  const appliedItems = applyQuotationQuantityLinks(linkedItems);
+  return appliedItems === linkedItems ? space : mergeTemplateQuantityLinkItems(space, appliedItems);
+}
+
+export function repairTemplateSpaceQuantityLinksAfterDeletion(
+  space: TemplateSpace,
+  deletedItemIds: Set<string>,
+): TemplateSpace {
+  const linkedItems = makeTemplateQuantityLinkItems(space);
+  const repaired = repairQuotationQuantityLinksAfterDeletion(linkedItems, deletedItemIds);
+  return mergeTemplateQuantityLinkItems(space, repaired.items);
+}
+
 export function normalizeSpaceQuotaItem(value: any, index: number): TemplateSpaceQuota {
   const sourceSnapshot = value?.sourceSnapshot && typeof value.sourceSnapshot === "object" ? {
     code: String(value.sourceSnapshot.code || ""),
@@ -837,6 +912,8 @@ export function normalizeSpaceQuotaItem(value: any, index: number): TemplateSpac
     name: String(value?.name || value?.quotaName || ""),
     constructionDescription: String(value?.constructionDescription || value?.description || ""),
     unit: String(value?.unit || ""),
+    quantity: toAmount(value?.quantity),
+    quantityFormula: serializeQuotationQuantityFormula(value?.quantityFormula || value?.quantity_formula) || null,
     quoteScope: normalizeQuotaScope(value?.quoteScope, `${value?.category || ""}${value?.name || value?.quotaName || ""}${value?.constructionDescription || value?.description || ""}`),
     laborPrice: toAmount(value?.laborPrice),
     materialPrice: toAmount(value?.materialPrice),
@@ -846,6 +923,11 @@ export function normalizeSpaceQuotaItem(value: any, index: number): TemplateSpac
     sourceSnapshot,
     overriddenFields: Array.isArray(value?.overriddenFields) ? value.overriddenFields.map(String) : [],
   };
+}
+
+export function excludeOverriddenQuotaFields<T extends string>(fields: readonly T[], overriddenFields: readonly string[]) {
+  const overriddenSet = new Set(overriddenFields.map(String));
+  return fields.filter((field) => !overriddenSet.has(field));
 }
 
 export function normalizeSpace(value: any, index: number): TemplateSpace {

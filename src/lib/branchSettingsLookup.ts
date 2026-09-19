@@ -213,10 +213,19 @@ export function getBranchSettingsForCustomer(db: Db, customerId?: string | null)
     getCompanyRootId(db, customer?.creator_org_unit_id, customer?.company_id) ||
     getCompanyRootId(db, customer?.manager_org_unit_id, customer?.company_id);
 
-  const row = branchId
-    ? db.prepare("SELECT settings FROM branch_settings WHERE org_unit_id = ? AND company_id = ? AND deleted_at IS NULL").get(branchId, customer?.company_id) as any
-    : null;
+  const branchSettings = getBranchSettingsForOrgUnit(db, branchId, customer?.company_id);
 
+  return {
+    org_unit_id: branchId,
+    settings: branchSettings.settings,
+  };
+}
+
+export function getBranchSettingsForOrgUnit(db: Db, orgUnitId?: string | null, companyId?: string | null) {
+  const branchId = getCompanyRootId(db, orgUnitId, companyId);
+  const row = branchId && companyId
+    ? db.prepare("SELECT settings FROM branch_settings WHERE org_unit_id = ? AND company_id = ? AND deleted_at IS NULL").get(branchId, companyId) as any
+    : null;
   return {
     org_unit_id: branchId,
     settings: mergeBranchSettings(row?.settings ? JSON.parse(row.settings) : {}),
@@ -225,6 +234,14 @@ export function getBranchSettingsForCustomer(db: Db, customerId?: string | null)
 
 export function getQuotationPrintSettingsForCustomer(db: Db, customerId?: string | null) {
   const branch = getBranchSettingsForCustomer(db, customerId);
+  return {
+    org_unit_id: branch.org_unit_id,
+    quotationSignatureLabels: branch.settings.printSettings.quotationSignatureLabels,
+  };
+}
+
+export function getQuotationPrintSettingsForOrgUnit(db: Db, orgUnitId?: string | null, companyId?: string | null) {
+  const branch = getBranchSettingsForOrgUnit(db, orgUnitId, companyId);
   return {
     org_unit_id: branch.org_unit_id,
     quotationSignatureLabels: branch.settings.printSettings.quotationSignatureLabels,

@@ -17,6 +17,8 @@ export type QuotaTemplateSpaceQuota = {
   name: string;
   constructionDescription: string;
   unit: string;
+  quantity: number;
+  quantityFormula?: string | null;
   quoteScope: string;
   laborPrice: number;
   materialPrice: number;
@@ -196,6 +198,8 @@ export function normalizeQuotaTemplate(value: any): QuotaTemplateOption | null {
           name: String(item?.name || "").trim(),
           constructionDescription: String(item?.constructionDescription || "").trim(),
           unit: String(item?.unit || "").trim(),
+          quantity: toTemplateAmount(item?.quantity),
+          quantityFormula: String(item?.quantityFormula || item?.quantity_formula || "").trim() || null,
           quoteScope: normalizeTemplateScope(item?.quoteScope),
           laborPrice: toTemplateAmount(item?.laborPrice),
           materialPrice: toTemplateAmount(item?.materialPrice),

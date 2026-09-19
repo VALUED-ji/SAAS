@@ -1,3 +1,5 @@
+import { parseAppDate } from "@/lib/utils";
+
 export type QuotationChangeItem = {
   id: string;
   quotation_item_id?: string | null;
@@ -26,8 +28,8 @@ export type QuotationChangeLog = {
 };
 
 export function formatQuotationChangeDateTime(value: unknown) {
-  const date = value ? new Date(String(value)) : null;
-  if (!date || Number.isNaN(date.getTime())) return "-";
+  const date = parseAppDate(value instanceof Date ? value : value ? String(value) : null);
+  if (!date) return "-";
   return new Intl.DateTimeFormat("zh-CN", {
     timeZone: "Asia/Shanghai",
     year: "numeric",

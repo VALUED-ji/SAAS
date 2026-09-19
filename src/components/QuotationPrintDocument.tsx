@@ -604,9 +604,7 @@ function groupItemsBySpace(items: PrintableQuotationItem[], settings?: Printable
 }
 
 function formatQuantity(value: number) {
-  const next = toNumber(value);
-  if (Number.isInteger(next)) return String(next);
-  return next.toFixed(2).replace(/\.?0+$/, "");
+  return toNumber(value).toFixed(2);
 }
 
 function formatPrintAmount(value: number) {

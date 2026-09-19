@@ -4,7 +4,7 @@ import QRCode from "qrcode";
 import { existsSync, readFileSync } from "fs";
 import path from "path";
 import { getDb } from "@/lib/db";
-import { getBranchSettingsForCustomer } from "@/lib/branchSettingsLookup";
+import { getBranchSettingsForCustomer, getBranchSettingsForOrgUnit } from "@/lib/branchSettingsLookup";
 import {
   calculateChargeableOtherFeeTotals,
   calculateOtherFeeTotals,
@@ -286,9 +286,7 @@ function formatDateText(value?: string | Date | null) {
 }
 
 function formatQuantity(value: unknown) {
-  const next = toNumber(value);
-  if (Number.isInteger(next)) return next;
-  return Number(next.toFixed(2));
+  return toNumber(value).toFixed(2);
 }
 
 function formatExportAmount(value: unknown) {
@@ -1966,7 +1964,9 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   const taxAmount = Math.max(0, baseAmount + materialAmount + otherAmount - discount) * Number(rawSettings.taxRate || 0) / 100;
   const finalAmount = Math.max(0, roundMoney(baseAmount + materialAmount + otherAmount + taxAmount - discount));
   const costComposition = buildCostComposition(items);
-  const branchSettings = getBranchSettingsForCustomer(db, quotation.customer_id);
+  const branchSettings = quotation.quotation_org_unit_id
+    ? getBranchSettingsForOrgUnit(db, quotation.quotation_org_unit_id, quotation.company_id)
+    : getBranchSettingsForCustomer(db, quotation.customer_id);
   const signatureLabels = normalizeQuotationSignatureLabels(branchSettings.settings.printSettings.quotationSignatureLabels);
 
   const workbook = new ExcelJS.Workbook();

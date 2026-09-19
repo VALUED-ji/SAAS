@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { AlertTriangle, BookmarkPlus, Calculator, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Eraser, Eye, FileText, GripVertical, History, Home, LayoutGrid, List, Loader2, MapPin, Maximize2, Minimize2, Palette, Pencil, Phone, Plus, RefreshCw, Replace, Ruler, Search, Tags, Trash2, X } from "lucide-react";
+import { AlertTriangle, BookmarkPlus, Calculator, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Eraser, Eye, FileText, GripVertical, History, Home, LayoutGrid, Link2, List, Loader2, MapPin, Maximize2, Minimize2, Palette, Pencil, Phone, Plus, RefreshCw, Replace, Ruler, Search, Tags, Trash2, Unlink2, X } from "lucide-react";
 import {
   bindStableFeeFormula,
   calculateChargeableOtherFeeTotals,
@@ -31,6 +31,22 @@ import {
 import { getQuotationRowColor, quotationRowColors } from "@/lib/quotationRowColors";
 import { formatAlphaSequence } from "@/lib/quotationSequence";
 import { calculatePackageQuotePrice, type PackageQuoteConfigInput, type PackagePriceResult } from "@/lib/quotaTemplatePricing";
+import {
+  applyQuotationQuantityLinks,
+  calculateQuotationQuantityFormula,
+  formatQuotationQuantityFormulaRows,
+  formatQuotationQuantityFormulaNames,
+  getQuotationQuantityFormulaError,
+  getQuotationQuantityLinkDependents,
+  getQuantityLinkItemId,
+  parseQuotationQuantityFormula,
+  parseQuotationQuantityConstantTerms,
+  parseQuotationQuantityFormulaRows,
+  remapQuotationQuantityFormulaIds,
+  repairQuotationQuantityLinksAfterDeletion,
+  serializeQuotationQuantityFormula,
+  type QuotationQuantityFormula,
+} from "@/lib/quotationQuantityLinks";
 import { cn, formatDateTime } from "@/lib/utils";
 const QuotationPrintDocument = dynamic(() => import("@/components/QuotationPrintDocument").then((m) => m.QuotationPrintDocument), {
   ssr: false,
@@ -232,6 +248,8 @@ type PointerItemDragState = {
 
 type QuoteEditableElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLDivElement;
 type RowMenuOpenHandler = (event: MouseEvent<HTMLElement>, index: number) => void;
+type QuantityLinkAnchor = { x: number; y: number };
+type QuantityLinkOpenHandler = (index: number, event?: MouseEvent<HTMLButtonElement>, anchor?: QuantityLinkAnchor) => void;
 type CopySpaceCategoryDialogState = {
   source: string;
   target: string;
@@ -986,8 +1004,9 @@ function normalizeNumberInputValue(value: string) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function formatEditableNumber(value: number) {
+function formatEditableNumber(value: number, decimalPlaces?: number) {
   const next = Number.isFinite(value) ? value : 0;
+  if (decimalPlaces !== undefined) return next.toFixed(decimalPlaces);
   return Number.isInteger(next) ? String(next) : String(next).replace(/\.?0+$/, "");
 }
 
@@ -1094,6 +1113,7 @@ function QuoteNumberInput({
   disabled,
   emptyWhenDisabled = false,
   allowFormula = false,
+  decimalPlaces,
 }: {
   value: number;
   onChange: (value: number) => void;
@@ -1101,9 +1121,10 @@ function QuoteNumberInput({
   disabled?: boolean;
   emptyWhenDisabled?: boolean;
   allowFormula?: boolean;
+  decimalPlaces?: number;
 }) {
-  const [editingValue, setEditingValue] = useState(formatEditableNumber(value));
-  const displayValue = formatEditableNumber(value);
+  const [editingValue, setEditingValue] = useState(formatEditableNumber(value, decimalPlaces));
+  const displayValue = formatEditableNumber(value, decimalPlaces);
 
   useEffect(() => {
     setEditingValue(displayValue);
@@ -1111,8 +1132,11 @@ function QuoteNumberInput({
 
   const commitValue = (rawValue: string) => {
     const nextValue = allowFormula ? parseQuantityExpression(rawValue) : normalizeNumberInputValue(rawValue);
-    const normalizedValue = Math.max(0, nextValue ?? value);
-    setEditingValue(formatEditableNumber(normalizedValue));
+    const rawNormalizedValue = Math.max(0, nextValue ?? value);
+    const normalizedValue = decimalPlaces === undefined
+      ? rawNormalizedValue
+      : Number(rawNormalizedValue.toFixed(decimalPlaces));
+    setEditingValue(formatEditableNumber(normalizedValue, decimalPlaces));
     if (nextValue !== null && normalizedValue !== value) onChange(normalizedValue);
   };
 
@@ -1151,6 +1175,349 @@ function QuoteNumberInput({
       title={allowFormula ? "可输入数字或计算式，如：(10+2)*0.8" : undefined}
       className={`quote-cell-editable quote-cell-input disabled:text-surface-300 ${className}`}
     />
+  );
+}
+
+function QuantityLinkInput({
+  item,
+  readOnly,
+  onChange,
+  onOpenQuantityLink,
+  quantityLinkItems,
+  targetIndex,
+}: {
+  item: QuotationItem;
+  readOnly?: boolean;
+  onChange: (patch: Partial<QuotationItem>) => void;
+  onOpenQuantityLink: (event?: MouseEvent<HTMLButtonElement>) => void;
+  quantityLinkItems?: QuotationItem[];
+  targetIndex?: number;
+}) {
+  const formula = useMemo(
+    () => parseQuotationQuantityFormula(item.quantity_formula),
+    [item.quantity_formula],
+  );
+  const [error, setError] = useState("");
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const skipBlurCommitRef = useRef(false);
+  const previousValueRef = useRef("");
+
+  const prepareEditing = (input: HTMLInputElement) => {
+    if (readOnly) return;
+    const quantityText = formatEditableNumber(item.quantity);
+    if (!formula) {
+      input.value = Math.abs(toNumber(item.quantity)) < 0.000001 ? "" : quantityText;
+      previousValueRef.current = input.value;
+      if (error) setError("");
+      return;
+    }
+    input.value = quantityText;
+    previousValueRef.current = input.value;
+    if (error) setError("");
+  };
+
+  const restoreDisplayValue = () => {
+    const input = inputRef.current;
+    if (!input) return;
+    const displayValue = formatEditableNumber(item.quantity);
+    input.value = displayValue;
+    previousValueRef.current = displayValue;
+  };
+
+  const commit = (value: string) => {
+    const raw = value.trim();
+    if (!raw) {
+      restoreDisplayValue();
+      if (formula) {
+        setError("");
+        return;
+      }
+      if (Math.abs(toNumber(item.quantity)) >= 0.000001) {
+        onChange({ quantity: 0, quantity_formula: null });
+      }
+      setError("");
+      return;
+    }
+    const expression = raw.replace(/^=/, "");
+    if (formula) {
+      if (/[\[#(]/.test(expression)) {
+        if (!quantityLinkItems || targetIndex === undefined) {
+          setError("当前单元格无法解析数量联动");
+          return;
+        }
+        const parsed = parseQuotationQuantityFormulaRows(quantityLinkItems, targetIndex, expression);
+        if (!parsed.formula || parsed.error) {
+          setError(parsed.error || "数量联动公式无效");
+          return;
+        }
+        const nextQuantity = calculateQuotationQuantityFormula(quantityLinkItems, parsed.formula);
+        if (nextQuantity === null) {
+          setError("数量联动计算结果无效");
+          return;
+        }
+        onChange({
+          quantity: toMoney(nextQuantity),
+          quantity_formula: serializeQuotationQuantityFormula(parsed.formula),
+        });
+        setError("");
+        return;
+      }
+      const quantityText = formatEditableNumber(item.quantity);
+      const adjustmentText = expression.startsWith(quantityText) ? expression.slice(quantityText.length) : expression;
+      const adjustmentTerms = parseQuotationQuantityConstantTerms(adjustmentText);
+      if (adjustmentTerms) {
+        if (!quantityLinkItems || targetIndex === undefined) {
+          setError("当前单元格无法解析数量联动调整");
+          return;
+        }
+        let nextExpression = formula.expression;
+        adjustmentTerms.forEach((term) => {
+          nextExpression = {
+            type: "binary",
+            operator: term.operator,
+            left: nextExpression,
+            right: { type: "number", value: Number(term.constant || 0) },
+          };
+        });
+        const nextFormula: QuotationQuantityFormula = {
+          version: 2,
+          expression: nextExpression,
+        };
+        const formulaError = getQuotationQuantityFormulaError(quantityLinkItems, targetIndex, nextFormula);
+        if (formulaError) {
+          setError(formulaError);
+          return;
+        }
+        const nextQuantity = calculateQuotationQuantityFormula(quantityLinkItems, nextFormula);
+        if (nextQuantity === null) {
+          setError("数量联动计算结果无效");
+          return;
+        }
+        onChange({
+          quantity: toMoney(nextQuantity),
+          quantity_formula: serializeQuotationQuantityFormula(nextFormula),
+        });
+        setError("");
+        return;
+      }
+      const nextValue = normalizeNumberInputValue(expression);
+      if (nextValue === null) {
+        setError("请输入 +0.5、-0.5 这样的调整式，或输入普通数字改为手动数量");
+        return;
+      }
+      const nextQuantity = Number(Math.max(0, nextValue).toFixed(2));
+      if (Math.abs(nextQuantity - toNumber(item.quantity)) >= 0.000001) {
+        onChange({ quantity: nextQuantity, quantity_formula: null });
+      }
+      setError("");
+      return;
+    }
+    if (/[\[#]/.test(expression)) {
+      if (!quantityLinkItems || targetIndex === undefined) {
+        setError("当前单元格无法解析数量联动");
+        return;
+      }
+      const parsed = parseQuotationQuantityFormulaRows(quantityLinkItems, targetIndex, expression);
+      if (!parsed.formula || parsed.error) {
+        setError(parsed.error || "数量联动公式无效");
+        return;
+      }
+      const nextQuantity = calculateQuotationQuantityFormula(quantityLinkItems, parsed.formula);
+      if (nextQuantity === null) {
+        setError("数量联动计算结果无效");
+        return;
+      }
+      onChange({
+        quantity: toMoney(nextQuantity),
+        quantity_formula: serializeQuotationQuantityFormula(parsed.formula),
+      });
+      setError("");
+      return;
+    }
+    const nextValue = parseQuantityExpression(expression);
+    if (nextValue === null) {
+      setError("请输入有效数字、算式或 [编号] 联动公式");
+      return;
+    }
+    const nextQuantity = Number(Math.max(0, nextValue).toFixed(2));
+    if (Math.abs(nextQuantity - toNumber(item.quantity)) >= 0.000001) {
+      onChange({
+        quantity: nextQuantity,
+        quantity_formula: null,
+      });
+    }
+    setError("");
+  };
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input || document.activeElement === input) return;
+    const displayValue = formatEditableNumber(item.quantity);
+    input.value = displayValue;
+    previousValueRef.current = displayValue;
+  }, [item.quantity, item.quantity_formula]);
+
+  return (
+    <div className="quote-quantity-link-control">
+      <input
+        ref={inputRef}
+        type="text"
+        inputMode="text"
+        readOnly={readOnly}
+        defaultValue={formatEditableNumber(item.quantity)}
+        placeholder={formula ? "输入 +0.5 或 -0.5" : undefined}
+        onMouseDown={(event) => {
+          if (readOnly || formula) return;
+          if (Math.abs(toNumber(item.quantity)) >= 0.000001) return;
+          prepareEditing(event.currentTarget);
+        }}
+        onFocus={(event) => {
+          if (!formula) return;
+          prepareEditing(event.currentTarget);
+          event.currentTarget.select();
+        }}
+        onChange={(event) => {
+          const nextValue = event.target.value;
+          const valid = formula
+            ? /^[\d+\-*/().\[\]#\s@]*$/.test(nextValue)
+            : /^[\d+\-*/().\[\]\s@]*$/.test(nextValue);
+          if (!valid) {
+            event.target.value = previousValueRef.current;
+            return;
+          }
+          previousValueRef.current = nextValue;
+          if (error) setError("");
+        }}
+        onBlur={(event) => {
+          if (skipBlurCommitRef.current) {
+            skipBlurCommitRef.current = false;
+            return;
+          }
+          commit(event.currentTarget.value);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+            event.preventDefault();
+            const input = event.currentTarget;
+            commit(input.value);
+            skipBlurCommitRef.current = true;
+            input.blur();
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            setError("");
+            const input = event.currentTarget;
+            input.value = formatEditableNumber(item.quantity);
+            previousValueRef.current = input.value;
+            skipBlurCommitRef.current = true;
+            input.blur();
+            return;
+          }
+          handleQuoteCellKeyDown(event);
+        }}
+        data-quote-arrow-navigation="always"
+        title={error || (formula ? "可输入 +0.5、-0.5 调整数量；输入普通数字会解除联动" : "可输入数字、算式或点击项目引用")}
+        className={`quote-cell-editable quote-cell-input text-center font-semibold text-red-600${error ? " is-invalid" : ""}`}
+      />
+      {formula ? (
+        <button
+          type="button"
+          data-quantity-link-formula-button
+          className="quote-quantity-link-button is-linked"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenQuantityLink(event);
+          }}
+          title="查看或修改数量联动"
+          aria-label="查看或修改数量联动"
+        >
+          <Link2 />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function QuantityLinkEditor({
+  targetName,
+  text,
+  formula,
+  preview,
+  error,
+  allItems,
+  hasExistingFormula,
+  onTextChange,
+  onCancel,
+  onConfirm,
+  onRemove,
+}: {
+  targetName: string;
+  text: string;
+  formula: QuotationQuantityFormula | null;
+  preview: number | null;
+  error: string;
+  allItems: QuotationItem[];
+  hasExistingFormula: boolean;
+  onTextChange: (value: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="quote-quantity-link-inline">
+      <div className="quote-quantity-link-inline-main">
+        <div className="quote-quantity-link-inline-context">
+          <span><Link2 /></span>
+          <div>
+            <small>数量联动</small>
+            <strong title={targetName}>{targetName || "未命名项目"}</strong>
+          </div>
+        </div>
+        <label className="quote-quantity-link-inline-input">
+          <span>数量公式</span>
+          <div className={`quote-quantity-link-input-shell${error ? " is-error" : ""}`}>
+            <b>fx</b>
+            <span className="quote-quantity-link-formula-prefix">=</span>
+            <input
+              autoFocus
+              value={text}
+              onChange={(event) => onTextChange(event.target.value)}
+              placeholder="输入 ([1]+[2])*0.5"
+              aria-label="输入数量公式"
+            />
+          </div>
+          <small>点击项目插入 [编号]；支持 + - * / 和括号，普通数字直接输入</small>
+        </label>
+        <div className="quote-quantity-link-inline-actions">
+          {hasExistingFormula ? <button type="button" onClick={onRemove} className="is-remove">解除联动</button> : null}
+          <button type="button" onClick={onCancel}>取消</button>
+          <button type="button" onClick={onConfirm} disabled={!formula || Boolean(error)} className="is-primary">确认联动</button>
+        </div>
+      </div>
+      <div className="quote-quantity-link-inline-meta">
+        <div className="quote-quantity-link-rules">
+          <span>同空间</span>
+          <span>同类别</span>
+          <span>同单位</span>
+          <span>结果不小于 0</span>
+          <span>不能形成循环引用</span>
+          <span>不能引用自己</span>
+        </div>
+        <div className={`quote-quantity-link-preview${error ? " is-error" : ""}`}>
+          {formula ? (
+            <>
+              <span className="quote-quantity-link-preview-token">{formatQuotationQuantityFormulaNames(allItems, formula)}</span>
+              <em>=</em>
+              <strong>{error ? "--" : toNumber(preview ?? 0).toFixed(2)}</strong>
+            </>
+          ) : (
+            <span className="quote-quantity-link-preview-empty"><Calculator />输入公式后自动计算</span>
+          )}
+        </div>
+      </div>
+      {error ? <p className="quote-quantity-link-error"><AlertTriangle />{error}</p> : null}
+    </div>
   );
 }
 
@@ -1484,6 +1851,8 @@ function normalizeQuotationItems(items: QuotationItem[], options: { inferMissing
       ...item,
       client_key: item.client_key || item.id || makeClientItemKey(),
       price_manually_edited: Math.max(0, Math.min(3, Number(item.price_manually_edited || 0))),
+      quantity: toMoney(Math.max(0, toNumber(item.quantity))),
+      quantity_formula: serializeQuotationQuantityFormula(item.quantity_formula) || null,
       space: inferItemSpace(item) || (options.inferMissingSpace ? guessItemSpace(item) : ""),
       ...(isOther ? {
         fee_calc_method: feeMethod,
@@ -1495,10 +1864,11 @@ function normalizeQuotationItems(items: QuotationItem[], options: { inferMissing
     };
   });
   const otherItems = normalized.filter((item) => isOtherCategory(item.category));
-  return normalized.map((item) => !isOtherCategory(item.category) || normalizeFeeCalcMethod(item.fee_calc_method) === "fixed" || normalizeFeeCalcMethod(item.fee_calc_method) === "area_unit" ? item : {
+  const withBoundFees = normalized.map((item) => !isOtherCategory(item.category) || normalizeFeeCalcMethod(item.fee_calc_method) === "fixed" || normalizeFeeCalcMethod(item.fee_calc_method) === "area_unit" ? item : {
     ...item,
     fee_calc_base: bindStableFeeFormula(item.fee_calc_base, otherItems),
   });
+  return applyQuotationQuantityLinks(withBoundFees);
 }
 
 function roundMoney(value: number) {
@@ -1596,10 +1966,26 @@ function withoutStoredIdentity(item: QuotationItem): QuotationItem {
   return copy;
 }
 
-function cloneItemForSpace(item: QuotationItem, space: string): QuotationItem {
+function cloneItemForSpace(
+  item: QuotationItem,
+  space: string,
+  copiedItemIdBySourceId?: Map<string, string>,
+  copiedItemId?: string,
+): QuotationItem {
   const copy = withoutStoredIdentity(item);
-  const itemId = makeClientItemId();
-  return { ...copy, id: itemId, client_key: itemId, space };
+  const itemId = copiedItemId || makeClientItemId();
+  const sameSpace = space.trim() === String(inferItemSpace(item) || "").trim();
+  return {
+    ...copy,
+    id: itemId,
+    client_key: itemId,
+    space,
+    quantity_formula: copiedItemIdBySourceId
+      ? remapQuotationQuantityFormulaIds(item.quantity_formula, copiedItemIdBySourceId)
+      : sameSpace
+        ? serializeQuotationQuantityFormula(item.quantity_formula) || null
+        : null,
+  };
 }
 
 function buildFeeFormulaContext(items: QuotationItem[], categories: string[] = [], houseArea = 0): FeeFormulaContext {
@@ -1952,6 +2338,14 @@ export default function QuotationDetailPage() {
   const [quotationTotalBreakdownOpen, setQuotationTotalBreakdownOpen] = useState(false);
   const [discountDraftSettings, setDiscountDraftSettings] = useState<QuotationDetail["settings"] | null>(null);
 	  const [discountRateText, setDiscountRateText] = useState("1");
+  const [quantityLinkDialog, setQuantityLinkDialog] = useState<{
+    index: number;
+    text: string;
+    viewItemIds: string[];
+    lastInsertedRange: { start: number; end: number } | null;
+    anchorX: number;
+    anchorY: number;
+  } | null>(null);
   const [quotaLibraryItems, setQuotaLibraryItems] = useState<QuotaLibraryItem[]>([]);
   const [quotaUpdateNotices, setQuotaUpdateNotices] = useState<QuotaUpdateNotice[]>([]);
   const [quotaUpdateDialogOpen, setQuotaUpdateDialogOpen] = useState(false);
@@ -2062,10 +2456,115 @@ export default function QuotationDetailPage() {
   const hiddenSpaceFrameRef = useRef<number | null>(null);
   const hiddenSpaceIdleTimerRef = useRef<number | null>(null);
   const findReplaceResultListRef = useRef<HTMLDivElement | null>(null);
+  const quantityLinkInputRef = useRef<HTMLInputElement | null>(null);
+  const quantityLinkPanelRef = useRef<HTMLDivElement | null>(null);
   const quotationTotalButtonRef = useRef<HTMLButtonElement | null>(null);
   const quotationTotalBreakdownRef = useRef<HTMLDivElement | null>(null);
   const isReadonly = !!data?.readonly;
   const readonlyNoticeText = data?.readonlyMessage || "该报价已锁定，仅支持查看、打印和导出，不能修改报价内容。";
+
+  useEffect(() => {
+    if (loading) return;
+    setItems((current) => {
+      const nextItems = applyQuotationQuantityLinks(current);
+      return nextItems === current ? current : nextItems;
+    });
+  }, [items, loading]);
+
+  useEffect(() => {
+    setQuantityLinkDialog(null);
+  }, [activeCategory, activeSpace]);
+
+  useEffect(() => {
+    if (!quantityLinkDialog) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      if (quantityLinkPanelRef.current?.contains(target)) return;
+      if (target.closest("[data-quantity-link-row]")) return;
+      setQuantityLinkDialog(null);
+    };
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => document.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [quantityLinkDialog]);
+
+  useLayoutEffect(() => {
+    const dialogIndex = quantityLinkDialog?.index;
+    if (dialogIndex === undefined) return;
+    let frameId = 0;
+    let activeRow: HTMLElement | null = null;
+    const updateAnchorPosition = () => {
+      if (frameId) window.cancelAnimationFrame(frameId);
+      frameId = window.requestAnimationFrame(() => {
+        frameId = 0;
+        const panel = quantityLinkPanelRef.current;
+        if (!panel) return;
+        const row = document.querySelector<HTMLElement>(`[data-quantity-link-row][data-index="${dialogIndex}"]`);
+        if (activeRow && activeRow !== row) activeRow.removeAttribute("data-quantity-link-active");
+        activeRow = row;
+        activeRow?.setAttribute("data-quantity-link-active", "true");
+        const anchor = row?.querySelector<HTMLElement>("[data-quantity-link-formula-button]")
+          || row?.querySelector<HTMLElement>(".quote-quantity-link-control")
+          || row;
+        if (!anchor) return;
+        const rect = anchor.getBoundingClientRect();
+        const headerRect = row?.closest("table")?.querySelector("thead")?.getBoundingClientRect();
+        const width = 428;
+        const headerBottom = headerRect && headerRect.bottom > 0 ? headerRect.bottom : 0;
+        const minTop = Math.max(12, headerBottom + 8);
+        const availableHeight = Math.max(180, window.innerHeight - minTop - 12);
+        panel.style.maxHeight = `${availableHeight}px`;
+        const estimatedHeight = Math.min(panel.scrollHeight || panel.offsetHeight || 560, availableHeight);
+        const left = Math.max(12, Math.min(rect.right + 8, window.innerWidth - width - 12));
+        const top = Math.max(minTop, Math.min(rect.bottom + 8, window.innerHeight - estimatedHeight - 12));
+        const nextLeft = `${left}px`;
+        const nextTop = `${top}px`;
+        if (panel.style.getPropertyValue("--quote-quantity-link-x") !== nextLeft) {
+          panel.style.setProperty("--quote-quantity-link-x", nextLeft);
+        }
+        if (panel.style.getPropertyValue("--quote-quantity-link-y") !== nextTop) {
+          panel.style.setProperty("--quote-quantity-link-y", nextTop);
+        }
+      });
+    };
+    updateAnchorPosition();
+    document.addEventListener("scroll", updateAnchorPosition, { capture: true, passive: true });
+    window.addEventListener("resize", updateAnchorPosition);
+    return () => {
+      if (frameId) window.cancelAnimationFrame(frameId);
+      activeRow?.removeAttribute("data-quantity-link-active");
+      document.removeEventListener("scroll", updateAnchorPosition, true);
+      window.removeEventListener("resize", updateAnchorPosition);
+    };
+  }, [quantityLinkDialog?.index]);
+
+  useLayoutEffect(() => {
+    if (!quantityLinkDialog) return;
+    const target = items[quantityLinkDialog.index];
+    if (!target) return;
+    const targetCategory = String(target.category || "").trim();
+    const targetSpace = String(inferItemSpace(target) || "").trim();
+    const targetUnit = String(target.unit || "").trim();
+    const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-quantity-link-row]"));
+    rows.forEach((row) => {
+      const index = Number(row.dataset.index);
+      if (!Number.isInteger(index)) return;
+      const item = items[index];
+      row.removeAttribute("data-quantity-link-pick-state");
+      if (!item) return;
+      if (index === quantityLinkDialog.index) {
+        row.setAttribute("data-quantity-link-pick-state", "target");
+        return;
+      }
+      const isAvailable = sameQuoteCategory(item.category, targetCategory)
+        && String(inferItemSpace(item) || "").trim() === targetSpace
+        && String(item.unit || "").trim() === targetUnit;
+      if (isAvailable) row.setAttribute("data-quantity-link-pick-state", "available");
+    });
+    return () => {
+      rows.forEach((row) => row.removeAttribute("data-quantity-link-pick-state"));
+    };
+  }, [items, quantityLinkDialog?.index]);
 
   useEffect(() => {
     if (items.length === 0) return;
@@ -3009,8 +3508,146 @@ export default function QuotationDetailPage() {
 
   const updateItem = useCallback((index: number, patch: Partial<QuotationItem>) => {
     if (isReadonly) return;
+    const currentItem = items[index];
+    const referenceId = currentItem ? getQuantityLinkItemId(currentItem) : "";
+    const quantityDependents = referenceId
+      ? getQuotationQuantityLinkDependents(items, new Set([referenceId]))
+      : [];
+    if (currentItem && "quantity" in patch && quantityDependents.length > 0) {
+      const nextItems = items.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
+      const invalidDependent = quantityDependents
+        .map((item) => {
+          const dependentIndex = items.findIndex((candidate) => getQuantityLinkItemId(candidate) === getQuantityLinkItemId(item));
+          const formula = parseQuotationQuantityFormula(item.quantity_formula);
+          return formula && dependentIndex >= 0
+            ? { item, error: getQuotationQuantityFormulaError(nextItems, dependentIndex, formula) }
+            : null;
+        })
+        .find((result) => result?.error);
+      if (invalidDependent?.error) {
+        window.alert(`修改后“${invalidDependent.item.name || "未命名项目"}”的数量联动结果为无效值：${invalidDependent.error}`);
+        return;
+      }
+    }
+    const structuralFieldChanged = currentItem && (
+      ("unit" in patch && String(patch.unit || "").trim() !== String(currentItem.unit || "").trim())
+      || ("space" in patch && String(patch.space || "").trim() !== String(inferItemSpace(currentItem) || "").trim())
+      || ("category" in patch && String(patch.category || "").trim() !== String(currentItem.category || "").trim())
+    );
+    if (currentItem && structuralFieldChanged) {
+      if (quantityDependents.length > 0) {
+        window.alert(`该项目正在被“${quantityDependents.map((item) => item.name || "未命名项目").join("、")}”的数量联动引用，请先解除数量联动后再修改单位、空间或类别。`);
+        return;
+      }
+    }
     setItems((current) => current.map((item, i) => i === index ? { ...item, ...patch } : item));
-  }, [isReadonly]);
+  }, [isReadonly, items]);
+
+  const quantityLinkDialogTarget = quantityLinkDialog ? items[quantityLinkDialog.index] || null : null;
+  const quantityLinkVisibleItems = useMemo(() => {
+    if (!quantityLinkDialog) return [] as QuotationItem[];
+    return quantityLinkDialog.viewItemIds
+      .map((itemId) => items.find((item) => getQuantityLinkItemId(item) === itemId))
+      .filter((item): item is QuotationItem => Boolean(item));
+  }, [items, quantityLinkDialog]);
+  const quantityLinkVisibleTargetIndex = quantityLinkDialogTarget
+    ? quantityLinkVisibleItems.findIndex((item) => getQuantityLinkItemId(item) === getQuantityLinkItemId(quantityLinkDialogTarget))
+    : -1;
+  const quantityLinkDialogParsed = useMemo(() => {
+    if (!quantityLinkDialog) return { formula: null as QuotationQuantityFormula | null, error: "" };
+    if (quantityLinkVisibleTargetIndex < 0) return { formula: null as QuotationQuantityFormula | null, error: "结果项目不在当前表格中" };
+    return parseQuotationQuantityFormulaRows(quantityLinkVisibleItems, quantityLinkVisibleTargetIndex, quantityLinkDialog.text);
+  }, [quantityLinkDialog, quantityLinkVisibleItems, quantityLinkVisibleTargetIndex]);
+  const quantityLinkDialogFormula = quantityLinkDialogParsed.formula;
+  const quantityLinkDialogError = quantityLinkDialogParsed.error;
+  const quantityLinkDialogPreview = quantityLinkDialogFormula && !quantityLinkDialogError
+    ? calculateQuotationQuantityFormula(quantityLinkVisibleItems, quantityLinkDialogFormula)
+    : null;
+  const quantityLinkReferenceRows = useMemo(() => {
+    if (!quantityLinkDialog || !quantityLinkDialogTarget) return [];
+    const targetCategory = String(quantityLinkDialogTarget.category || "").trim();
+    const targetSpace = String(inferItemSpace(quantityLinkDialogTarget) || "").trim();
+    const targetUnit = String(quantityLinkDialogTarget.unit || "").trim();
+    return quantityLinkVisibleItems
+      .map((item, index) => ({ item, index }))
+      .filter(({ item, index }) => (
+        index !== quantityLinkVisibleTargetIndex
+        && sameQuoteCategory(item.category, targetCategory)
+        && String(inferItemSpace(item) || "").trim() === targetSpace
+      ))
+      .map(({ item, index }) => {
+        const unit = String(item.unit || "").trim();
+        const linked = Boolean(parseQuotationQuantityFormula(item.quantity_formula));
+        const status = linked ? "已联动" : unit !== targetUnit ? "单位不同" : "可引用";
+        return { item, rowNumber: index + 1, unit, status, enabled: status === "可引用" };
+      });
+  }, [quantityLinkDialog, quantityLinkDialogTarget, quantityLinkVisibleItems, quantityLinkVisibleTargetIndex]);
+
+  const openQuantityLinkDialog = useCallback((index: number, event?: MouseEvent<HTMLButtonElement>, anchor?: QuantityLinkAnchor) => {
+    const target = items[index];
+    if (isReadonly || !target || isOtherCategory(target.category)) return;
+    setRowMenu(null);
+    setRowCopyMenu(null);
+    const formula = parseQuotationQuantityFormula(target.quantity_formula);
+    const viewItems = activeItems.map(({ item }) => item);
+    const rect = event?.currentTarget.getBoundingClientRect();
+    setQuantityLinkDialog({
+      index,
+      text: formula ? formatQuotationQuantityFormulaRows(viewItems, formula).replace(/^=/, "") : "",
+      viewItemIds: viewItems.map((item) => getQuantityLinkItemId(item)).filter(Boolean),
+      lastInsertedRange: null,
+      anchorX: anchor?.x ?? rect?.right ?? window.innerWidth / 2,
+      anchorY: anchor?.y ?? rect?.bottom ?? window.innerHeight / 2,
+    });
+  }, [activeItems, isReadonly, items]);
+
+  const insertQuantityLinkRowNumber = useCallback((rowNumber: number) => {
+    if (!Number.isInteger(rowNumber) || rowNumber <= 0 || !quantityLinkDialog) return;
+    const input = quantityLinkInputRef.current;
+    const start = input?.selectionStart ?? quantityLinkDialog.text.length;
+    const end = input?.selectionEnd ?? start;
+    const insertedText = `[${rowNumber}]`;
+    const previousRange = quantityLinkDialog.lastInsertedRange;
+    const canReplacePrevious = Boolean(
+      previousRange
+      && start === end
+      && start === previousRange.end
+      && /^(?:#\d+|\[\d+\])$/.test(quantityLinkDialog.text.slice(previousRange.start, previousRange.end)),
+    );
+    const replaceStart = canReplacePrevious && previousRange ? previousRange.start : start;
+    const replaceEnd = canReplacePrevious && previousRange ? previousRange.end : end;
+    const nextText = `${quantityLinkDialog.text.slice(0, replaceStart)}${insertedText}${quantityLinkDialog.text.slice(replaceEnd)}`;
+    const nextRange = { start: replaceStart, end: replaceStart + insertedText.length };
+    setQuantityLinkDialog({ ...quantityLinkDialog, text: nextText, lastInsertedRange: nextRange });
+    window.requestAnimationFrame(() => {
+      const nextInput = quantityLinkInputRef.current;
+      nextInput?.focus();
+      nextInput?.setSelectionRange(nextRange.end, nextRange.end);
+    });
+  }, [quantityLinkDialog]);
+
+  const confirmQuantityLinkDialog = () => {
+    if (!quantityLinkDialog || !quantityLinkDialogFormula || quantityLinkDialogError) return;
+    const nextQuantity = Math.max(0, quantityLinkDialogPreview ?? 0);
+    updateItem(quantityLinkDialog.index, {
+      quantity: nextQuantity,
+      quantity_formula: serializeQuotationQuantityFormula(quantityLinkDialogFormula),
+    });
+    setQuantityLinkDialog(null);
+  };
+
+  const removeQuantityLinkDialog = () => {
+    if (!quantityLinkDialog) return;
+    updateItem(quantityLinkDialog.index, { quantity_formula: null });
+    setQuantityLinkDialog(null);
+  };
+
+  const clearQuantityLink = useCallback((index: number) => {
+    const item = items[index];
+    if (isReadonly || !item || !parseQuotationQuantityFormula(item.quantity_formula)) return;
+    updateItem(index, { quantity_formula: null });
+    setRowMenu(null);
+  }, [isReadonly, items, updateItem]);
 
   useEffect(() => {
     if (findReplaceMatchIndex < findReplaceMatches.length) return;
@@ -3186,6 +3823,9 @@ export default function QuotationDetailPage() {
         ...copy,
         id: copiedKey,
         client_key: copiedKey,
+        quantity_formula: parseQuotationQuantityFormula(source.quantity_formula)
+          ? serializeQuotationQuantityFormula(source.quantity_formula)
+          : null,
         name: source.name ? `${source.name} 副本` : "",
       };
       const next = [...current];
@@ -3231,6 +3871,7 @@ export default function QuotationDetailPage() {
       remark: "",
       unit: "",
       quantity: isOther ? 1 : 0,
+      quantity_formula: null,
       unit_price: 0,
       material_cost: 0,
       labor_cost: 0,
@@ -3341,14 +3982,35 @@ export default function QuotationDetailPage() {
 
   const removeItem = (index: number) => {
     if (isReadonly) return;
-    const key = items[index] ? getQuotationItemKey(items[index], index) : "";
+    const targetItem = items[index];
+    const key = targetItem ? getQuotationItemKey(targetItem, index) : "";
     const referencedBy = key ? getFeeReferenceDependentNames(items, new Set([key])) : [];
     if (referencedBy.length > 0) {
       window.alert(`该费用正在被“${referencedBy.join("、")}”的公式引用，请先修改引用公式。`);
       return;
     }
-    setItems((current) => current.filter((_, i) => i !== index));
-    if (key) setSelectedQuoteItemKeys((current) => current.filter((item) => item !== key));
+    const targetId = targetItem ? getQuantityLinkItemId(targetItem) : "";
+    const repair = targetId
+      ? repairQuotationQuantityLinksAfterDeletion(items, new Set([targetId]))
+      : { items: items.filter((_, i) => i !== index), repairs: [] };
+    const applyDeletion = () => {
+      allowEmptyItemsSaveRef.current = true;
+      setItems(repair.items);
+      if (key) setSelectedQuoteItemKeys((current) => current.filter((item) => item !== key));
+    };
+    if (repair.repairs.length > 0) {
+      showConfirm({
+        title: "删除并自动调整数量联动",
+        message: `删除后会自动调整以下数量联动：\n\n${repair.repairs.map((item) => (
+          `${item.item.name || "未命名项目"}：${toNumber(item.oldQuantity).toFixed(2)} → ${toNumber(item.newQuantity).toFixed(2)}${item.unlinked ? "（已解除联动）" : ""}`
+        )).join("\n")}`,
+        tone: "info",
+        confirmText: "删除并自动调整",
+        onConfirm: applyDeletion,
+      });
+      return;
+    }
+    applyDeletion();
   };
 
   const toggleQuoteItemSelection = useCallback((key: string) => {
@@ -3707,20 +4369,31 @@ export default function QuotationDetailPage() {
     if (isReadonly || selectedActiveItemKeys.length === 0) return;
     const keysToDelete = new Set(selectedActiveItemKeys);
     const count = keysToDelete.size;
+    const quantityReferenceIds = new Set(items
+      .filter((item, index) => keysToDelete.has(getQuotationItemKey(item, index)))
+      .map((item) => getQuantityLinkItemId(item))
+      .filter(Boolean));
     const referencedBy = getFeeReferenceDependentNames(items, keysToDelete);
     if (referencedBy.length > 0) {
       window.alert(`所选费用正在被“${referencedBy.join("、")}”的公式引用，请先修改引用公式。`);
       return;
     }
+    const repair = repairQuotationQuantityLinksAfterDeletion(items, quantityReferenceIds);
+    const applyDeletion = () => {
+      allowEmptyItemsSaveRef.current = true;
+      setItems(repair.items);
+      setSelectedQuoteItemKeys((current) => current.filter((key) => !keysToDelete.has(key)));
+    };
     showConfirm({
-      title: "批量删除项目",
-      message: `确定删除当前列表中已勾选的 ${count} 条报价项目吗？删除后系统会自动保存。`,
-      confirmText: "删除",
-      onConfirm: () => {
-        allowEmptyItemsSaveRef.current = true;
-        setItems((current) => current.filter((item, index) => !keysToDelete.has(getQuotationItemKey(item, index))));
-        setSelectedQuoteItemKeys((current) => current.filter((key) => !keysToDelete.has(key)));
-      },
+      title: repair.repairs.length > 0 ? "批量删除并自动调整数量联动" : "批量删除项目",
+      message: repair.repairs.length > 0
+        ? `将删除 ${count} 条报价项目，并自动调整以下数量联动：\n\n${repair.repairs.map((item) => (
+          `${item.item.name || "未命名项目"}：${toNumber(item.oldQuantity).toFixed(2)} → ${toNumber(item.newQuantity).toFixed(2)}${item.unlinked ? "（已解除联动）" : ""}`
+        )).join("\n")}`
+        : `确定删除当前列表中已勾选的 ${count} 条报价项目吗？删除后系统会自动保存。`,
+      tone: repair.repairs.length > 0 ? "info" : "danger",
+      confirmText: repair.repairs.length > 0 ? "删除并自动调整" : "删除",
+      onConfirm: applyDeletion,
     });
   }, [isReadonly, items, selectedActiveItemKeys]);
 
@@ -4125,9 +4798,9 @@ export default function QuotationDetailPage() {
             material_model: item.material_model || "",
             remark: item.remark || "",
             unit: item.unit || "",
-            quantity: toNumber(item.quantity),
+            quantity: toMoney(toNumber(item.quantity)),
             unit_price: toMoney(item.unit_price),
-            total_price: toMoney(item.total_price || toNumber(item.quantity) * toMoney(item.unit_price)),
+            total_price: toMoney(item.total_price || toMoney(toNumber(item.quantity)) * toMoney(item.unit_price)),
             material_cost: toMoney(item.material_cost),
             labor_cost: toMoney(item.labor_cost),
             profit_margin: 0,
@@ -4206,6 +4879,8 @@ export default function QuotationDetailPage() {
     if (isReadonly) return;
     const nextName = getNextCopyName(space, customSpaces.length ? customSpaces : activeSpaces);
     const sourceItems = items.filter((item) => !isOtherCategory(item.category) && inferItemSpace(item) === space);
+    const copiedItems = sourceItems.map((source) => ({ source, id: makeClientItemId() }));
+    const copiedItemIdBySourceId = new Map(copiedItems.map(({ source, id }) => [getQuantityLinkItemId(source), id]));
     updateSpaces((spaces) => {
       const index = spaces.indexOf(space);
       const next = [...spaces];
@@ -4213,7 +4888,7 @@ export default function QuotationDetailPage() {
       return next;
     });
     if (sourceItems.length) {
-      setItems((current) => [...current, ...sourceItems.map((item) => cloneItemForSpace(item, nextName))]);
+      setItems((current) => [...current, ...copiedItems.map(({ source, id }) => cloneItemForSpace(source, nextName, copiedItemIdBySourceId, id))]);
     }
     setActiveSpace(nextName);
     setSpaceMenu(null);
@@ -4261,7 +4936,9 @@ export default function QuotationDetailPage() {
       setCopySpaceCategoryDialog(null);
       return;
     }
-    setItems((current) => [...current, ...sourceItems.map((item) => cloneItemForSpace(item, target))]);
+    const copiedItems = sourceItems.map((source) => ({ source, id: makeClientItemId() }));
+    const copiedItemIdBySourceId = new Map(copiedItems.map(({ source, id }) => [getQuantityLinkItemId(source), id]));
+    setItems((current) => [...current, ...copiedItems.map(({ source, id }) => cloneItemForSpace(source, target, copiedItemIdBySourceId, id))]);
     setActiveSpace(target);
     setSpaceCopyMenu(null);
     setSpaceMenu(null);
@@ -4945,13 +5622,13 @@ export default function QuotationDetailPage() {
                             <table className="personalized-template-preview-table w-full min-w-[1320px] table-fixed border-collapse text-[12px]">
                               <colgroup><col className="w-[5%]" /><col className="w-[22%]" /><col className="w-[7%]" /><col className="w-[8%]" /><col className="w-[9%]" /><col className="w-[9%]" /><col className="w-[8%]" /><col className="w-[32%]" /></colgroup>
                               <thead className="bg-[#f7f9fc] text-[#667085]"><tr><th className="px-2 py-3 text-center font-semibold">序号</th><th className="px-4 py-3 text-left font-semibold">项目名称</th><th className="px-2 py-3 text-center font-semibold">单位</th><th className="px-2 py-3 text-right font-semibold">数量</th><th className="px-2 py-3 text-right font-semibold">人工单价</th><th className="px-2 py-3 text-right font-semibold">材料单价</th><th className="px-2 py-3 text-right font-semibold">单价</th><th className="px-4 py-3 text-left font-semibold">施工说明</th></tr></thead>
-                              <tbody>{visiblePersonalizedTemplateItems.map(({ item, templateId }, index) => <tr key={`${templateId}-${item.id}`} className="h-[52px] border-t border-[#edf1f6] transition hover:bg-[#fbfdff]"><td className="px-2 py-3 text-center tabular-nums text-[#98a2b3]">{index + 1}</td><td className="max-w-0 px-4 py-3 font-medium text-[#344054]"><div className="truncate whitespace-nowrap" title={item.name}>{item.name}</div></td><td className="px-2 py-3 text-center text-[#344054]">{item.unit || "-"}</td><td className="px-2 py-3 text-right tabular-nums text-[#344054]">{item.quantity || 0}</td><td className="px-2 py-3 text-right tabular-nums text-[#344054]">{toMoney(item.labor_cost).toFixed(2)}</td><td className="px-2 py-3 text-right tabular-nums text-[#344054]">{toMoney(item.material_cost).toFixed(2)}</td><td className="px-2 py-3 text-right tabular-nums font-semibold text-[#344054]">{toMoney(item.unit_price).toFixed(2)}</td><td className="max-w-0 px-4 py-3 text-[#344054]"><div className="truncate whitespace-nowrap" title={item.spec || "-"}>{item.spec || "-"}</div></td></tr>)}</tbody>
+                              <tbody>{visiblePersonalizedTemplateItems.map(({ item, templateId }, index) => <tr key={`${templateId}-${item.id}`} className="h-[52px] border-t border-[#edf1f6] transition hover:bg-[#fbfdff]"><td className="px-2 py-3 text-center tabular-nums text-[#98a2b3]">{index + 1}</td><td className="max-w-0 px-4 py-3 font-medium text-[#344054]"><div className="truncate whitespace-nowrap" title={item.name}>{item.name}</div></td><td className="px-2 py-3 text-center text-[#344054]">{item.unit || "-"}</td><td className="px-2 py-3 text-right tabular-nums text-[#344054]">{toNumber(item.quantity).toFixed(2)}</td><td className="px-2 py-3 text-right tabular-nums text-[#344054]">{toMoney(item.labor_cost).toFixed(2)}</td><td className="px-2 py-3 text-right tabular-nums text-[#344054]">{toMoney(item.material_cost).toFixed(2)}</td><td className="px-2 py-3 text-right tabular-nums font-semibold text-[#344054]">{toMoney(item.unit_price).toFixed(2)}</td><td className="max-w-0 px-4 py-3 text-[#344054]"><div className="truncate whitespace-nowrap" title={item.spec || "-"}>{item.spec || "-"}</div></td></tr>)}</tbody>
                             </table>
                           ) : (
                             <table className="personalized-template-preview-table w-full min-w-[760px] table-fixed border-collapse text-[12px]">
                               <colgroup><col className="w-[5%]" /><col className="w-[23%]" /><col className="w-[35%]" /><col className="w-[9%]" /><col className="w-[10%]" /><col className="w-[9%]" /><col className="w-[9%]" /></colgroup>
                               <thead className="bg-[#f7f9fc] text-[#667085]"><tr><th className="px-2 py-3 text-center font-semibold">序号</th><th className="px-4 py-3 text-left font-semibold">{personalizedTemplateCategoryFilter === "main_material" ? "材料名称" : "项目名称"}</th><th className="px-4 py-3 text-left font-semibold">规格 / 型号</th><th className="px-2 py-3 text-center font-semibold">单位</th><th className="px-2 py-3 text-right font-semibold">数量</th><th className="px-2 py-3 text-right font-semibold">单价</th><th className="px-4 py-3 text-left font-semibold">备注</th></tr></thead>
-                              <tbody>{visiblePersonalizedTemplateItems.map(({ item, templateId }, index) => { const detailText = [item.spec, item.material_model].filter(Boolean).join(" / ") || "-"; return <tr key={`${templateId}-${item.id}`} className="h-[52px] border-t border-[#edf1f6] transition hover:bg-[#fbfdff]"><td className="px-2 py-3 text-center tabular-nums text-[#98a2b3]">{index + 1}</td><td className="max-w-0 px-4 py-3 font-medium text-[#344054]"><div className="truncate whitespace-nowrap" title={item.name}>{item.name}</div></td><td className="max-w-0 px-4 py-3 text-[#667085]"><div className="truncate whitespace-nowrap" title={detailText}>{detailText}</div></td><td className="px-2 py-3 text-center text-[#667085]">{item.unit || "-"}</td><td className="px-2 py-3 text-right tabular-nums text-[#52647b]">{item.quantity || 0}</td><td className="px-2 py-3 text-right tabular-nums text-[#52647b]">{toMoney(item.unit_price).toFixed(2)}</td><td className="max-w-0 px-4 py-3 text-[#667085]"><div className="truncate whitespace-nowrap" title={item.remark || "-"}>{item.remark || "-"}</div></td></tr>; })}</tbody>
+                              <tbody>{visiblePersonalizedTemplateItems.map(({ item, templateId }, index) => { const detailText = [item.spec, item.material_model].filter(Boolean).join(" / ") || "-"; return <tr key={`${templateId}-${item.id}`} className="h-[52px] border-t border-[#edf1f6] transition hover:bg-[#fbfdff]"><td className="px-2 py-3 text-center tabular-nums text-[#98a2b3]">{index + 1}</td><td className="max-w-0 px-4 py-3 font-medium text-[#344054]"><div className="truncate whitespace-nowrap" title={item.name}>{item.name}</div></td><td className="max-w-0 px-4 py-3 text-[#667085]"><div className="truncate whitespace-nowrap" title={detailText}>{detailText}</div></td><td className="px-2 py-3 text-center text-[#667085]">{item.unit || "-"}</td><td className="px-2 py-3 text-right tabular-nums text-[#52647b]">{toNumber(item.quantity).toFixed(2)}</td><td className="px-2 py-3 text-right tabular-nums text-[#52647b]">{toMoney(item.unit_price).toFixed(2)}</td><td className="max-w-0 px-4 py-3 text-[#667085]"><div className="truncate whitespace-nowrap" title={item.remark || "-"}>{item.remark || "-"}</div></td></tr>; })}</tbody>
                             </table>
                           )}
                         </div>
@@ -4984,7 +5661,7 @@ export default function QuotationDetailPage() {
             aria-label="选择复制类型"
           >
             <div className="flex items-start justify-between gap-4 px-6 pb-5 pt-6">
-              <div className="flex min-w-0 items-start gap-3">
+              <div className="flex min-w-0 items-center gap-3">
                 <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[12px] border border-[#bfe8d3] bg-[#f1fbf6] text-[#159863]">
                   <Copy className="h-4 w-4" />
                 </span>
@@ -5781,17 +6458,20 @@ export default function QuotationDetailPage() {
 	          }}
         >
           <div
-            className="quote-discount-modal max-h-[calc(100dvh-72px)] w-full max-w-[960px] overflow-y-auto rounded-[18px] border border-[#dfe7f1] bg-white p-5 shadow-[0_28px_78px_rgba(15,23,42,0.24)]"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="quote-discount-title"
+            className="quote-discount-modal flex max-h-[calc(100dvh-32px)] w-full max-w-[960px] flex-col overflow-hidden rounded-[18px] border border-[#dfe7f1] bg-white shadow-[0_28px_78px_rgba(15,23,42,0.24)]"
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="quote-discount-modal-header flex items-start justify-between gap-4 border-b border-[#e7edf5] bg-white pb-4">
+            <div className="quote-discount-modal-header flex shrink-0 items-start justify-between gap-4 border-b border-[#e7edf5] bg-white px-5 py-4">
               <div className="flex min-w-0 items-start gap-3">
                 <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[11px] border border-[#bfe8d3] bg-[#f1fbf6] text-[#159863]">
                   <Tags className="h-[18px] w-[18px]" />
                 </span>
                 <div className="min-w-0">
-                  <div className="text-[15px] font-bold leading-6 text-[#182230]">报价优惠</div>
+                  <div id="quote-discount-title" className="text-[15px] font-bold leading-6 text-[#182230]">报价优惠</div>
 	                  <p className="mt-1 text-xs font-medium text-[#667085]">可分别给基装、产品、定制柜等对象设置不同优惠方式，系统自动汇总优惠金额。</p>
                 </div>
               </div>
@@ -5804,7 +6484,11 @@ export default function QuotationDetailPage() {
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="quote-discount-modal-body space-y-3 bg-white pt-3">
+            <div
+              className="quote-discount-modal-body min-h-0 flex-1 space-y-3 overflow-y-scroll overscroll-contain bg-white px-5 py-4"
+              tabIndex={0}
+              aria-label="报价优惠内容"
+            >
               <div className="quote-discount-step">
                 <div className="quote-discount-step-title mb-2">
                   <span className="quote-discount-step-badge"><Tags className="h-3.5 w-3.5" /></span>
@@ -6054,7 +6738,7 @@ export default function QuotationDetailPage() {
                 </div>
               </div>
             </div>
-            <div className="quote-discount-modal-footer mt-3 flex items-center justify-end gap-2 bg-white">
+            <div className="quote-discount-modal-footer flex shrink-0 items-center justify-end gap-2 border-t border-[#e7edf5] bg-white px-5 py-4">
               <button
                 type="button"
 	                onClick={confirmDiscountPanel}
@@ -6063,6 +6747,153 @@ export default function QuotationDetailPage() {
                 {isReadonly ? <X className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}
 	                {isReadonly ? "关闭" : "确认"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {quantityLinkDialog && quantityLinkDialogTarget && (
+        <div
+          className="quote-quantity-link-overlay fixed inset-0 z-[10000] no-print"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setQuantityLinkDialog(null);
+          }}
+        >
+          <div
+            ref={quantityLinkPanelRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="quote-quantity-link-title"
+            className="quote-quantity-link-modal flex flex-col overflow-hidden bg-white"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="quote-quantity-link-header flex shrink-0 items-center justify-between gap-4 px-5 py-4">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="quote-quantity-link-dialog-icon"><Link2 /></span>
+                <div className="min-w-0">
+                  <p
+                    id="quote-quantity-link-title"
+                    className="truncate text-[15px] font-bold leading-6 text-[#182230]"
+                    title={quantityLinkDialogTarget.name || "未命名项目"}
+                  >
+                    {quantityLinkDialogTarget.name || "未命名项目"}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setQuantityLinkDialog(null)}
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-surface-400 transition hover:bg-surface-100 hover:text-surface-700"
+                aria-label="关闭数量联动"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="quote-quantity-link-body min-h-0 flex-1 overflow-y-auto px-5 pb-4">
+              <label className="quote-quantity-link-formula-field">
+                <span>数量公式</span>
+                <div className={`quote-quantity-link-input-shell${quantityLinkDialogError ? " is-error" : ""}`}>
+                  <b>fx</b>
+                  <span className="quote-quantity-link-formula-prefix">=</span>
+                  <input
+                    ref={quantityLinkInputRef}
+                    autoFocus
+                    value={quantityLinkDialog.text}
+                    onChange={(event) => setQuantityLinkDialog((current) => current ? {
+                      ...current,
+                      text: event.target.value,
+                      lastInsertedRange: null,
+                    } : current)}
+                    onKeyDown={(event) => {
+                      if (
+                        event.key === "Enter"
+                        && !event.shiftKey
+                        && !event.nativeEvent.isComposing
+                      ) {
+                        event.preventDefault();
+                        confirmQuantityLinkDialog();
+                      }
+                    }}
+                    placeholder="输入 ([1]+[2])*0.5"
+                    aria-label="输入数量公式"
+                  />
+                </div>
+                <small>点击项目插入 [编号]；支持 + - * / 和括号，普通数字直接输入</small>
+              </label>
+              <div className="quote-quantity-link-pick-mode">
+                <span>点击表格项目插入 [编号]，运算符和括号请手动输入</span>
+              </div>
+              <div className="quote-quantity-link-rules">
+                <div className="quote-quantity-link-rules-title">使用规则</div>
+                <div className="quote-quantity-link-rules-grid">
+                  <span>必须为同一空间</span>
+                  <span>必须为同一类别</span>
+                  <span>参与项目单位必须相同</span>
+                  <span>计算结果不能小于 0</span>
+                  <span>不能形成循环引用</span>
+                  <span>结果项目不能引用自己</span>
+                </div>
+              </div>
+              <div className="quote-quantity-link-reference">
+                <div className="quote-quantity-link-reference-title">
+                  <span>项目编号对照</span>
+                  <small>当前空间和类别</small>
+                </div>
+                <div className="quote-quantity-link-reference-list">
+                  {quantityLinkReferenceRows.length > 0 ? quantityLinkReferenceRows.map((row) => (
+                    <div key={`${row.rowNumber}:${getQuantityLinkItemId(row.item)}`} className="quote-quantity-link-reference-row">
+                      <b>{row.rowNumber}</b>
+                      <span className="quote-quantity-link-reference-name" title={row.item.name}>{row.item.name || "未命名项目"}</span>
+                      <span className="quote-quantity-link-reference-unit">{row.unit || "-"}</span>
+                      <em className={row.status === "可引用" ? "is-available" : "is-disabled"}>{row.status}</em>
+                    </div>
+                  )) : (
+                    <div className="quote-quantity-link-reference-empty">当前空间和类别下暂无其他项目</div>
+                  )}
+                </div>
+              </div>
+
+              <div className={`quote-quantity-link-preview${quantityLinkDialogError ? " is-error" : ""}`}>
+                {quantityLinkDialogFormula ? (
+                  <>
+                    <span className="quote-quantity-link-preview-token">{formatQuotationQuantityFormulaNames(quantityLinkVisibleItems, quantityLinkDialogFormula)}</span>
+                    <em>=</em>
+                    <strong>{quantityLinkDialogError ? "--" : toNumber(quantityLinkDialogPreview ?? 0).toFixed(2)}</strong>
+                  </>
+                ) : (
+                  <span className="quote-quantity-link-preview-empty">
+                    <Calculator />
+                    输入公式后自动显示计算结果
+                  </span>
+                )}
+              </div>
+              {quantityLinkDialogError ? (
+                <p className="quote-quantity-link-error">
+                  <AlertTriangle />
+                  {quantityLinkDialogError}
+                </p>
+              ) : null}
+            </div>
+
+            <div className="quote-quantity-link-footer flex shrink-0 items-center justify-between gap-3 px-5 py-4">
+              <div>
+                {parseQuotationQuantityFormula(quantityLinkDialogTarget.quantity_formula) ? (
+                  <button type="button" onClick={removeQuantityLinkDialog} className="quote-quantity-link-remove">
+                    解除联动
+                  </button>
+                ) : null}
+              </div>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => setQuantityLinkDialog(null)} className="btn-secondary min-h-9 px-4 text-xs">取消</button>
+                <button
+                  type="button"
+                  onClick={confirmQuantityLinkDialog}
+                  disabled={!quantityLinkDialogFormula || Boolean(quantityLinkDialogError)}
+                  className="btn-primary min-h-9 px-4 text-xs"
+                >
+                  确认联动
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -6697,6 +7528,11 @@ export default function QuotationDetailPage() {
             onReplaceQuota={() => openQuotaReplacePicker(rowMenu.index)}
             onSetAttribution={() => openAttributionDialog(rowMenu.index)}
             onSaveToCustomLibrary={() => saveItemToCustomLibrary(rowMenu.index)}
+            onOpenQuantityLink={() => {
+              openQuantityLinkDialog(rowMenu.index, undefined, { x: rowMenu.x + 8, y: rowMenu.y + 8 });
+              setRowMenu(null);
+            }}
+            onClearQuantityLink={() => clearQuantityLink(rowMenu.index)}
             onClear={() => {
               clearItemContent(rowMenu.index);
               setRowMenu(null);
@@ -6937,6 +7773,9 @@ export default function QuotationDetailPage() {
               </div>
             ) : null}
             useQuotaLibraryAction={isBaseCategory(activeCategory)}
+            quantityLinkPanel={null}
+            quantityLinkPickMode={Boolean(quantityLinkDialog)}
+            onQuantityLinkPick={insertQuantityLinkRowNumber}
             selectedItemKeys={selectedQuoteItemKeySet}
             selectedItemCount={selectedActiveItemCount}
             onToggleItemSelection={toggleQuoteItemSelection}
@@ -6951,6 +7790,7 @@ export default function QuotationDetailPage() {
             onDeleteSelectedItems={deleteSelectedQuoteItems}
             onChange={updateItem}
             onOpenRowMenu={openRowMenu}
+            onOpenQuantityLink={openQuantityLinkDialog}
             onReplaceBaseItem={openQuotaReplacePicker}
             readOnly={isReadonly}
             draggingItemIndex={draggingItemIndex}
@@ -7145,6 +7985,7 @@ export default function QuotationDetailPage() {
           background: #ffffff !important;
         }
         .quotation-detail-ui .quote-discount-modal {
+          border-radius: 0 !important;
           background: #ffffff !important;
         }
         .quotation-detail-ui .quote-discount-modal-header,
@@ -7154,11 +7995,15 @@ export default function QuotationDetailPage() {
           background: #ffffff !important;
           box-shadow: none !important;
         }
-        .quotation-detail-ui .quote-discount-modal-header {
-          border-bottom: 1px solid #e7edf5 !important;
-        }
         .quotation-detail-ui .quote-discount-modal-body {
+          height: calc(100dvh - 250px);
+          max-height: calc(100dvh - 250px);
           padding-top: 12px !important;
+          overflow-y: auto !important;
+          overscroll-behavior: contain;
+          scrollbar-gutter: auto;
+          touch-action: pan-y;
+          -webkit-overflow-scrolling: touch;
         }
         .quotation-detail-ui .quote-discount-scope-panel {
           background: #ffffff !important;
@@ -11466,7 +12311,774 @@ export default function QuotationDetailPage() {
           font-weight: 650;
           color: #6f7f96;
         }
+        .quotation-detail-ui .quote-quantity-link-control {
+          position: relative;
+          display: flex;
+          align-items: center;
+          min-height: 38px;
+        }
+        .quotation-detail-ui .quote-quantity-link-control > input {
+          width: 100%;
+          min-width: 0;
+          max-width: 100%;
+          padding-right: 28px;
+        }
+        .quotation-detail-ui .quote-quantity-link-control > input.is-invalid {
+          color: #b42318 !important;
+          box-shadow: inset 0 0 0 1px #e6a2a2 !important;
+        }
+        .quotation-detail-ui .quote-quantity-link-button {
+          position: absolute;
+          top: 50%;
+          right: 5px;
+          display: inline-flex;
+          width: 22px;
+          height: 22px;
+          align-items: center;
+          justify-content: center;
+          border: 0;
+          border-radius: 6px;
+          background: transparent;
+          padding: 0;
+          color: #9aa8bb;
+          cursor: pointer;
+          transform: translateY(-50%);
+          transition: background 160ms ease, color 160ms ease;
+        }
+        .quotation-detail-ui .quote-quantity-link-button:hover {
+          background: #edf4ff;
+          color: #407aff;
+        }
+        .quotation-detail-ui .quote-quantity-link-button.is-linked {
+          color: #159863;
+        }
+        .quotation-detail-ui .quote-quantity-link-button svg {
+          width: 13px;
+          height: 13px;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline {
+          border-top: 1px solid #dfe8f5;
+          border-bottom: 1px solid #e6edf7;
+          background: #f8faff;
+          padding: 10px 14px 12px;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-main {
+          display: grid;
+          grid-template-columns: minmax(180px, .75fr) minmax(280px, 1.35fr) auto;
+          gap: 12px;
+          align-items: end;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-context {
+          display: flex;
+          min-width: 0;
+          align-items: center;
+          gap: 9px;
+          padding-bottom: 2px;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-context > span {
+          display: inline-flex;
+          width: 30px;
+          height: 30px;
+          flex: 0 0 auto;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid #bfe8d3;
+          border-radius: 8px;
+          background: #effaf4;
+          color: #159863;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-context svg {
+          width: 14px;
+          height: 14px;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-context > div {
+          min-width: 0;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-context small {
+          display: block;
+          color: #8a96a8;
+          font-size: 10px;
+          font-weight: 700;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-context strong {
+          display: block;
+          overflow: hidden;
+          margin-top: 2px;
+          color: #26364a;
+          font-size: 12px;
+          font-weight: 750;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-input > span {
+          display: block;
+          margin-bottom: 5px;
+          color: #667085;
+          font-size: 10px;
+          font-weight: 700;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-input > small {
+          display: block;
+          margin-top: 4px;
+          color: #98a2b3;
+          font-size: 9px;
+          font-weight: 600;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline .quote-quantity-link-input-shell {
+          height: 40px;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-actions {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 7px;
+          padding-bottom: 17px;
+          white-space: nowrap;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-actions button {
+          min-height: 34px;
+          border: 1px solid #d8e1ed;
+          border-radius: 8px;
+          background: #ffffff;
+          padding: 0 12px;
+          color: #52647b;
+          font-size: 11px;
+          font-weight: 700;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-actions button.is-primary {
+          border-color: #407aff;
+          background: #407aff;
+          color: #ffffff;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-actions button.is-primary:disabled {
+          cursor: not-allowed;
+          opacity: .5;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-actions button.is-remove {
+          border-color: transparent;
+          background: transparent;
+          color: #b42318;
+          padding-left: 0;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline-meta {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-top: 9px;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline .quote-quantity-link-rules {
+          display: flex;
+          flex: 0 1 auto;
+          flex-wrap: wrap;
+          gap: 5px;
+          margin: 0;
+          border: 0;
+          background: transparent;
+          padding: 0;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline .quote-quantity-link-rules > span {
+          border: 1px solid #dfe7f1;
+          border-radius: 5px;
+          background: #ffffff;
+          padding: 3px 6px;
+          color: #667085;
+          font-size: 9px;
+          font-weight: 650;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline .quote-quantity-link-preview {
+          min-height: 32px;
+          flex: 1 1 320px;
+          justify-content: flex-end;
+          margin: 0;
+          border: 0;
+          background: transparent;
+          padding: 0;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline .quote-quantity-link-preview-token {
+          background: #ffffff;
+          padding: 2px 6px;
+          font-size: 10px;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline .quote-quantity-link-preview strong {
+          font-size: 13px;
+        }
+        .quotation-detail-ui .quote-quantity-link-inline .quote-quantity-link-error {
+          margin-top: 7px;
+        }
+        .quotation-detail-ui .quote-quantity-link-overlay {
+          pointer-events: none;
+        }
+        .quotation-detail-ui .quote-quantity-link-modal {
+          position: fixed;
+          top: var(--quote-quantity-link-y);
+          left: var(--quote-quantity-link-x);
+          right: auto;
+          bottom: auto;
+          width: min(410px, calc(100vw - 40px));
+          max-width: 410px;
+          max-height: min(620px, calc(100dvh - 40px));
+          border: 1px solid #dfe7f1;
+          border-radius: 18px;
+          box-shadow: 0 28px 78px rgba(15, 23, 42, 0.24);
+          pointer-events: auto;
+          transform: none;
+        }
+        .quotation-detail-ui .quote-quantity-link-header {
+          background: #ffffff;
+        }
+        .quotation-detail-ui .quote-quantity-link-dialog-icon {
+          display: inline-flex;
+          width: 36px;
+          height: 36px;
+          flex: 0 0 auto;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid #bfe8d3;
+          border-radius: 10px;
+          background: #f1fbf6;
+          color: #159863;
+        }
+        .quotation-detail-ui .quote-quantity-link-dialog-icon svg {
+          width: 17px;
+          height: 17px;
+        }
+        .quotation-detail-ui .quote-quantity-link-target {
+          display: flex;
+          min-width: 0;
+          align-items: center;
+          gap: 6px;
+          margin-top: 4px;
+        }
+        .quotation-detail-ui .quote-quantity-link-target span {
+          flex: 0 0 auto;
+          border-radius: 5px;
+          background: #f2f5f9;
+          padding: 2px 6px;
+          color: #667085;
+          font-size: 10px;
+          font-weight: 700;
+        }
+        .quotation-detail-ui .quote-quantity-link-target strong {
+          min-width: 0;
+          overflow: hidden;
+          color: #475467;
+          font-size: 12px;
+          font-weight: 650;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .quotation-detail-ui .quote-quantity-link-body {
+          background: #ffffff;
+        }
+        .quotation-detail-ui .quote-quantity-link-formula-field > span {
+          display: block;
+          margin-bottom: 8px;
+          color: #52647b;
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .quotation-detail-ui .quote-quantity-link-input-shell {
+          display: flex;
+          width: 100%;
+          height: 50px;
+          align-items: center;
+          gap: 10px;
+          border: 1px solid #cfd9e8;
+          border-radius: 11px;
+          background: #ffffff;
+          padding: 0 14px 0 12px;
+          transition: border-color 160ms ease, box-shadow 160ms ease;
+        }
+        .quotation-detail-ui .quote-quantity-link-input-shell:focus-within {
+          border-color: #7fa9ff;
+          box-shadow: 0 0 0 3px rgba(64, 122, 255, 0.1);
+        }
+        .quotation-detail-ui .quote-quantity-link-input-shell.is-error {
+          border-color: #e6a2a2;
+          box-shadow: 0 0 0 3px rgba(180, 35, 24, 0.07);
+        }
+        .quotation-detail-ui .quote-quantity-link-input-shell > b {
+          flex: 0 0 auto;
+          border-radius: 6px;
+          background: #eef4ff;
+          padding: 3px 6px;
+          color: #407aff;
+          font-family: Georgia, serif;
+          font-size: 12px;
+          font-style: italic;
+        }
+        .quotation-detail-ui .quote-quantity-link-formula-prefix {
+          flex: 0 0 auto;
+          color: #98a2b3;
+          font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+          font-size: 16px;
+          font-weight: 700;
+          user-select: none;
+          pointer-events: none;
+        }
+        .quotation-detail-ui .quote-quantity-link-formula-field input {
+          min-width: 0;
+          flex: 1 1 auto;
+          height: 100%;
+          border: 0;
+          outline: 0;
+          background: transparent;
+          padding: 0;
+          color: #172033;
+          font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+          font-size: 16px;
+          font-weight: 700;
+        }
+        .quotation-detail-ui .quote-quantity-link-formula-field > small {
+          display: block;
+          margin-top: 7px;
+          color: #8a96a8;
+          font-size: 10px;
+          font-weight: 600;
+        }
+        .quotation-detail-ui .quote-quantity-link-pick-mode {
+          margin-top: 10px;
+          border: 1px solid #dce7f7;
+          border-radius: 8px;
+          background: #f7faff;
+          padding: 7px 9px;
+        }
+        .quotation-detail-ui .quote-quantity-link-pick-mode > span {
+          color: #667085;
+          font-size: 10px;
+          font-weight: 600;
+          line-height: 16px;
+        }
+        .quotation-detail-ui .quote-quantity-link-pick-surface [data-quantity-link-row][data-quantity-link-pick-state="available"] {
+          cursor: pointer;
+        }
+        .quotation-detail-ui .quote-quantity-link-pick-surface [data-quantity-link-row][data-quantity-link-pick-state="available"] > td {
+          background-image: linear-gradient(rgba(16, 185, 129, 0.09), rgba(16, 185, 129, 0.09)) !important;
+          box-shadow: inset 0 1px 0 rgba(16, 185, 129, 0.16), inset 0 -1px 0 rgba(16, 185, 129, 0.16) !important;
+        }
+        .quotation-detail-ui .quote-quantity-link-pick-surface [data-quantity-link-row][data-quantity-link-pick-state="available"]:hover > td {
+          background-image: linear-gradient(rgba(16, 185, 129, 0.16), rgba(16, 185, 129, 0.16)) !important;
+          box-shadow: inset 0 1px 0 rgba(16, 185, 129, 0.24), inset 0 -1px 0 rgba(16, 185, 129, 0.24) !important;
+        }
+        .quotation-detail-ui [data-quantity-link-row][data-quantity-link-active="true"] > td {
+          background-image: linear-gradient(rgba(64, 122, 255, 0.14), rgba(64, 122, 255, 0.14)) !important;
+          box-shadow: inset 0 1px 0 rgba(64, 122, 255, 0.22), inset 0 -1px 0 rgba(64, 122, 255, 0.22) !important;
+        }
+        .quotation-detail-ui [data-quantity-link-row][data-quantity-link-active="true"] > td:first-child {
+          box-shadow: inset 3px 0 0 #407aff, inset 0 1px 0 rgba(64, 122, 255, 0.22), inset 0 -1px 0 rgba(64, 122, 255, 0.22) !important;
+        }
+        .quotation-detail-ui [data-quantity-link-row][data-quantity-link-active="true"] .quote-quantity-link-control {
+          border-radius: 7px;
+          background: rgba(64, 122, 255, 0.12);
+        }
+        .quotation-detail-ui .quote-quantity-link-rules {
+          margin-top: 12px;
+          border: 1px solid #e4eaf2;
+          border-radius: 9px;
+          background: #f8fafc;
+          padding: 10px 11px;
+        }
+        .quotation-detail-ui .quote-quantity-link-rules-title {
+          margin-bottom: 7px;
+          color: #52647b;
+          font-size: 11px;
+          font-weight: 750;
+        }
+        .quotation-detail-ui .quote-quantity-link-rules-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 5px 10px;
+        }
+        .quotation-detail-ui .quote-quantity-link-rules-grid span {
+          position: relative;
+          padding-left: 10px;
+          color: #667085;
+          font-size: 10px;
+          font-weight: 600;
+          line-height: 16px;
+        }
+        .quotation-detail-ui .quote-quantity-link-rules-grid span::before {
+          position: absolute;
+          top: 6px;
+          left: 0;
+          width: 4px;
+          height: 4px;
+          border-radius: 50%;
+          background: #407aff;
+          content: "";
+        }
+        .quotation-detail-ui .quote-quantity-link-help {
+          margin-top: 10px;
+          border: 1px solid #e4eaf2;
+          border-radius: 9px;
+          background: #f8fafc;
+          padding: 10px 12px;
+          color: #667085;
+          font-size: 11px;
+          line-height: 18px;
+        }
+        .quotation-detail-ui .quote-quantity-link-help p {
+          margin: 0 0 4px;
+        }
+        .quotation-detail-ui .quote-quantity-link-help strong {
+          display: block;
+          color: #344054;
+          font-weight: 650;
+        }
+        .quotation-detail-ui .quote-quantity-link-reference {
+          display: none;
+          margin-top: 12px;
+          overflow: hidden;
+          border: 1px solid #e4eaf2;
+          border-radius: 9px;
+        }
+        .quotation-detail-ui .quote-quantity-link-reference-title {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          background: #f8fafc;
+          padding: 8px 11px;
+          color: #52647b;
+          font-size: 11px;
+          font-weight: 700;
+        }
+        .quotation-detail-ui .quote-quantity-link-reference-title small {
+          color: #98a2b3;
+          font-size: 10px;
+          font-weight: 600;
+        }
+        .quotation-detail-ui .quote-quantity-link-reference-list {
+          max-height: 176px;
+          overflow-y: auto;
+          background: #ffffff;
+        }
+        .quotation-detail-ui .quote-quantity-link-reference-row {
+          display: grid;
+          min-height: 38px;
+          grid-template-columns: 30px minmax(0, 1fr) 54px 54px;
+          align-items: center;
+          gap: 8px;
+          border-top: 1px solid #edf1f6;
+          padding: 6px 10px;
+        }
+        .quotation-detail-ui .quote-quantity-link-reference-row:first-child {
+          border-top: 0;
+        }
+        .quotation-detail-ui .quote-quantity-link-reference-row > b {
+          display: inline-flex;
+          width: 24px;
+          height: 24px;
+          align-items: center;
+          justify-content: center;
+          border-radius: 6px;
+          background: #f2f5f9;
+          color: #475467;
+          font-size: 11px;
+          font-weight: 800;
+        }
+        .quotation-detail-ui .quote-quantity-link-reference-name {
+          min-width: 0;
+          overflow: hidden;
+          color: #344054;
+          font-size: 12px;
+          font-weight: 650;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .quotation-detail-ui .quote-quantity-link-reference-unit {
+          color: #667085;
+          font-size: 11px;
+          text-align: center;
+        }
+        .quotation-detail-ui .quote-quantity-link-reference-row em {
+          font-size: 10px;
+          font-style: normal;
+          font-weight: 700;
+          text-align: right;
+        }
+        .quotation-detail-ui .quote-quantity-link-reference-row em.is-available {
+          color: #159863;
+        }
+        .quotation-detail-ui .quote-quantity-link-reference-row em.is-disabled {
+          color: #98a2b3;
+        }
+        .quotation-detail-ui .quote-quantity-link-reference-empty {
+          padding: 18px 12px;
+          color: #98a2b3;
+          font-size: 11px;
+          text-align: center;
+        }
+        .quotation-detail-ui .quote-quantity-link-operator > span {
+          display: block;
+          margin-bottom: 8px;
+          color: #52647b;
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .quotation-detail-ui .quote-quantity-link-operator > div {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+        }
+        .quotation-detail-ui .quote-quantity-link-operator button {
+          min-height: 38px;
+          border: 1px solid #dfe7f1;
+          border-radius: 9px;
+          background: #ffffff;
+          color: #52647b;
+          font-size: 12px;
+          font-weight: 700;
+          transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+        }
+        .quotation-detail-ui .quote-quantity-link-operator button.is-active {
+          border-color: #9fc0ff;
+          background: #edf4ff;
+          color: #2f66e8;
+        }
+        .quotation-detail-ui .quote-quantity-link-search {
+          position: relative;
+          display: block;
+          margin-top: 14px;
+        }
+        .quotation-detail-ui .quote-quantity-link-search > svg {
+          position: absolute;
+          top: 50%;
+          left: 11px;
+          width: 15px;
+          height: 15px;
+          color: #98a2b3;
+          transform: translateY(-50%);
+        }
+        .quotation-detail-ui .quote-quantity-link-search input {
+          width: 100%;
+          height: 39px;
+          border: 1px solid #dfe7f1;
+          border-radius: 9px;
+          outline: 0;
+          background: #ffffff;
+          padding: 0 12px 0 34px;
+          color: #26364a;
+          font-size: 13px;
+        }
+        .quotation-detail-ui .quote-quantity-link-search input:focus {
+          border-color: #9fc0ff;
+          box-shadow: 0 0 0 3px rgba(64, 122, 255, 0.1);
+        }
+        .quotation-detail-ui .quote-quantity-link-list-head,
+        .quotation-detail-ui .quote-quantity-link-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1.6fr) minmax(150px, .8fr) 54px 54px;
+          align-items: center;
+          gap: 10px;
+        }
+        .quotation-detail-ui .quote-quantity-link-list-head {
+          padding: 11px 12px 7px;
+          color: #8a96a8;
+          font-size: 10px;
+          font-weight: 750;
+          text-align: center;
+        }
+        .quotation-detail-ui .quote-quantity-link-list-head > span:first-child {
+          text-align: left;
+        }
+        .quotation-detail-ui .quote-quantity-link-list {
+          max-height: 280px;
+          overflow-y: auto;
+          border: 1px solid #e4eaf2;
+          border-radius: 10px;
+        }
+        .quotation-detail-ui .quote-quantity-link-row {
+          min-height: 48px;
+          border-top: 1px solid #edf1f6;
+          padding: 6px 12px;
+          transition: background 140ms ease;
+        }
+        .quotation-detail-ui .quote-quantity-link-row:first-child {
+          border-top: 0;
+        }
+        .quotation-detail-ui .quote-quantity-link-row.is-selected {
+          background: #f7faff;
+        }
+        .quotation-detail-ui .quote-quantity-link-row-meta {
+          display: flex;
+          min-width: 0;
+          flex-direction: column;
+          color: #7b8797;
+          font-size: 11px;
+          line-height: 17px;
+        }
+        .quotation-detail-ui .quote-quantity-link-select {
+          display: inline-flex;
+          width: 22px;
+          height: 22px;
+          align-items: center;
+          justify-content: center;
+          justify-self: center;
+          border: 1px solid #cfd9e8;
+          border-radius: 6px;
+          background: #ffffff;
+          color: #ffffff;
+        }
+        .quotation-detail-ui .quote-quantity-link-select.is-active {
+          border-color: #159863;
+          background: #159863;
+        }
+        .quotation-detail-ui .quote-quantity-link-select:disabled {
+          cursor: not-allowed;
+          opacity: .35;
+        }
+        .quotation-detail-ui .quote-quantity-link-select svg {
+          width: 13px;
+          height: 13px;
+        }
+        .quotation-detail-ui .quote-quantity-link-empty {
+          padding: 34px 16px;
+          color: #8a96a8;
+          font-size: 12px;
+          text-align: center;
+        }
+        .quotation-detail-ui .quote-quantity-link-preview {
+          display: flex;
+          min-height: 46px;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin-top: 12px;
+          border: 1px solid #d7e4fb;
+          border-radius: 10px;
+          background: #f8faff;
+          padding: 10px 12px;
+          color: #52647b;
+          font-size: 12px;
+        }
+        .quotation-detail-ui .quote-quantity-link-preview > span {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .quotation-detail-ui .quote-quantity-link-preview > .quote-quantity-link-preview-token {
+          display: inline;
+          overflow: visible;
+          border-radius: 6px;
+          background: #ffffff;
+          padding: 3px 7px;
+          color: #344054;
+          font-weight: 650;
+          line-height: 19px;
+          text-overflow: clip;
+          white-space: normal;
+          word-break: break-all;
+          box-shadow: inset 0 0 0 1px #e4eaf2;
+        }
+        .quotation-detail-ui .quote-quantity-link-preview-term {
+          display: inline-flex;
+          min-width: 0;
+          align-items: center;
+          gap: 6px;
+        }
+        .quotation-detail-ui .quote-quantity-link-preview b {
+          color: #2f66e8;
+          font-size: 14px;
+        }
+        .quotation-detail-ui .quote-quantity-link-preview em {
+          color: #98a2b3;
+          font-style: normal;
+        }
+        .quotation-detail-ui .quote-quantity-link-preview strong {
+          margin-left: auto;
+          color: #159863;
+          font-size: 14px;
+        }
+        .quotation-detail-ui .quote-quantity-link-preview.is-error {
+          border-color: #f0b9b9;
+          background: #fff7f7;
+        }
+        .quotation-detail-ui .quote-quantity-link-preview-empty {
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+          color: #98a2b3;
+        }
+        .quotation-detail-ui .quote-quantity-link-preview-empty svg {
+          width: 15px;
+          height: 15px;
+        }
+        .quotation-detail-ui .quote-quantity-link-error {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          margin-top: 8px;
+          color: #b42318;
+          font-size: 11px;
+          font-weight: 650;
+        }
+        .quotation-detail-ui .quote-quantity-link-error svg {
+          width: 13px;
+          height: 13px;
+          flex: 0 0 auto;
+        }
+        .quotation-detail-ui .quote-quantity-link-footer {
+          background: #ffffff;
+        }
+        .quotation-detail-ui .quote-quantity-link-remove {
+          border: 0;
+          background: transparent;
+          padding: 0;
+          color: #b42318;
+          font-size: 12px;
+          font-weight: 700;
+        }
 	        @media (max-width: 720px) {
+	          .quotation-detail-ui .quote-quantity-link-inline-main {
+	            grid-template-columns: 1fr;
+	            gap: 9px;
+	          }
+	          .quotation-detail-ui .quote-quantity-link-inline-actions {
+	            justify-content: flex-start;
+	            padding-bottom: 0;
+	          }
+	          .quotation-detail-ui .quote-quantity-link-inline-meta {
+	            display: block;
+	          }
+	          .quotation-detail-ui .quote-quantity-link-inline .quote-quantity-link-preview {
+	            justify-content: flex-start;
+	            margin-top: 8px;
+	          }
+	          .quotation-detail-ui .quote-quantity-link-overlay {
+	            display: flex;
+	            align-items: center;
+	            justify-content: center;
+	            background: rgba(15, 23, 42, 0.35);
+	            padding: 16px;
+	            pointer-events: auto;
+	            backdrop-filter: blur(2px);
+	          }
+	          .quotation-detail-ui .quote-quantity-link-modal {
+	            position: relative;
+	            top: auto;
+	            left: auto;
+	            right: auto;
+	            bottom: auto;
+	            width: 100%;
+	            max-width: 560px;
+	            max-height: calc(100dvh - 32px);
+	            transform: none;
+	          }
+	          .quotation-detail-ui .quote-quantity-link-reference {
+	            display: block;
+	          }
+	          .quotation-detail-ui .quote-quantity-link-list-head {
+	            display: none;
+	          }
+	          .quotation-detail-ui .quote-quantity-link-row {
+	            grid-template-columns: minmax(0, 1fr) 36px 36px;
+	            gap: 6px;
+	          }
+	          .quotation-detail-ui .quote-quantity-link-row-meta {
+	            display: none;
+	          }
 	          .quotation-detail-ui .quote-discount-type-grid {
 	            grid-template-columns: 1fr;
 	          }
@@ -11557,6 +13169,8 @@ function RowContextMenu({
   onReplaceQuota,
   onSetAttribution,
   onSaveToCustomLibrary,
+  onOpenQuantityLink,
+  onClearQuantityLink,
   onClear,
   onColor,
   onRemove,
@@ -11571,6 +13185,8 @@ function RowContextMenu({
   onReplaceQuota: () => void;
   onSetAttribution: () => void;
   onSaveToCustomLibrary: () => void;
+  onOpenQuantityLink: () => void;
+  onClearQuantityLink: () => void;
   onClear: () => void;
   onColor: (value: string) => void;
   onRemove: () => void;
@@ -11582,6 +13198,8 @@ function RowContextMenu({
   const canReplaceQuota = isBaseCategory(item.category);
   const canSetAttribution = !isOtherCategory(item.category);
   const canSaveToCustomLibrary = isBaseCategory(item.category) && !isStandardQuotaSourceItem(item);
+  const hasQuantityLink = Boolean(parseQuotationQuantityFormula(item.quantity_formula));
+  const canOpenQuantityLink = !isOtherCategory(item.category);
 
   return (
     <div
@@ -11627,6 +13245,18 @@ function RowContextMenu({
         <button type="button" onClick={onSaveToCustomLibrary} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-primary-50 hover:text-primary-700">
           <BookmarkPlus className="h-4 w-4" />
           保存到自定义库
+        </button>
+      )}
+      {!hasQuantityLink && canOpenQuantityLink && (
+        <button type="button" onClick={onOpenQuantityLink} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-[#2f66e8] hover:bg-blue-50">
+          <Link2 className="h-4 w-4" />
+          添加数量联动
+        </button>
+      )}
+      {hasQuantityLink && (
+        <button type="button" onClick={onClearQuantityLink} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-[#137a4a] hover:bg-emerald-50">
+          <Unlink2 className="h-4 w-4" />
+          解除数量联动
         </button>
       )}
       <button type="button" onClick={onClear} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
@@ -11981,7 +13611,7 @@ function QuoteCategoryChooser({
   );
 }
 
-function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, spaceOptions, feeScopeOptions, otherFeeRows, baseAmount, materialAmount, feeFormulaContext, isAllSpaceView, searchValue, onSearchChange, onAdd, onManualAdd, onOpenFindReplace, quotaUpdateEntry, categoryNavigation, useQuotaLibraryAction, selectedItemKeys, selectedItemCount, onToggleItemSelection, onToggleAllItemSelection, onDeleteSelectedItems, onChange, onOpenRowMenu, onReplaceBaseItem, readOnly, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onItemPointerDown }: {
+function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, spaceOptions, feeScopeOptions, otherFeeRows, baseAmount, materialAmount, feeFormulaContext, isAllSpaceView, searchValue, onSearchChange, onAdd, onManualAdd, onOpenFindReplace, quotaUpdateEntry, categoryNavigation, useQuotaLibraryAction, quantityLinkPanel, quantityLinkPickMode, onQuantityLinkPick, selectedItemKeys, selectedItemCount, onToggleItemSelection, onToggleAllItemSelection, onDeleteSelectedItems, onChange, onOpenRowMenu, onOpenQuantityLink, onReplaceBaseItem, readOnly, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onItemPointerDown }: {
   title: string;
   category: QuotationItem["category"];
   activeSpace?: string;
@@ -12002,6 +13632,9 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
   quotaUpdateEntry?: { count: number; onOpen: () => void };
   categoryNavigation?: React.ReactNode;
   useQuotaLibraryAction?: boolean;
+  quantityLinkPanel?: React.ReactNode;
+  quantityLinkPickMode?: boolean;
+  onQuantityLinkPick?: (rowNumber: number) => void;
   selectedItemKeys: Set<string>;
   selectedItemCount: number;
   onToggleItemSelection: (key: string) => void;
@@ -12009,6 +13642,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
   onDeleteSelectedItems: () => void;
   onChange: (index: number, patch: Partial<QuotationItem>) => void;
   onOpenRowMenu: RowMenuOpenHandler;
+  onOpenQuantityLink: QuantityLinkOpenHandler;
   onReplaceBaseItem?: (index: number) => void;
   readOnly?: boolean;
   draggingItemIndex: number | null;
@@ -12145,6 +13779,27 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           </button>
         </div>
       </div>
+      {quantityLinkPanel}
+      <div
+        className={quantityLinkPickMode ? "quote-quantity-link-pick-surface" : undefined}
+        onMouseDownCapture={(event) => {
+          if (!quantityLinkPickMode || !onQuantityLinkPick) return;
+          const target = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-quantity-link-row]") : null;
+          if (!target || target.dataset.quantityLinkPickState !== "available") return;
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+        onClickCapture={(event) => {
+          if (!quantityLinkPickMode || !onQuantityLinkPick) return;
+          const target = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-quantity-link-row]") : null;
+          if (target?.dataset.quantityLinkPickState !== "available") return;
+          const rowNumber = Number(target?.dataset.quantityLinkRow || "");
+          if (!Number.isInteger(rowNumber) || rowNumber <= 0) return;
+          event.preventDefault();
+          event.stopPropagation();
+          onQuantityLinkPick(rowNumber);
+        }}
+      >
       {isBase ? (
         <BaseQuoteTable
           items={items}
@@ -12157,6 +13812,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           activeFindReplaceHighlight={activeFindReplaceHighlight}
           onChange={onChange}
           onOpenRowMenu={onOpenRowMenu}
+          onOpenQuantityLink={onOpenQuantityLink}
           onReplaceBaseItem={onReplaceBaseItem}
           selectedItemKeys={selectedItemKeys}
           onToggleItemSelection={onToggleItemSelection}
@@ -12176,6 +13832,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           activeFindReplaceHighlight={activeFindReplaceHighlight}
           onChange={onChange}
           onOpenRowMenu={onOpenRowMenu}
+          onOpenQuantityLink={onOpenQuantityLink}
           selectedItemKeys={selectedItemKeys}
           onToggleItemSelection={onToggleItemSelection}
           onToggleAllItemSelection={onToggleAllItemSelection}
@@ -12201,6 +13858,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           activeFindReplaceHighlight={activeFindReplaceHighlight}
           onChange={onChange}
           onOpenRowMenu={onOpenRowMenu}
+          onOpenQuantityLink={onOpenQuantityLink}
           selectedItemKeys={selectedItemKeys}
           onToggleItemSelection={onToggleItemSelection}
           onToggleAllItemSelection={onToggleAllItemSelection}
@@ -12208,6 +13866,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           onItemPointerDown={onItemPointerDown}
         />
       )}
+      </div>
       {!readOnly && canAddInCurrentView && (
         <div className={`quote-section-footer no-print border-t border-surface-100 px-3 ${isOther ? "py-2" : "py-3"} ${isEmpty ? "quote-section-footer-empty" : ""}`}>
           <button
@@ -13123,6 +14782,7 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
   readOnly,
   onChange,
   onOpenRowMenu,
+  onOpenQuantityLink,
   onReplaceBaseItem,
   selected,
   onToggleItemSelection,
@@ -13132,6 +14792,7 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
   dropAfter,
   recentlyMoved,
   findReplaceHighlight,
+  quantityLinkItems,
 }: {
   item: QuotationItem;
   index: number;
@@ -13141,6 +14802,7 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
   readOnly?: boolean;
   onChange: (index: number, patch: Partial<QuotationItem>) => void;
   onOpenRowMenu: RowMenuOpenHandler;
+  onOpenQuantityLink: QuantityLinkOpenHandler;
   onReplaceBaseItem?: (index: number) => void;
   selected: boolean;
   onToggleItemSelection: (key: string) => void;
@@ -13150,6 +14812,7 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
   dropAfter: boolean;
   recentlyMoved: boolean;
   findReplaceHighlight?: FindReplaceActiveHighlight | null;
+  quantityLinkItems?: QuotationItem[];
 }) {
   const quantity = toNumber(item.quantity);
   const materialUnit = toNumber(item.material_cost);
@@ -13167,6 +14830,7 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
     <tr
       key={itemKey}
       data-quote-item-row
+      data-quantity-link-row={rowIndex + 1}
       data-item-key={itemKey}
       data-index={index}
       onContextMenu={readOnly ? undefined : (event) => onOpenRowMenu(event, index)}
@@ -13198,7 +14862,16 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
           onQuickReplace={!readOnly && onReplaceBaseItem ? () => onReplaceBaseItem(index) : undefined}
         />
       </td>
-      <td className="border border-surface-200 p-0" style={cellStyle}><QuoteNumberInput value={item.quantity} onChange={(value) => handleChange({ quantity: value })} className="text-center font-semibold text-red-600" disabled={readOnly} allowFormula /></td>
+      <td className="border border-surface-200 p-0" style={cellStyle}>
+        <QuantityLinkInput
+          item={item}
+          readOnly={readOnly}
+          onChange={handleChange}
+          onOpenQuantityLink={(event) => onOpenQuantityLink(index, event)}
+          quantityLinkItems={quantityLinkItems}
+          targetIndex={rowIndex}
+        />
+      </td>
       <td className="border border-surface-200 p-0" style={cellStyle}><UnitInputCell value={item.unit} onChange={(value) => handleChange({ unit: value })} className="text-center" readOnly={readOnly} /></td>
       <td className="border border-surface-200 p-0" style={cellStyle}>
         <div className="quote-price-input-wrap">
@@ -13244,7 +14917,7 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
 });
 
 
-function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onReplaceBaseItem, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
+function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onOpenQuantityLink, onReplaceBaseItem, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
   items: { item: QuotationItem; index: number }[];
   showSpace?: boolean;
   spaceOptions: string[];
@@ -13255,6 +14928,7 @@ function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingIte
   activeFindReplaceHighlight?: FindReplaceActiveHighlight | null;
   onChange: (index: number, patch: Partial<QuotationItem>) => void;
   onOpenRowMenu: RowMenuOpenHandler;
+  onOpenQuantityLink: QuantityLinkOpenHandler;
   onReplaceBaseItem?: (index: number) => void;
   selectedItemKeys: Set<string>;
   onToggleItemSelection: (key: string) => void;
@@ -13269,23 +14943,23 @@ function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingIte
 
   return (
     <ThinScrollArea className="quote-table-shell" scrollClassName="quote-table-freeze-scroll">
-      <table className={`w-full border-collapse text-sm ${showSpace ? "min-w-[1510px]" : "min-w-[1390px]"}`}>
+      <table className={`w-full table-fixed border-collapse text-sm ${showSpace ? "min-w-[1510px]" : "min-w-[1390px]"}`}>
         <thead className="bg-surface-50 text-center text-xs font-semibold text-surface-600">
           <tr>
             <QuoteIndexHeaderCell rowSpan={2} itemKeys={itemKeys} selectedItemKeys={selectedItemKeys} readOnly={readOnly} onToggleAll={onToggleAllItemSelection} />
-            {showSpace && <th rowSpan={2} className="w-36 border border-surface-200 px-3 py-1.5">空间/类别</th>}
-            <th rowSpan={2} className="w-56 border border-surface-200 px-3 py-1.5">工程项目</th>
+            {showSpace && <th rowSpan={2} className="w-44 border border-surface-200 px-3 py-1.5">空间/类别</th>}
+            <th rowSpan={2} className="w-[244px] border border-surface-200 px-3 py-1.5">工程项目</th>
             <th rowSpan={2} className="w-40 border border-surface-200 px-2 py-1.5">数量</th>
             <th rowSpan={2} className="w-20 border border-surface-200 px-2 py-1.5">单位</th>
             <th colSpan={2} className="border border-surface-200 px-2 py-1.5">材料</th>
             <th colSpan={2} className="border border-surface-200 px-2 py-1.5">人工</th>
-            <th rowSpan={2} className="w-28 border border-surface-200 px-2 py-1.5">合计<br />材料+人工</th>
+            <th rowSpan={2} className="w-40 border border-surface-200 px-2 py-1.5">合计<br />材料+人工</th>
             <th rowSpan={2} className="w-[360px] border border-surface-200 px-3 py-1.5">施工工艺及材料说明</th>
           </tr>
           <tr>
-            <th className="w-24 border border-surface-200 px-2 py-1.5">单价</th>
+            <th className="w-[46px] border border-surface-200 px-2 py-1.5">单价</th>
             <th className="w-24 border border-surface-200 px-2 py-1.5">合价</th>
-            <th className="w-24 border border-surface-200 px-2 py-1.5">单价</th>
+            <th className="w-[46px] border border-surface-200 px-2 py-1.5">单价</th>
             <th className="w-24 border border-surface-200 px-2 py-1.5">合价</th>
           </tr>
         </thead>
@@ -13303,6 +14977,7 @@ function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingIte
                 readOnly={readOnly}
                 onChange={onChange}
                 onOpenRowMenu={onOpenRowMenu}
+                onOpenQuantityLink={onOpenQuantityLink}
                 onReplaceBaseItem={onReplaceBaseItem}
                 selected={selectedItemKeys.has(itemKey)}
                 onToggleItemSelection={onToggleItemSelection}
@@ -13312,6 +14987,7 @@ function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingIte
                 dropAfter={dragOverItem?.index === index && dragOverItem.position === "after"}
                 recentlyMoved={recentlyMovedItemKey === itemKey}
                 findReplaceHighlight={activeFindReplaceHighlight?.itemKey === itemKey ? activeFindReplaceHighlight : null}
+                quantityLinkItems={items.map(({ item }) => item)}
               />
             );
           })}
@@ -13349,6 +15025,7 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
   readOnly,
   onChange,
   onOpenRowMenu,
+  onOpenQuantityLink,
   selected,
   onToggleItemSelection,
   onItemPointerDown,
@@ -13357,6 +15034,7 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
   dropAfter,
   recentlyMoved,
   findReplaceHighlight,
+  quantityLinkItems,
 }: {
   item: QuotationItem;
   index: number;
@@ -13366,6 +15044,7 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
   readOnly?: boolean;
   onChange: (index: number, patch: Partial<QuotationItem>) => void;
   onOpenRowMenu: RowMenuOpenHandler;
+  onOpenQuantityLink: QuantityLinkOpenHandler;
   selected: boolean;
   onToggleItemSelection: (key: string) => void;
   onItemPointerDown: (event: ReactPointerEvent<HTMLButtonElement>, index: number) => void;
@@ -13374,6 +15053,7 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
   dropAfter: boolean;
   recentlyMoved: boolean;
   findReplaceHighlight?: FindReplaceActiveHighlight | null;
+  quantityLinkItems?: QuotationItem[];
 }) {
   const itemKey = getQuotationItemKey(item, index);
   const rowColor = getQuotationRowColor(item.row_color);
@@ -13387,6 +15067,7 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
     <tr
       key={itemKey}
       data-quote-item-row
+      data-quantity-link-row={rowIndex + 1}
       data-item-key={itemKey}
       data-index={index}
       onContextMenu={readOnly ? undefined : (event) => onOpenRowMenu(event, index)}
@@ -13422,7 +15103,14 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
         <QuoteNumberInput value={item.profit_margin || 0} onChange={(value) => handleChange({ profit_margin: value })} className="text-center" disabled={readOnly} />
       </td>
       <td className="border border-surface-200 p-0" style={cellStyle}>
-        <QuoteNumberInput value={item.quantity} onChange={(value) => handleChange({ quantity: value })} className="text-center font-semibold text-red-600" disabled={readOnly} allowFormula />
+        <QuantityLinkInput
+          item={item}
+          readOnly={readOnly}
+          onChange={handleChange}
+          onOpenQuantityLink={(event) => onOpenQuantityLink(index, event)}
+          quantityLinkItems={quantityLinkItems}
+          targetIndex={rowIndex}
+        />
       </td>
       <td className="border border-surface-200 px-2 py-1 text-center font-semibold text-red-600" style={cellStyle}>{formatQuoteAmount(area)}</td>
       <td className="border border-surface-200 p-0" style={cellStyle}>
@@ -13452,7 +15140,7 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
 });
 
 
-function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
+function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onOpenQuantityLink, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
   items: { item: QuotationItem; index: number }[];
   showSpace?: boolean;
   spaceOptions: string[];
@@ -13463,6 +15151,7 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
   activeFindReplaceHighlight?: FindReplaceActiveHighlight | null;
   onChange: (index: number, patch: Partial<QuotationItem>) => void;
   onOpenRowMenu: RowMenuOpenHandler;
+  onOpenQuantityLink: QuantityLinkOpenHandler;
   selectedItemKeys: Set<string>;
   onToggleItemSelection: (key: string) => void;
   onToggleAllItemSelection: (keys: string[]) => void;
@@ -13474,7 +15163,7 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
 
   return (
     <ThinScrollArea className="quote-table-shell" scrollClassName="quote-table-freeze-scroll">
-      <table className={`w-full border-collapse text-sm ${showSpace ? "min-w-[1430px]" : "min-w-[1320px]"}`}>
+      <table className={`w-full table-fixed border-collapse text-sm ${showSpace ? "min-w-[1430px]" : "min-w-[1320px]"}`}>
         <thead className="bg-surface-50 text-center text-xs font-semibold text-surface-600">
           <tr>
             <QuoteIndexHeaderCell rowSpan={2} itemKeys={itemKeys} selectedItemKeys={selectedItemKeys} readOnly={readOnly} onToggleAll={onToggleAllItemSelection} />
@@ -13509,6 +15198,7 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
                 readOnly={readOnly}
                 onChange={onChange}
                 onOpenRowMenu={onOpenRowMenu}
+                onOpenQuantityLink={onOpenQuantityLink}
                 selected={selectedItemKeys.has(itemKey)}
                 onToggleItemSelection={onToggleItemSelection}
                 onItemPointerDown={onItemPointerDown}
@@ -13517,6 +15207,7 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
                 dropAfter={dragOverItem?.index === index && dragOverItem.position === "after"}
                 recentlyMoved={recentlyMovedItemKey === itemKey}
                 findReplaceHighlight={activeFindReplaceHighlight?.itemKey === itemKey ? activeFindReplaceHighlight : null}
+                quantityLinkItems={items.map(({ item }) => item)}
               />
             );
           })}
@@ -13689,7 +15380,7 @@ function FeeScopeSelector({
   );
 }
 
-function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, spaceOptions, feeScopeOptions: feeScopeOptionsInput, isOtherFees, baseAmount, materialAmount, feeFormulaContext, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
+function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, spaceOptions, feeScopeOptions: feeScopeOptionsInput, isOtherFees, baseAmount, materialAmount, feeFormulaContext, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onOpenQuantityLink, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
   items: { item: QuotationItem; index: number }[];
   otherFeeRows: { item: QuotationItem; index: number }[];
   showSpace?: boolean;
@@ -13707,6 +15398,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
   activeFindReplaceHighlight?: FindReplaceActiveHighlight | null;
   onChange: (index: number, patch: Partial<QuotationItem>) => void;
   onOpenRowMenu: RowMenuOpenHandler;
+  onOpenQuantityLink: QuantityLinkOpenHandler;
   selectedItemKeys: Set<string>;
   onToggleItemSelection: (key: string) => void;
   onToggleAllItemSelection: (keys: string[]) => void;
@@ -13771,7 +15463,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
 
   return (
     <ThinScrollArea className="quote-table-shell" scrollClassName={`quote-table-freeze-scroll ${isOtherFees ? "pb-2" : ""}`}>
-      <table className={`w-full border-collapse text-sm ${isOtherFees ? "quote-other-fees-table min-w-[1400px]" : showSpace ? "min-w-[1430px]" : "min-w-[1310px]"}`}>
+      <table className={`w-full table-fixed border-collapse text-sm ${isOtherFees ? "quote-other-fees-table min-w-[1400px]" : showSpace ? "min-w-[1430px]" : "min-w-[1310px]"}`}>
         <thead className="bg-surface-50 text-center text-xs font-semibold text-surface-600">
           <tr>
             <QuoteIndexHeaderCell itemKeys={itemKeys} selectedItemKeys={selectedItemKeys} readOnly={readOnly} onToggleAll={onToggleAllItemSelection} />
@@ -13829,6 +15521,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
               <tr
                 key={itemKey}
                 data-quote-item-row
+                data-quantity-link-row={rowIndex + 1}
                 data-item-key={itemKey}
                 data-index={index}
                 onContextMenu={readOnly ? undefined : (event) => onOpenRowMenu(event, index)}
@@ -13947,7 +15640,16 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                         {manualPriceEditFlags.material ? <span className="quote-price-edit-mark" title="单价已手动修改">改</span> : null}
                       </div>
                     </td>
-                    <td className="border border-surface-200 py-0" style={cellStyle}><QuoteNumberInput value={item.quantity} onChange={(value) => onChange(index, { quantity: value })} className="w-40 text-center font-semibold text-red-600" disabled={readOnly} allowFormula /></td>
+                    <td className="border border-surface-200 py-0" style={cellStyle}>
+                      <QuantityLinkInput
+                        item={item}
+                        readOnly={readOnly}
+                        onChange={(patch) => onChange(index, patch)}
+                        onOpenQuantityLink={(event) => onOpenQuantityLink(index, event)}
+                        quantityLinkItems={items.map(({ item }) => item)}
+                        targetIndex={rowIndex}
+                      />
+                    </td>
                   </>
                 )}
                 <td className="border border-surface-200 py-1 text-center font-semibold text-red-600" style={cellStyle}>{feeBaseError ? "-" : formatQuoteAmount(feeTotal)}</td>
