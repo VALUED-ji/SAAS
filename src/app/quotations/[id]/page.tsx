@@ -5170,14 +5170,16 @@ export default function QuotationDetailPage() {
       const target = getTargetItem(clientX, clientY);
       if (!target || target.index === state.sourceIndex) {
         if (!preserveOnMiss) {
+          const hadTarget = state.targetIndex !== null;
           state.targetIndex = null;
-          setDragOverItem(null);
+          if (hadTarget) setDragOverItem(null);
         }
         return;
       }
+      const targetChanged = state.targetIndex !== target.index || state.position !== target.position;
       state.targetIndex = target.index;
       state.position = target.position;
-      setDragOverItem(target);
+      if (targetChanged) setDragOverItem(target);
     };
 
     const stopAutoScroll = () => {
@@ -14944,23 +14946,31 @@ function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingIte
   return (
     <ThinScrollArea className="quote-table-shell" scrollClassName="quote-table-freeze-scroll">
       <table className={`w-full table-fixed border-collapse text-sm ${showSpace ? "min-w-[1510px]" : "min-w-[1390px]"}`}>
+        <colgroup>
+          {(showSpace
+            ? [6.5, 10, 12, 8, 7, 8.5, 9, 8.5, 9, 7, 14]
+            : [7, 14, 9, 7.5, 9.5, 10, 9.5, 10, 8, 15.5]
+          ).map((width, index) => (
+            <col key={index} style={{ width: `${width}%` }} />
+          ))}
+        </colgroup>
         <thead className="bg-surface-50 text-center text-xs font-semibold text-surface-600">
           <tr>
             <QuoteIndexHeaderCell rowSpan={2} itemKeys={itemKeys} selectedItemKeys={selectedItemKeys} readOnly={readOnly} onToggleAll={onToggleAllItemSelection} />
-            {showSpace && <th rowSpan={2} className="w-44 border border-surface-200 px-3 py-1.5">空间/类别</th>}
-            <th rowSpan={2} className="w-[244px] border border-surface-200 px-3 py-1.5">工程项目</th>
-            <th rowSpan={2} className="w-40 border border-surface-200 px-2 py-1.5">数量</th>
-            <th rowSpan={2} className="w-20 border border-surface-200 px-2 py-1.5">单位</th>
+            {showSpace && <th rowSpan={2} className="border border-surface-200 px-3 py-1.5">空间/类别</th>}
+            <th rowSpan={2} className="border border-surface-200 px-3 py-1.5">工程项目</th>
+            <th rowSpan={2} className="border border-surface-200 px-2 py-1.5">数量</th>
+            <th rowSpan={2} className="border border-surface-200 px-2 py-1.5">单位</th>
             <th colSpan={2} className="border border-surface-200 px-2 py-1.5">材料</th>
             <th colSpan={2} className="border border-surface-200 px-2 py-1.5">人工</th>
-            <th rowSpan={2} className="w-40 border border-surface-200 px-2 py-1.5">合计<br />材料+人工</th>
-            <th rowSpan={2} className="w-[360px] border border-surface-200 px-3 py-1.5">施工工艺及材料说明</th>
+            <th rowSpan={2} className="border border-surface-200 px-2 py-1.5">合计<br />材料+人工</th>
+            <th rowSpan={2} className="border border-surface-200 px-3 py-1.5">施工工艺及材料说明</th>
           </tr>
           <tr>
-            <th className="w-[46px] border border-surface-200 px-2 py-1.5">单价</th>
-            <th className="w-24 border border-surface-200 px-2 py-1.5">合价</th>
-            <th className="w-[46px] border border-surface-200 px-2 py-1.5">单价</th>
-            <th className="w-24 border border-surface-200 px-2 py-1.5">合价</th>
+            <th className="border border-surface-200 px-2 py-1.5">单价</th>
+            <th className="border border-surface-200 px-2 py-1.5">合价</th>
+            <th className="border border-surface-200 px-2 py-1.5">单价</th>
+            <th className="border border-surface-200 px-2 py-1.5">合价</th>
           </tr>
         </thead>
         <tbody>
