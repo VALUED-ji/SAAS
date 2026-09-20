@@ -452,6 +452,10 @@ type QuotationDetail = {
   id: string;
   customer_id?: string;
   project_id?: string;
+  quotation_org_unit_id?: string | null;
+  quotation_org_unit_name?: string | null;
+  quotation_store_name?: string | null;
+  customer_service_store?: string | null;
   is_unbound?: number | boolean;
   title?: string;
   quotation_type?: string | null;
@@ -2347,6 +2351,16 @@ export default function QuotationDetailPage() {
     anchorY: number;
   } | null>(null);
   const [quotaLibraryItems, setQuotaLibraryItems] = useState<QuotaLibraryItem[]>([]);
+  const quotationStoreName = useMemo(
+    () => String(data?.quotation_store_name || data?.quotation_org_unit_name || data?.customer_service_store || "").trim(),
+    [data],
+  );
+  const quotationStoreQuotaItems = useMemo(() => {
+    if (!quotationStoreName) return [];
+    return quotaLibraryItems.filter((item) => (
+      String(item.storeName || item.scope || "").trim() === quotationStoreName
+    ));
+  }, [quotaLibraryItems, quotationStoreName]);
   const [quotaUpdateNotices, setQuotaUpdateNotices] = useState<QuotaUpdateNotice[]>([]);
   const [quotaUpdateDialogOpen, setQuotaUpdateDialogOpen] = useState(false);
   const [quotaUpdateChecking, setQuotaUpdateChecking] = useState(false);
@@ -7806,7 +7820,7 @@ export default function QuotationDetailPage() {
 
       {quotaPickerOpen && (
         <QuotaLibraryPickerModal
-          items={quotaLibraryItems}
+          items={quotationStoreQuotaItems}
           targetText={`${isAllSpaceView ? "全部空间" : activeSpace || "未指定空间"} · ${getCategoryLabel(activeCategory)}`}
           isAllSpaceView={isAllSpaceView}
           mode={quotaReplaceTarget ? "replace" : "add"}
@@ -13925,14 +13939,12 @@ function QuotaLibraryPickerModal({
   onConfirm: (items: QuotaLibraryItem[]) => void;
 }) {
   const [keyword, setKeyword] = useState("");
-  const [storeFilter, setStoreFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [priceSceneFilter, setPriceSceneFilter] = useState("all");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   useEffect(() => {
     setSelectedIds([]);
-    setStoreFilter("all");
   }, [items]);
 
   useEffect(() => {
@@ -13951,10 +13963,6 @@ function QuotaLibraryPickerModal({
     () => uniqueValues(availableItems.map((item) => item.category || "未分类")).sort((a, b) => a.localeCompare(b, "zh-CN")),
     [availableItems],
   );
-  const stores = useMemo(
-    () => uniqueValues(availableItems.map((item) => item.storeName || item.scope || "未指定门店")).sort((a, b) => a.localeCompare(b, "zh-CN")),
-    [availableItems],
-  );
   const priceScenes = useMemo(
     () => uniqueValues(availableItems.map((item) => item.priceScene || "标准")).sort((a, b) => a.localeCompare(b, "zh-CN")),
     [availableItems],
@@ -13962,14 +13970,12 @@ function QuotaLibraryPickerModal({
   const filteredItems = useMemo(() => {
     const text = keyword.trim().toLowerCase();
     return availableItems.filter((item) => {
-      if (storeFilter !== "all" && (item.storeName || item.scope || "未指定门店") !== storeFilter) return false;
       if (categoryFilter !== "all" && item.category !== categoryFilter) return false;
       if (priceSceneFilter !== "all" && (item.priceScene || "标准") !== priceSceneFilter) return false;
       if (!text) return true;
       return [
         item.code,
         item.scope,
-        item.storeName,
         item.category,
         item.priceScene || "标准",
         item.name,
@@ -13977,7 +13983,7 @@ function QuotaLibraryPickerModal({
         item.unit,
       ].join(" ").toLowerCase().includes(text);
     });
-  }, [availableItems, categoryFilter, keyword, priceSceneFilter, storeFilter]);
+  }, [availableItems, categoryFilter, keyword, priceSceneFilter]);
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectedItems = useMemo(() => {
     const itemMap = new Map(availableItems.map((item) => [item.id, item]));
@@ -13988,7 +13994,6 @@ function QuotaLibraryPickerModal({
     [selectedItems],
   );
   const isReplaceMode = mode === "replace";
-  const storeLabel = storeFilter === "all" ? "全部门店" : storeFilter;
   const categoryLabel = categoryFilter === "all" ? "全部分类" : categoryFilter;
   const priceSceneLabel = priceSceneFilter === "all" ? "全部类型" : priceSceneFilter;
   const allFilteredSelected = filteredItems.length > 0 && filteredItems.every((item) => selectedIdSet.has(item.id));
@@ -14048,7 +14053,7 @@ function QuotaLibraryPickerModal({
           </button>
         </div>
 
-        <div className="quote-library-filter-row grid gap-3 border-b border-[#e8eef6] bg-[#f7f9fc] px-5 py-3 md:grid-cols-[minmax(240px,1fr)_180px_180px_180px_auto_auto] md:items-end">
+        <div className="quote-library-filter-row grid gap-3 border-b border-[#e8eef6] bg-[#f7f9fc] px-5 py-3 md:grid-cols-[minmax(280px,1fr)_190px_190px_auto_auto] md:items-end">
           <label className="quote-library-filter-field relative block">
             <span>搜索项目</span>
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#9aa8bb]" />
@@ -14059,21 +14064,6 @@ function QuotaLibraryPickerModal({
               placeholder="搜索编号、名称、施工说明"
               autoFocus
             />
-          </label>
-          <label className="quote-library-filter-field block">
-            <span>所属门店</span>
-            <SystemSelect
-              value={storeFilter}
-              onChange={(event) => setStoreFilter(event.target.value)}
-              className="quote-library-category-select quote-library-store-select h-10 rounded-[10px] border border-[#d9e2ef] bg-white px-3 text-sm font-medium text-[#182230] outline-none transition focus:border-[#407AFF] focus:ring-2 focus:ring-[#407AFF]/10"
-              menuClassName="quote-system-select-menu"
-              optionClassName="quote-system-select-option"
-            >
-              <option value="all">全部门店</option>
-              {stores.map((store) => (
-                <option key={store} value={store}>{store}</option>
-              ))}
-            </SystemSelect>
           </label>
           <label className="quote-library-filter-field block">
             <span>项目分类</span>
@@ -14120,7 +14110,7 @@ function QuotaLibraryPickerModal({
             </button>
           )}
           <div className="quote-library-filter-note">
-            <b>{storeLabel} · {categoryLabel} · {priceSceneLabel}</b><span>{filteredItems.length} 项</span><span>已选 {selectedItems.length}</span>
+            <b>{categoryLabel} · {priceSceneLabel}</b><span>{filteredItems.length} 项</span><span>已选 {selectedItems.length}</span>
           </div>
         </div>
 

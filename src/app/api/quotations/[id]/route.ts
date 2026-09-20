@@ -1217,6 +1217,8 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
       COALESCE(c.no_room_number, q.temp_customer_no_room_number, 0) as customer_no_room_number,
       COALESCE(c.area_size, q.temp_customer_area) as customer_area_size,
       c.decoration_type as customer_decoration_type,
+      c.service_store as customer_service_store,
+      COALESCE(NULLIF(TRIM(q.quotation_org_unit_name), ''), store_org.name, c.service_store) as quotation_store_name,
       u.name as creator_name,
       COALESCE((
         SELECT designer.name
@@ -1231,6 +1233,10 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
     LEFT JOIN companies company ON company.id = q.company_id
     LEFT JOIN projects p ON q.project_id = p.id
     LEFT JOIN customers c ON p.customer_id = c.id
+    LEFT JOIN org_units store_org
+      ON store_org.id = q.quotation_org_unit_id
+      AND store_org.company_id = q.company_id
+      AND store_org.deleted_at IS NULL
     LEFT JOIN users u ON q.created_by_id = u.id
     WHERE q.id = ? AND q.company_id = ? AND q.deleted_at IS NULL
   `).get(params.id, companyId) as any;
