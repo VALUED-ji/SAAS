@@ -12057,7 +12057,7 @@ export default function QuotationDetailPage() {
         }
         .quotation-detail-ui.quote-workbench-shell .quote-table-shell > .thin-scroll-area.quote-table-freeze-scroll {
           min-height: 0 !important;
-          max-height: calc(100vh - var(--quote-command-height) - 245px) !important;
+          max-height: calc(100vh - var(--quote-command-height) - 285px) !important;
           flex: 0 1 auto !important;
           overflow: auto !important;
           overscroll-behavior: contain !important;
