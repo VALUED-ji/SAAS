@@ -12071,7 +12071,29 @@ export default function QuotationDetailPage() {
           box-shadow: 0 1px 0 var(--quote-line) !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-footer {
+          display: flex !important;
+          min-height: 58px !important;
+          align-items: center !important;
           flex: 0 0 auto !important;
+          padding: 8px 12px !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-footer .quote-add-row {
+          min-height: 40px !important;
+          height: 40px !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section.quote-section-no-footer {
+          min-height: 0 !important;
+          flex: 1 1 auto !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-no-footer .quote-table-shell {
+          min-height: 0 !important;
+          flex: 0 0 auto !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-no-footer .quote-table-shell > .thin-scroll-area.quote-table-freeze-scroll {
+          min-height: 0 !important;
+          max-height: calc(100vh - var(--quote-command-height) - 205px) !important;
+          flex: 0 0 auto !important;
+          overflow-y: auto !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-empty {
           max-height: none !important;
@@ -13704,7 +13726,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
   }, []);
 
   return (
-    <section ref={sectionRef} className={`quote-section ${fullscreen ? "quote-section-fullscreen" : ""} ${isBase ? "quote-section-base" : "quote-section-non-base"} ${isOther ? "quote-section-other-fees" : ""} flex min-h-[calc(100vh-var(--quote-command-height)-190px)] flex-col rounded-[12px] border border-[#d9e2ef] bg-white ${isEmpty ? "quote-section-empty" : ""}`}>
+    <section ref={sectionRef} className={`quote-section ${fullscreen ? "quote-section-fullscreen" : ""} ${isBase ? "quote-section-base" : "quote-section-non-base"} ${isOther ? "quote-section-other-fees" : ""} ${!canAddInCurrentView ? "quote-section-no-footer" : ""} flex min-h-[calc(100vh-var(--quote-command-height)-190px)] flex-col rounded-[12px] border border-[#d9e2ef] bg-white ${isEmpty ? "quote-section-empty" : ""}`}>
       <div className="quote-section-header flex flex-col gap-3 border-b border-surface-100 px-4 py-2 md:flex-row md:items-center md:justify-between">
         <div className="quote-section-title-strip min-w-0">
           <div className="quote-section-title-copy min-w-0">
@@ -13903,12 +13925,14 @@ function QuotaLibraryPickerModal({
   onConfirm: (items: QuotaLibraryItem[]) => void;
 }) {
   const [keyword, setKeyword] = useState("");
+  const [storeFilter, setStoreFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [priceSceneFilter, setPriceSceneFilter] = useState("all");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   useEffect(() => {
     setSelectedIds([]);
+    setStoreFilter("all");
   }, [items]);
 
   useEffect(() => {
@@ -13927,6 +13951,10 @@ function QuotaLibraryPickerModal({
     () => uniqueValues(availableItems.map((item) => item.category || "未分类")).sort((a, b) => a.localeCompare(b, "zh-CN")),
     [availableItems],
   );
+  const stores = useMemo(
+    () => uniqueValues(availableItems.map((item) => item.storeName || item.scope || "未指定门店")).sort((a, b) => a.localeCompare(b, "zh-CN")),
+    [availableItems],
+  );
   const priceScenes = useMemo(
     () => uniqueValues(availableItems.map((item) => item.priceScene || "标准")).sort((a, b) => a.localeCompare(b, "zh-CN")),
     [availableItems],
@@ -13934,12 +13962,14 @@ function QuotaLibraryPickerModal({
   const filteredItems = useMemo(() => {
     const text = keyword.trim().toLowerCase();
     return availableItems.filter((item) => {
+      if (storeFilter !== "all" && (item.storeName || item.scope || "未指定门店") !== storeFilter) return false;
       if (categoryFilter !== "all" && item.category !== categoryFilter) return false;
       if (priceSceneFilter !== "all" && (item.priceScene || "标准") !== priceSceneFilter) return false;
       if (!text) return true;
       return [
         item.code,
         item.scope,
+        item.storeName,
         item.category,
         item.priceScene || "标准",
         item.name,
@@ -13947,7 +13977,7 @@ function QuotaLibraryPickerModal({
         item.unit,
       ].join(" ").toLowerCase().includes(text);
     });
-  }, [availableItems, categoryFilter, keyword, priceSceneFilter]);
+  }, [availableItems, categoryFilter, keyword, priceSceneFilter, storeFilter]);
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectedItems = useMemo(() => {
     const itemMap = new Map(availableItems.map((item) => [item.id, item]));
@@ -13958,6 +13988,7 @@ function QuotaLibraryPickerModal({
     [selectedItems],
   );
   const isReplaceMode = mode === "replace";
+  const storeLabel = storeFilter === "all" ? "全部门店" : storeFilter;
   const categoryLabel = categoryFilter === "all" ? "全部分类" : categoryFilter;
   const priceSceneLabel = priceSceneFilter === "all" ? "全部类型" : priceSceneFilter;
   const allFilteredSelected = filteredItems.length > 0 && filteredItems.every((item) => selectedIdSet.has(item.id));
@@ -13990,7 +14021,7 @@ function QuotaLibraryPickerModal({
       }}
     >
       <div
-        className={`quote-library-picker-modal quote-base-library-picker-modal flex w-full max-w-[1500px] flex-col overflow-hidden rounded-[16px] border border-[#d9e2ef] bg-white shadow-[0_24px_70px_rgba(15,35,70,0.20)] ${shouldUseTallPicker ? "h-[78vh]" : "max-h-[78vh]"}`}
+        className={`quote-library-picker-modal quote-base-library-picker-modal flex w-full max-w-[1680px] flex-col overflow-hidden rounded-[16px] border border-[#d9e2ef] bg-white shadow-[0_24px_70px_rgba(15,35,70,0.20)] ${shouldUseTallPicker ? "h-[78vh]" : "max-h-[78vh]"}`}
         onClick={(event) => event.stopPropagation()}
       >
         <div className="quote-library-header flex items-center justify-between gap-4 border-b border-[#e8eef6] bg-[#fbfcff] px-5 py-3.5">
@@ -14017,7 +14048,7 @@ function QuotaLibraryPickerModal({
           </button>
         </div>
 
-        <div className="quote-library-filter-row grid gap-3 border-b border-[#e8eef6] bg-[#f7f9fc] px-5 py-3 md:grid-cols-[minmax(280px,1fr)_190px_190px_auto_auto] md:items-end">
+        <div className="quote-library-filter-row grid gap-3 border-b border-[#e8eef6] bg-[#f7f9fc] px-5 py-3 md:grid-cols-[minmax(240px,1fr)_180px_180px_180px_auto_auto] md:items-end">
           <label className="quote-library-filter-field relative block">
             <span>搜索项目</span>
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#9aa8bb]" />
@@ -14028,6 +14059,21 @@ function QuotaLibraryPickerModal({
               placeholder="搜索编号、名称、施工说明"
               autoFocus
             />
+          </label>
+          <label className="quote-library-filter-field block">
+            <span>所属门店</span>
+            <SystemSelect
+              value={storeFilter}
+              onChange={(event) => setStoreFilter(event.target.value)}
+              className="quote-library-category-select quote-library-store-select h-10 rounded-[10px] border border-[#d9e2ef] bg-white px-3 text-sm font-medium text-[#182230] outline-none transition focus:border-[#407AFF] focus:ring-2 focus:ring-[#407AFF]/10"
+              menuClassName="quote-system-select-menu"
+              optionClassName="quote-system-select-option"
+            >
+              <option value="all">全部门店</option>
+              {stores.map((store) => (
+                <option key={store} value={store}>{store}</option>
+              ))}
+            </SystemSelect>
           </label>
           <label className="quote-library-filter-field block">
             <span>项目分类</span>
@@ -14074,7 +14120,7 @@ function QuotaLibraryPickerModal({
             </button>
           )}
           <div className="quote-library-filter-note">
-            <b>{categoryLabel} · {priceSceneLabel}</b><span>{filteredItems.length} 项</span><span>已选 {selectedItems.length}</span>
+            <b>{storeLabel} · {categoryLabel} · {priceSceneLabel}</b><span>{filteredItems.length} 项</span><span>已选 {selectedItems.length}</span>
           </div>
         </div>
 
@@ -14091,7 +14137,7 @@ function QuotaLibraryPickerModal({
             </div>
           ) : (
             <div className={`quote-library-table-wrap overflow-auto bg-white ${shouldUseTallPicker ? "h-full" : "max-h-[420px]"}`}>
-              <table className="quote-library-table quote-base-library-table w-full min-w-[1600px] border-separate border-spacing-0 text-sm">
+              <table className="quote-library-table quote-base-library-table w-full min-w-[1620px] border-separate border-spacing-0 text-sm">
                 <thead className="sticky top-0 z-10 bg-[#f4f7fb] text-left text-xs font-semibold text-[#34445a]">
                   <tr>
                     <th className="quote-library-sticky-select w-14 px-3 py-0 text-center whitespace-nowrap">{isReplaceMode ? "替换" : "选择"}</th>
@@ -14101,7 +14147,8 @@ function QuotaLibraryPickerModal({
                     <th className="w-28 px-3 py-0 text-right whitespace-nowrap">材料单价</th>
                     <th className="w-28 px-3 py-0 text-right whitespace-nowrap">人工单价</th>
                     <th className="w-28 px-3 py-0 text-right whitespace-nowrap">总价</th>
-                    <th className="w-[520px] px-3 py-0 whitespace-nowrap">施工说明</th>
+                    <th className="w-[72px] px-3 py-0 text-center whitespace-nowrap">单位</th>
+                    <th className="w-[440px] px-3 py-0 whitespace-nowrap">施工说明</th>
                     <th className="quote-library-code-column w-44 px-3 py-0 whitespace-nowrap">编号</th>
                   </tr>
                 </thead>
@@ -14141,6 +14188,7 @@ function QuotaLibraryPickerModal({
                         <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatQuoteAmount(item.materialPrice)}</td>
                         <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatQuoteAmount(item.laborPrice)}</td>
                         <td className="quote-library-total-price px-3 py-0 text-right font-semibold tabular-nums whitespace-nowrap">{formatQuoteAmount(item.totalPrice)}</td>
+                        <td className="px-3 py-0 text-center font-medium text-[#52647b] whitespace-nowrap">{item.unit || "-"}</td>
                         <td className="px-3 py-0">
                           <div className="quote-library-description-cell truncate" title={item.constructionDescription || "暂无施工说明"}>
                             {item.constructionDescription || "暂无施工说明"}
