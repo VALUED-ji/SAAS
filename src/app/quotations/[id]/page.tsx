@@ -237,6 +237,12 @@ type DragOverItemState = {
   position: ItemDropPosition;
 } | null;
 
+type ItemDragTarget = {
+  index: number;
+  position: ItemDropPosition;
+  row: HTMLElement;
+};
+
 type PointerItemDragState = {
   sourceIndex: number;
   startX: number;
@@ -449,6 +455,35 @@ function getItemDragAutoScrollVelocity(clientY: number, top: number, bottom: num
     return itemDragAutoScrollMaxSpeed * intensity * intensity;
   }
   return 0;
+}
+
+function getOrCreateItemDragIndicator() {
+  let indicator = document.getElementById("quote-item-drag-indicator");
+  if (!indicator) {
+    indicator = document.createElement("div");
+    indicator.id = "quote-item-drag-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    indicator.style.position = "fixed";
+    indicator.style.left = "0";
+    indicator.style.top = "0";
+    indicator.style.height = "2px";
+    indicator.style.borderRadius = "999px";
+    indicator.style.background = "#407AFF";
+    indicator.style.boxShadow = "0 0 0 1px rgba(64, 122, 255, 0.18), 0 4px 10px rgba(64, 122, 255, 0.32)";
+    indicator.style.pointerEvents = "none";
+    indicator.style.zIndex = "9999";
+    indicator.style.opacity = "0";
+    indicator.style.transform = "translate3d(0, 0, 0)";
+    indicator.style.willChange = "transform, width, opacity";
+    document.body.appendChild(indicator);
+  }
+  return indicator;
+}
+
+function hideItemDragIndicator() {
+  const indicator = document.getElementById("quote-item-drag-indicator");
+  if (!indicator) return;
+  indicator.style.opacity = "0";
 }
 
 type QuotationDetail = {
@@ -2600,6 +2635,8 @@ export default function QuotationDetailPage() {
   const [recentlyMovedItemKey, setRecentlyMovedItemKey] = useState<string | null>(null);
   const pointerSpaceDragRef = useRef<{ source: string; startX: number; startY: number; moved: boolean; target: string | null } | null>(null);
   const pointerItemDragRef = useRef<PointerItemDragState>(null);
+  const itemDragIndicatorFrameRef = useRef<number | null>(null);
+  const latestItemDragTargetRef = useRef<ItemDragTarget | null>(null);
   const itemsRef = useRef<QuotationItem[]>([]);
   const pendingRevealItemKeyRef = useRef<string | null>(null);
   const autoOpenProjectInfoRef = useRef(false);
@@ -3591,16 +3628,25 @@ export default function QuotationDetailPage() {
     }
   }, [checkQuotaUpdates, isReadonly, quotationId, quotaUpdateNotices.length, waitForLatestAutoSave]);
 
-  const returnToBudgetRecords = async () => {
-    await waitForLatestAutoSave();
-    let latestQuotation = data;
-    try {
-      const res = await fetch(`/api/quotations/${quotationId}`, { headers: authHeaders() });
-      const payload = await res.json().catch(() => null);
-      if (res.ok && payload) latestQuotation = payload;
-    } catch {
-      // Fall back to the current page state; returning should still work when the detail refresh fails.
+  const returnToBudgetRecords = () => {
+    if (!isReadonly && !loading && lastSavedPayloadRef.current !== latestSavePayloadTextRef.current) {
+      try {
+        const requestBody = allowEmptyItemsSaveRef.current
+          ? JSON.stringify({ ...JSON.parse(latestSavePayloadTextRef.current), allowEmptyItems: true })
+          : latestSavePayloadTextRef.current;
+        if (requestBody) {
+          fetch(`/api/quotations/${quotationId}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: requestBody,
+            keepalive: true,
+          }).catch(() => {});
+        }
+      } catch {
+        void runAutoSave();
+      }
     }
+    const latestQuotation = data;
     const returnTo = searchParams.get("returnTo");
     const customerIdFromQuery = String(searchParams.get("customerId") || "").trim();
     const recordKeyFromQuery = String(searchParams.get("recordKey") || "").trim();
@@ -3609,14 +3655,14 @@ export default function QuotationDetailPage() {
     const customerId = (savedMatchesCurrentQuotation ? savedReturnState?.customerId || "" : "") || (returnTo === "budgetRecords" ? customerIdFromQuery : "") || String(latestQuotation?.customer_id || "").trim();
     const recordKey = (savedMatchesCurrentQuotation ? savedReturnState?.recordKey || "" : "") || (returnTo === "budgetRecords" ? recordKeyFromQuery : "") || (latestQuotation?.is_unbound ? getQuotationCustomerGroupKey(latestQuotation as any) : customerId);
     if (customerId) {
-      router.push(`/quotations?openRecords=1&refreshRecords=1&ignoreOrgFilter=1&customerId=${encodeURIComponent(customerId)}&recordKey=${encodeURIComponent(recordKey)}&fromQuotationId=${encodeURIComponent(quotationId)}&t=${Date.now()}`);
+      router.push(`/quotations?openRecords=1&ignoreOrgFilter=1&customerId=${encodeURIComponent(customerId)}&recordKey=${encodeURIComponent(recordKey)}&fromQuotationId=${encodeURIComponent(quotationId)}`);
       return;
     }
     if (recordKey) {
-      router.push(`/quotations?openRecords=1&refreshRecords=1&ignoreOrgFilter=1&recordKey=${encodeURIComponent(recordKey)}&fromQuotationId=${encodeURIComponent(quotationId)}&t=${Date.now()}`);
+      router.push(`/quotations?openRecords=1&ignoreOrgFilter=1&recordKey=${encodeURIComponent(recordKey)}&fromQuotationId=${encodeURIComponent(quotationId)}`);
       return;
     }
-    router.push(`/quotations?refreshRecords=1&fromQuotationId=${encodeURIComponent(quotationId)}&t=${Date.now()}`);
+    router.push(`/quotations?fromQuotationId=${encodeURIComponent(quotationId)}`);
   };
 
   useEffect(() => {
@@ -5348,7 +5394,7 @@ export default function QuotationDetailPage() {
   }, [reorderSpace]);
 
   useEffect(() => {
-    const getTargetItem = (clientX: number, clientY: number) => {
+    const getTargetItem = (clientX: number, clientY: number): ItemDragTarget | null => {
       const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
       const row = element?.closest<HTMLElement>("[data-quote-item-row]");
       if (!row?.dataset.index) return null;
@@ -5356,11 +5402,42 @@ export default function QuotationDetailPage() {
       if (!Number.isFinite(index)) return null;
       const rect = row.getBoundingClientRect();
       const position: ItemDropPosition = clientY < rect.top + rect.height / 2 ? "before" : "after";
-      return { index, position };
+      return { index, position, row };
     };
 
     let autoScrollFrame: number | null = null;
     let previousAutoScrollTime = 0;
+
+    const cancelIndicatorFrame = () => {
+      if (itemDragIndicatorFrameRef.current !== null) {
+        window.cancelAnimationFrame(itemDragIndicatorFrameRef.current);
+        itemDragIndicatorFrameRef.current = null;
+      }
+    };
+
+    const updateDragIndicator = (target: ItemDragTarget | null) => {
+      latestItemDragTargetRef.current = target;
+      if (!target) {
+        cancelIndicatorFrame();
+        hideItemDragIndicator();
+        return;
+      }
+      if (itemDragIndicatorFrameRef.current !== null) return;
+      itemDragIndicatorFrameRef.current = window.requestAnimationFrame(() => {
+        itemDragIndicatorFrameRef.current = null;
+        const currentTarget = latestItemDragTargetRef.current;
+        if (!currentTarget) {
+          hideItemDragIndicator();
+          return;
+        }
+        const rect = currentTarget.row.getBoundingClientRect();
+        const indicator = getOrCreateItemDragIndicator();
+        const y = currentTarget.position === "before" ? rect.top : rect.bottom;
+        indicator.style.width = `${Math.max(0, rect.width)}px`;
+        indicator.style.opacity = "1";
+        indicator.style.transform = `translate3d(${Math.round(rect.left)}px, ${Math.round(y - 1)}px, 0)`;
+      });
+    };
 
     const updateTargetItem = (clientX: number, clientY: number, preserveOnMiss = false) => {
       const state = pointerItemDragRef.current;
@@ -5368,16 +5445,15 @@ export default function QuotationDetailPage() {
       const target = getTargetItem(clientX, clientY);
       if (!target || target.index === state.sourceIndex) {
         if (!preserveOnMiss) {
-          const hadTarget = state.targetIndex !== null;
           state.targetIndex = null;
-          if (hadTarget) setDragOverItem(null);
+          updateDragIndicator(null);
         }
         return;
       }
       const targetChanged = state.targetIndex !== target.index || state.position !== target.position;
       state.targetIndex = target.index;
       state.position = target.position;
-      if (targetChanged) setDragOverItem(target);
+      if (targetChanged) updateDragIndicator(target);
     };
 
     const stopAutoScroll = () => {
@@ -5412,6 +5488,7 @@ export default function QuotationDetailPage() {
       }
 
       updateTargetItem(state.clientX, state.clientY, true);
+      updateDragIndicator(latestItemDragTargetRef.current);
       autoScrollFrame = window.requestAnimationFrame(runAutoScroll);
     };
 
@@ -5428,6 +5505,7 @@ export default function QuotationDetailPage() {
       if (!state.moved && distance > 4) {
         state.moved = true;
         setDraggingItemIndex(state.sourceIndex);
+        document.body.classList.add("quote-item-dragging-active");
       }
       if (!state.moved) return;
       event.preventDefault();
@@ -5452,6 +5530,10 @@ export default function QuotationDetailPage() {
       }
       setDraggingItemIndex(null);
       setDragOverItem(null);
+      latestItemDragTargetRef.current = null;
+      cancelIndicatorFrame();
+      hideItemDragIndicator();
+      document.body.classList.remove("quote-item-dragging-active");
     };
 
     const handlePointerCancel = () => {
@@ -5460,6 +5542,10 @@ export default function QuotationDetailPage() {
       pointerItemDragRef.current = null;
       setDraggingItemIndex(null);
       setDragOverItem(null);
+      latestItemDragTargetRef.current = null;
+      cancelIndicatorFrame();
+      hideItemDragIndicator();
+      document.body.classList.remove("quote-item-dragging-active");
     };
 
     window.addEventListener("pointermove", handlePointerMove, { passive: false });
@@ -5467,6 +5553,10 @@ export default function QuotationDetailPage() {
     window.addEventListener("pointercancel", handlePointerCancel);
     return () => {
       stopAutoScroll();
+      latestItemDragTargetRef.current = null;
+      cancelIndicatorFrame();
+      hideItemDragIndicator();
+      document.body.classList.remove("quote-item-dragging-active");
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
       window.removeEventListener("pointercancel", handlePointerCancel);

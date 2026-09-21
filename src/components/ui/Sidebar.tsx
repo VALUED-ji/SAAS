@@ -217,8 +217,15 @@ export default function Sidebar() {
 
   const navigateTo = useCallback((href: string) => {
     if (!href || pathname === href) return;
-    setPendingHref(href);
     if (typeof window !== "undefined") {
+      const beforeNavigationEvent = new CustomEvent("app:before-navigation", {
+        detail: { href },
+        cancelable: true,
+      });
+      if (!window.dispatchEvent(beforeNavigationEvent) || beforeNavigationEvent.defaultPrevented) {
+        return;
+      }
+      setPendingHref(href);
       window.dispatchEvent(new CustomEvent("app:navigation-start", { detail: { href } }));
     }
     startRouteTransition(() => {
@@ -532,7 +539,6 @@ export default function Sidebar() {
                   onClick={(event) => {
                     event.preventDefault();
                     setCollapsedSubmenu(null);
-                    setPendingHref(item.href);
                     setOpenGroups({});
                     navigateTo(item.href);
                   }}
@@ -591,7 +597,6 @@ export default function Sidebar() {
                           onFocus={() => prefetchRoute(child.href)}
                           onClick={(event) => {
                             event.preventDefault();
-                            setPendingHref(child.href);
                             navigateTo(child.href);
                           }}
                           className={cn(

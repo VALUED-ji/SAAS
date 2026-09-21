@@ -2419,6 +2419,7 @@ export default function QuotationsPage() {
                     const secondaryActionClass = `${actionBaseClass} border-[#d7dfeb] bg-white text-[#475467] hover:border-[#b8c2d0] hover:bg-[#f8fafc] hover:text-[#182230] focus-visible:ring-[#407aff]/15`;
                     const softActionClass = `${actionBaseClass} border-[#dce4ef] bg-white text-[#52647b] hover:border-[#cfe0ff] hover:bg-[#f3f7ff] hover:text-[#245ee8] focus-visible:ring-[#407aff]/15`;
                     const dangerActionClass = `${actionBaseClass} border-[#f3c5c0] bg-white text-[#d92d20] hover:border-[#fda29b] hover:bg-[#fff6f5] focus-visible:ring-[#d92d20]/15`;
+                    const quotationHref = buildBudgetRecordQuotationHref(record);
                     return (
                       <article key={record.id} className={`quotation-record-card grid min-h-[178px] gap-4 border bg-white p-5 pb-6 xl:grid-cols-[minmax(0,1fr)_minmax(520px,42%)] xl:items-center ${isJustPromotedFormal ? "quotation-record-card-promoted border-[#75d99a]" : "border-[#e2e7ee]"}`}>
                         <div className="quotation-record-main min-w-0">
@@ -2567,7 +2568,16 @@ export default function QuotationsPage() {
                             </div>
                           ) : (
                             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                              <Link href={buildBudgetRecordQuotationHref(record)} onClick={() => saveBudgetRecordReturnState(record)} className={`${actionBaseClass} border-[#407aff] bg-[#407aff] text-white hover:border-[#2f66e8] hover:bg-[#2f66e8] focus-visible:ring-[#407aff]/20`}><Eye className="h-3.5 w-3.5" />打开报价</Link>
+                              <Link
+                                href={quotationHref}
+                                prefetch
+                                onPointerEnter={() => router.prefetch(quotationHref)}
+                                onFocus={() => router.prefetch(quotationHref)}
+                                onClick={() => saveBudgetRecordReturnState(record)}
+                                className={`${actionBaseClass} border-[#407aff] bg-[#407aff] text-white hover:border-[#2f66e8] hover:bg-[#2f66e8] focus-visible:ring-[#407aff]/20`}
+                              >
+                                <Eye className="h-3.5 w-3.5" />打开报价
+                              </Link>
                               <span className="inline-flex w-full" onMouseEnter={lockedBySignedContract ? (event) => showLockedQuotationTooltip(event) : undefined} onMouseLeave={() => setLockTooltip(null)}>
                                 <button type="button" disabled={busy || lockedBySignedContract} onClick={() => setQuotationStatus(record, isFormalQuotation ? "DRAFT" : "APPROVED")} className={isFormalQuotation ? `${actionBaseClass} border-[#a6e7c0] bg-[#ecfdf3] text-[#027a48] hover:border-[#75d99a] hover:bg-[#dcfae6] focus-visible:ring-[#12b76a]/20` : secondaryActionClass}>
                                   {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}{lockedBySignedContract ? "已签合同" : isFormalQuotation ? "撤销正式" : "设为正式"}

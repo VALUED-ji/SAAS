@@ -322,38 +322,9 @@ export function makeDefaultFormulaComprehensiveFees() {
     fee_calc_method: "formula",
     fee_calc_base: "直接费",
     valueSource: "direct",
-  });
-  const discountFee = makeComprehensiveFeeItem({
-    name: "优惠",
-    fee_calc_method: "formula",
-    fee_calc_base: "0",
-    valueSource: "discount",
-  });
-  const totalFee = makeComprehensiveFeeItem({
-    name: "工程总造价",
-    fee_calc_method: "formula",
-    fee_calc_base: "",
-    valueSource: "formula",
-  });
-  const taxFee = makeComprehensiveFeeItem({
-    name: "税金",
-    fee_calc_method: "formula",
-    fee_calc_base: "",
-    valueSource: "formula",
-  });
-  const finalFee = makeComprehensiveFeeItem({
-    name: "最终报价",
-    fee_calc_method: "formula",
-    fee_calc_base: "",
-    valueSource: "formula",
     isFinalTotal: true,
   });
-  const fees = [directFee, discountFee, totalFee, taxFee, finalFee];
-  const sequence = (index: number) => formatAlphaSequence(index);
-  totalFee.fee_calc_base = bindStableFeeFormula(`${sequence(0)}+${sequence(1)}`, fees, 0);
-  taxFee.fee_calc_base = bindStableFeeFormula(`${sequence(2)}*1%`, fees, 0);
-  finalFee.fee_calc_base = bindStableFeeFormula(`${sequence(2)}+${sequence(3)}`, fees, 0);
-  return fees;
+  return [directFee];
 }
 
 export function convertComprehensiveFeesToFormulaMode(fees: TemplateComprehensiveFee[]) {

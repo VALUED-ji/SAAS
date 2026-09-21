@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent as ReactChangeEvent, type ClipboardEvent as ReactClipboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent as ReactChangeEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, AlignCenter, AlignLeft, Bold, Building2, Check, ChevronDown, ClipboardList, Copy, Eraser, GripVertical, HardHat, Italic, Layers3, LayoutGrid, LayoutTemplate, List, ListOrdered, Loader2, Package, Pencil, Plus, Power, Search, SlidersHorizontal, Sofa, Tags, Trash2, Underline, X } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { AlertTriangle, Building2, Check, ChevronDown, ClipboardList, Copy, GripVertical, HardHat, Layers3, LayoutGrid, LayoutTemplate, Loader2, Package, Pencil, Plus, Power, Search, SlidersHorizontal, Sofa, Star, Tags, Trash2, X } from "lucide-react";
 import DataPagination, { useDataPagination } from "@/components/ui/DataPagination";
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
+import BudgetCompilationEditor from "@/components/BudgetCompilationEditor";
 import { useAuth } from "@/lib/auth";
 import {
   bindStableFeeFormula,
@@ -15,6 +17,7 @@ import {
   normalizeFeeCalcBase,
   normalizeFeeCalcMethod,
   remapStableFeeFormulaIds,
+  updateStableScopeReferenceLabel,
   type FeeCalcMethod,
   type FeeScopeMode,
 } from "@/lib/quotationFeeFormulas";
@@ -29,7 +32,7 @@ import {
   type QuotationQuantityFormula,
   type QuotationQuantityLinkItem,
 } from "@/lib/quotationQuantityLinks";
-import SystemSelect from "@/components/ui/SystemSelect";
+import SystemSelect, { EXCLUSIVE_DROPDOWN_OPEN_EVENT, notifyExclusiveDropdownOpen } from "@/components/ui/SystemSelect";
 import {
   getQuotaTemplateApplicabilityTags,
   getQuotaTemplateScopeLabel,
@@ -43,9 +46,9 @@ import {
   DEFAULT_PRICING_MODE,
   DEFAULT_TEMPLATE_CREATOR,
   QUOTA_TEMPLATE_DRAFT_STORAGE_KEY,
-  QUOTA_TEMPLATE_STORAGE_KEY,
   applyTemplateSpaceQuantityLinks,
   buildTemplateFeeFormulaContext,
+  buildTemplateFeeScopeReferences,
   buildTemplateFormulaFeeItems,
   BUILTIN_PROJECT_GROUPS,
   clearTemplateDraftFromStorage,
@@ -67,7 +70,6 @@ import {
   getTemplateAutoSavePayload,
   getTemplateFeeFormulaExamples,
   getTemplateFeeFormulaPlaceholder,
-  getTemplateFeeRulePreview,
   getTemplateProjectGroups,
   getTemplateStatusBadgeClass,
   getTemplateStatusLabel,
@@ -107,6 +109,8 @@ import {
   withSpaceProjectGroup,
 } from "./quota-templates-shared";
 
+const TEMPLATE_FEE_SUGGESTION_DROPDOWN_ID = "quota-template-fee-suggestion";
+
 import type {
   CombinedAreaPricingTier,
   ConstructionTemplateOption,
@@ -143,6 +147,29 @@ function hasBranchTemplateScope(template: QuotaTemplate) {
   return template.autoScope?.scopeType === "branch" && Boolean(template.autoScope.orgUnitId || template.autoScope.branchOrgUnitId);
 }
 
+function normalizeTemplateScopeName(value: unknown) {
+  return String(value || "").trim().toLocaleLowerCase("zh-CN");
+}
+
+function getTemplateScopeNameConflicts(template: Pick<QuotaTemplate, "spaces" | "projectGroups">) {
+  const entries = [
+    ...template.spaces.map((space) => ({ type: "space" as const, id: space.id, name: space.name })),
+    ...getTemplateProjectGroups(template).map((group) => ({ type: "category" as const, id: group.id, name: group.name })),
+  ].filter((entry) => String(entry.name || "").trim());
+  const groups = new Map<string, typeof entries>();
+  entries.forEach((entry) => {
+    const key = normalizeTemplateScopeName(entry.name);
+    groups.set(key, [...(groups.get(key) || []), entry]);
+  });
+  return Array.from(groups.values())
+    .filter((items) => items.length > 1)
+    .flatMap((items) => items.map((item, index) => ({
+      ...item,
+      conflictIndex: index,
+      conflictNames: items.map((entry) => String(entry.name || "").trim()),
+    })));
+}
+
 function getTemplateDirtyPayload(template: QuotaTemplate | null) {
   if (!template) return "";
   return JSON.stringify({
@@ -153,6 +180,7 @@ function getTemplateDirtyPayload(template: QuotaTemplate | null) {
     constructionTemplateConfig: template.constructionTemplateConfig,
     quoteConfig: template.quoteConfig,
     projectGroups: template.projectGroups,
+    comprehensiveFeeMode: template.comprehensiveFeeMode,
     comprehensiveFees: template.comprehensiveFees,
     appendixNote: template.appendixNote,
     budgetCompilationHtml: template.budgetCompilationHtml,
@@ -161,9 +189,17 @@ function getTemplateDirtyPayload(template: QuotaTemplate | null) {
 }
 
 const templateFeeScopeModeOptions: Array<{ value: FeeScopeMode; label: string }> = [
-  { value: "all", label: "全部空间/类别都计入" },
-  { value: "exclude", label: "不计入选中的空间/类别" },
-  { value: "include", label: "只计入选中的空间/类别" },
+  { value: "all", label: "全部空间和类别都统计" },
+  { value: "exclude", label: "排除选中的空间和类别" },
+  { value: "include", label: "仅统计选中的空间和类别" },
+];
+
+const templateFeeValueSourceOptions: Array<{ value: NonNullable<TemplateComprehensiveFee["valueSource"]>; label: string }> = [
+  { value: "formula", label: "公式" },
+  { value: "direct", label: "工程直接费" },
+  { value: "fixed", label: "固定金额" },
+  { value: "manual", label: "报价时填写" },
+  { value: "discount", label: "报价优惠" },
 ];
 
 const quotaSourceComparableFields = [
@@ -222,14 +258,15 @@ function TemplateFeeScopeSelector({
   onToggleName: (name: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const selectorId = useId();
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const [popoverPosition, setPopoverPosition] = useState({ left: 0, top: 0 });
   const selectedSet = new Set(selectedNames);
   const selectedText = selectedNames.length > 0 ? selectedNames.join("、") : "请选择范围";
-  const modeLabel = mode === "exclude" ? "排除" : mode === "include" ? "仅含" : "";
-  const summary = mode === "all" ? "全部计入" : `${modeLabel}：${selectedText}`;
+  const modeLabel = mode === "exclude" ? "排除" : mode === "include" ? "仅统计" : "";
+  const summary = mode === "all" ? "全部统计" : `${modeLabel}：${selectedText}`;
 
   const updatePopoverPosition = useCallback(() => {
     const trigger = triggerRef.current;
@@ -238,7 +275,7 @@ function TemplateFeeScopeSelector({
     const width = 286;
     const viewportPadding = 12;
     const currentHeight = popoverRef.current?.offsetHeight;
-    const estimatedHeight = currentHeight || (mode === "all" ? 118 : Math.min(272, 100 + Math.min(Math.max(options.length, 1), 5) * 32));
+    const estimatedHeight = currentHeight || (mode === "all" ? 188 : Math.min(342, 170 + Math.min(Math.max(options.length, 1), 5) * 32));
     const left = Math.min(Math.max(rect.left + rect.width / 2 - width / 2, viewportPadding), window.innerWidth - width - viewportPadding);
     const hasRoomAbove = rect.top >= estimatedHeight + viewportPadding;
     const top = hasRoomAbove ? rect.top - estimatedHeight - 6 : Math.min(rect.bottom + 6, window.innerHeight - estimatedHeight - viewportPadding);
@@ -268,6 +305,19 @@ function TemplateFeeScopeSelector({
     if (open) updatePopoverPosition();
   }, [open, mode, selectedNames.length, options.length, updatePopoverPosition]);
 
+  useEffect(() => {
+    const handleOtherDropdownOpen = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      if (detail?.id && detail.id !== selectorId) setOpen(false);
+    };
+    window.addEventListener(EXCLUSIVE_DROPDOWN_OPEN_EVENT, handleOtherDropdownOpen);
+    return () => window.removeEventListener(EXCLUSIVE_DROPDOWN_OPEN_EVENT, handleOtherDropdownOpen);
+  }, [selectorId]);
+
+  useEffect(() => {
+    if (open) notifyExclusiveDropdownOpen(selectorId);
+  }, [open, selectorId]);
+
   const popover = open && typeof document !== "undefined" ? createPortal(
     <div className="quota-template-scope-popover-layer">
       <div
@@ -275,7 +325,11 @@ function TemplateFeeScopeSelector({
         className="quota-template-fee-scope-popover"
         style={{ left: popoverPosition.left, top: popoverPosition.top }}
       >
-        <div className="quota-template-fee-scope-popover-segment" role="group" aria-label="计费范围">
+        <div className="quota-template-fee-scope-popover-copy">
+          <strong>公式里没有指定空间或类别的费用，按这里统计</strong>
+          <span>例如“直接费”会按这里统计；“拆除项目”等已指定范围的费用不受影响。</span>
+        </div>
+        <div className="quota-template-fee-scope-popover-segment" role="group" aria-label="默认统计范围">
           {templateFeeScopeModeOptions.map((option) => (
             <button
               key={option.value}
@@ -348,6 +402,7 @@ function TemplateFeeScopeSelector({
 
 export default function QuotaTemplatesPage() {
   const { user } = useAuth();
+  const router = useRouter();
   const currentCreatorName = user?.name?.trim() || DEFAULT_TEMPLATE_CREATOR;
   const [templates, setTemplates] = useState<QuotaTemplate[]>(initialTemplates);
   const [templatesLoaded, setTemplatesLoaded] = useState(false);
@@ -396,12 +451,15 @@ export default function QuotaTemplatesPage() {
   const [spaceAutoSaveStatus, setSpaceAutoSaveStatus] = useState<SpaceAutoSaveStatus>("idle");
   const [templateSaveStatus, setTemplateSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [unsavedClosePromptOpen, setUnsavedClosePromptOpen] = useState(false);
+  const [pendingTemplateNavigationHref, setPendingTemplateNavigationHref] = useState("");
   const [numberInputDrafts, setNumberInputDrafts] = useState<Record<string, string>>({});
   const [feeFormulaDrafts, setFeeFormulaDrafts] = useState<Record<string, string>>({});
   const [templateQuantityEditor, setTemplateQuantityEditor] = useState<TemplateQuantityEditorState | null>(null);
   const templatesRef = useRef<QuotaTemplate[]>(initialTemplates);
+  const fullTemplateCacheRef = useRef(new Map<string, QuotaTemplate>());
   const openedTemplateRef = useRef<QuotaTemplate | null>(null);
   const openedTemplatePayloadRef = useRef("");
+  const pendingTemplateNavigationHrefRef = useRef("");
   const pointerSpaceDragRef = useRef<{ sourceId: string; startX: number; startY: number; moved: boolean; targetId: string | null; position: ItemDropPosition } | null>(null);
   const pointerProjectGroupDragRef = useRef<PointerProjectGroupDragState>(null);
   const pointerQuotaDragRef = useRef<PointerQuotaDragState>(null);
@@ -419,29 +477,79 @@ export default function QuotaTemplatesPage() {
   const spaceAutoSaveRunRef = useRef(0);
   const lastSpaceAutoSavePayloadRef = useRef("");
   const constructionTemplateLoadForRef = useRef("");
-  const budgetCompilationEditorRef = useRef<HTMLDivElement | null>(null);
+  const templateSpaceConfigRef = useRef<HTMLElement | null>(null);
+  const templateScopeErrorTimerRef = useRef<number | null>(null);
+  const comprehensiveFeesSectionRef = useRef<HTMLElement | null>(null);
+  const comprehensiveFeeErrorTimerRef = useRef<number | null>(null);
   const templateQuantityPanelRef = useRef<HTMLDivElement>(null);
   const templateQuantityInputRef = useRef<HTMLInputElement>(null);
+  const templateFeeSuggestionInputRef = useRef<HTMLInputElement | null>(null);
+  const templateFeeSuggestionMenuRef = useRef<HTMLDivElement | null>(null);
   const [hasMoreProjectItemsBelow, setHasMoreProjectItemsBelow] = useState(false);
+  const [spaceNameDrafts, setSpaceNameDrafts] = useState<Record<string, string>>({});
+  const [highlightedTemplateSpaceId, setHighlightedTemplateSpaceId] = useState("");
+  const [highlightedTemplateProjectGroupId, setHighlightedTemplateProjectGroupId] = useState("");
+  const [highlightedComprehensiveFeeId, setHighlightedComprehensiveFeeId] = useState("");
+  const [templateFeeSuggestion, setTemplateFeeSuggestion] = useState<{
+    feeId: string;
+    left: number;
+    top: number;
+    width: number;
+  } | null>(null);
+  const [templateFeeSuggestionActiveIndex, setTemplateFeeSuggestionActiveIndex] = useState(0);
+  const [templateFeeErrorTooltip, setTemplateFeeErrorTooltip] = useState<{ left: number; top: number; message: string } | null>(null);
 
-  const saveTemplatesToServer = useCallback((nextTemplates: QuotaTemplate[]) => {
-    fetch("/api/quota/templates", {
+  const saveTemplateToServer = useCallback(async (template: QuotaTemplate) => {
+    const response = await fetch("/api/quota/templates", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ templates: nextTemplates }),
-    }).catch(() => {
-      // 本地缓存保底，避免网络瞬断时编辑内容丢失。
+      body: JSON.stringify({ action: "upsert", templates: [template] }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data?.message || "保存预算模板失败");
+  }, []);
+
+  const deleteTemplateOnServer = useCallback(async (templateId: string) => {
+    const response = await fetch("/api/quota/templates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "delete", templateId }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data?.message || "删除预算模板失败");
+  }, []);
+
+  const replaceLocalTemplate = useCallback((template: QuotaTemplate) => {
+    fullTemplateCacheRef.current.set(template.id, template);
+    setTemplates((current) => {
+      const next = current.some((item) => item.id === template.id)
+        ? current.map((item) => item.id === template.id ? template : item)
+        : [template, ...current];
+      templatesRef.current = next;
+      return next;
     });
   }, []);
 
-  const persistTemplates = useCallback((nextTemplates: QuotaTemplate[]) => {
-    templatesRef.current = nextTemplates;
-    setTemplates(nextTemplates);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(QUOTA_TEMPLATE_STORAGE_KEY, JSON.stringify(nextTemplates));
-    }
-    saveTemplatesToServer(nextTemplates);
-  }, [saveTemplatesToServer]);
+  const removeLocalTemplate = useCallback((templateId: string) => {
+    fullTemplateCacheRef.current.delete(templateId);
+    setTemplates((current) => {
+      const next = current.filter((item) => item.id !== templateId);
+      templatesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const loadFullTemplate = useCallback(async (templateId: string) => {
+    const cached = fullTemplateCacheRef.current.get(templateId);
+    if (cached) return cached;
+    const response = await fetch(`/api/quota/templates?templateId=${encodeURIComponent(templateId)}`, { cache: "no-store" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data?.message || "读取预算模板失败");
+    const template = normalizeTemplate(data?.template, 0);
+    if (!template) throw new Error("预算模板数据不完整");
+    replaceLocalTemplate(template);
+    return template;
+  }, [replaceLocalTemplate]);
 
   const makeBranchTemplateScope = useCallback((branchId: string, source?: QuotaTemplateAutoScope | null): QuotaTemplateAutoScope | null => {
     const branch = templateScopeOptions.find((option) => option.id === branchId);
@@ -614,9 +722,8 @@ export default function QuotaTemplatesPage() {
   useEffect(() => {
     let cancelled = false;
     const loadTemplates = async () => {
-      const localTemplates = loadTemplatesFromStorage();
       try {
-        const response = await fetch("/api/quota/templates", { cache: "no-store" });
+        const response = await fetch("/api/quota/templates?summary=1", { cache: "no-store" });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data?.message || "读取预算模板失败");
 	        const serverTemplates = Array.isArray(data?.templates)
@@ -641,7 +748,9 @@ export default function QuotaTemplatesPage() {
         setTemplatesLoaded(true);
       } catch {
         if (cancelled) return;
+        const localTemplates = loadTemplatesFromStorage();
 	        const fallbackTemplates = localTemplates.filter(hasBranchTemplateScope);
+        fullTemplateCacheRef.current = new Map(fallbackTemplates.map((template) => [template.id, template]));
 	        setTemplates(fallbackTemplates);
 	        setSelectedId(fallbackTemplates[0]?.id || "");
         void loadTemplateScopeOptionsFallback();
@@ -654,7 +763,7 @@ export default function QuotaTemplatesPage() {
     return () => {
       cancelled = true;
     };
-  }, [loadQuotaLibraryOptions, loadTemplateScopeOptionsFallback, saveTemplatesToServer]);
+  }, [loadQuotaLibraryOptions, loadTemplateScopeOptionsFallback]);
 
   useEffect(() => {
     const templateId = editingTemplate?.id || "";
@@ -662,11 +771,6 @@ export default function QuotaTemplatesPage() {
     constructionTemplateLoadForRef.current = templateId;
     void loadConstructionTemplateOptions();
   }, [constructionTemplateLoading, constructionTemplateOptions.length, editingTemplate?.id, loadConstructionTemplateOptions]);
-
-  useEffect(() => {
-    if (!templatesLoaded) return;
-    window.localStorage.setItem(QUOTA_TEMPLATE_STORAGE_KEY, JSON.stringify(templates));
-  }, [templates, templatesLoaded]);
 
   useEffect(() => {
     templatesRef.current = templates;
@@ -679,6 +783,7 @@ export default function QuotaTemplatesPage() {
   useEffect(() => {
     setNumberInputDrafts({});
     setFeeFormulaDrafts({});
+    setSpaceNameDrafts({});
   }, [editingTemplate?.id]);
 
   useEffect(() => {
@@ -745,14 +850,6 @@ export default function QuotaTemplatesPage() {
     if (!nextScope) return;
     setEditingTemplate({ ...editingTemplate, autoScope: nextScope });
   }, [editingMode, editingTemplate, makeDefaultTemplateScope, templateScopeOptions.length]);
-
-  useEffect(() => {
-    if (!budgetCompilationEditorRef.current) return;
-    const html = editingTemplate?.budgetCompilationHtml || "";
-    if (budgetCompilationEditorRef.current.innerHTML !== html) {
-      budgetCompilationEditorRef.current.innerHTML = html;
-    }
-  }, [editingTemplate?.id, editingTemplate?.budgetCompilationHtml]);
 
   const visibleTemplates = templates.filter(hasBranchTemplateScope);
   const filteredTemplates = useMemo(() => {
@@ -976,26 +1073,56 @@ export default function QuotaTemplatesPage() {
     });
     return Array.from(names);
   }, [editingTemplate?.spaces, templateProjectGroups]);
-  const templateFeeFormulaExamples = getTemplateFeeFormulaExamples(templateProjectGroups);
+  const templateFeeFormulaExamples = getTemplateFeeFormulaExamples(templateProjectGroups, editingTemplate?.spaces || []);
   const templateFeeFormulaExampleText = `${templateFeeFormulaExamples.join("、")}、A+B、(直接费+A)`;
-  const templateFeeFormulaPlaceholder = getTemplateFeeFormulaPlaceholder(templateProjectGroups);
-  const templateFeeFormulaContext = buildTemplateFeeFormulaContext(templateProjectGroups);
+  const templateFeeFormulaPlaceholder = getTemplateFeeFormulaPlaceholder(templateProjectGroups, editingTemplate?.spaces || []);
+  const templateFeeFormulaContext = buildTemplateFeeFormulaContext(templateProjectGroups, editingTemplate?.spaces || []);
+  const templateFeeScopeReferences = buildTemplateFeeScopeReferences(templateProjectGroups, editingTemplate?.spaces || []);
+  const comprehensiveFeeMode = "formula" as const;
+  const templateFeeSuggestionOptions = useMemo(() => [
+    { key: "builtin:direct", label: "直接费" },
+    { key: "builtin:labor", label: "人工费" },
+    { key: "builtin:material", label: "材料费" },
+    ...templateFeeScopeReferences.map((reference) => ({ key: `scope:${reference.key}`, label: reference.label })),
+    ...(editingTemplate?.comprehensiveFees || []).map((fee, index) => ({
+      key: `fee:${fee.id}`,
+      label: formatAlphaSequence(index),
+    })),
+  ].filter((option) => option.label), [editingTemplate?.comprehensiveFees, templateFeeScopeReferences]);
+  const visibleTemplateFeeSuggestionOptions = useMemo(() => (
+    templateFeeSuggestion
+      ? templateFeeSuggestionOptions.filter((option) => option.key !== `fee:${templateFeeSuggestion.feeId}`)
+      : templateFeeSuggestionOptions
+  ), [templateFeeSuggestion, templateFeeSuggestionOptions]);
   const templateFormulaFeeItems = buildTemplateFormulaFeeItems(editingTemplate?.comprehensiveFees || []);
-  const templateFeeBaseErrors = (editingTemplate?.comprehensiveFees || []).map((fee, feeIndex) => (
-    normalizeFeeCalcMethod(fee.fee_calc_method) === "fixed" || normalizeFeeCalcMethod(fee.fee_calc_method) === "area_unit"
+  const templateFeeBaseErrors = (editingTemplate?.comprehensiveFees || []).map((fee, feeIndex) => {
+    const draftFormula = feeFormulaDrafts[fee.id] ?? fee.fee_calc_base;
+    if ((fee.valueSource || "formula") === "fixed" && !/^-?\d+(?:\.\d+)?$/.test(String(draftFormula || "").trim())) {
+      return "固定金额请填写数字";
+    }
+    return normalizeFeeCalcMethod(fee.fee_calc_method) === "fixed" || normalizeFeeCalcMethod(fee.fee_calc_method) === "area_unit"
       ? ""
       : getFeeCalcBaseError(
-        feeFormulaDrafts[fee.id] ?? fee.fee_calc_base,
+        draftFormula,
         0,
         0,
         {},
         templateFeeFormulaContext,
-        templateFormulaFeeItems.map((item, index) => index === feeIndex ? { ...item, fee_calc_base: feeFormulaDrafts[fee.id] ?? item.fee_calc_base } : item),
+        templateFormulaFeeItems.map((item, index) => index === feeIndex ? { ...item, fee_calc_base: draftFormula } : item),
         feeIndex,
-      )
+      );
+  });
+  const templateFeeNameErrors = (editingTemplate?.comprehensiveFees || []).map((fee) => (
+    String(fee.name || "").trim() ? "" : "请填写费用名称"
   ));
-  const getTemplateNumberInputProps = (fieldKey: string, value: number, onValueChange: (value: number) => void) => {
-    const currentValue = numberInputDrafts[fieldKey] ?? formatTemplateNumberInputValue(value);
+  const getTemplateNumberInputProps = (
+    fieldKey: string,
+    value: number,
+    onValueChange: (value: number) => void,
+    options?: { emptyWhenZero?: boolean },
+  ) => {
+    const currentValue = numberInputDrafts[fieldKey]
+      ?? (options?.emptyWhenZero && toAmount(value) === 0 ? "" : formatTemplateNumberInputValue(value));
     return {
       inputMode: "decimal" as const,
       value: currentValue,
@@ -1019,26 +1146,6 @@ export default function QuotaTemplatesPage() {
     };
   };
 
-  const syncBudgetCompilationHtml = () => {
-    if (!editingTemplate || !budgetCompilationEditorRef.current) return;
-    setEditingTemplate({
-      ...editingTemplate,
-      budgetCompilationHtml: budgetCompilationEditorRef.current.innerHTML,
-    });
-  };
-
-  const runBudgetCompilationCommand = (command: string, value?: string) => {
-    budgetCompilationEditorRef.current?.focus();
-    document.execCommand(command, false, value);
-    syncBudgetCompilationHtml();
-  };
-
-  const handleBudgetCompilationPaste = (event: ReactClipboardEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const text = event.clipboardData.getData("text/plain");
-    document.execCommand("insertText", false, text);
-    syncBudgetCompilationHtml();
-  };
 
   const resetCustomQuotaDraft = (hideForm = true) => {
     setCustomQuotaDraft(makeCustomQuotaDraft());
@@ -1053,22 +1160,18 @@ export default function QuotaTemplatesPage() {
   const persistTemplateAutoSave = useCallback((template: QuotaTemplate, mode: TemplateEditMode, updateState = true) => {
     const nextUpdatedAt = todayText();
     if (mode === "edit") {
+      const nextTemplate = { ...template, updatedAt: nextUpdatedAt };
       const nextTemplates = templatesRef.current.map((item) => item.id === template.id ? {
-        ...item,
-        projectGroups: template.projectGroups,
-        comprehensiveFees: template.comprehensiveFees,
-        appendixNote: template.appendixNote,
-        budgetCompilationHtml: template.budgetCompilationHtml,
-        spaces: template.spaces,
-        updatedAt: nextUpdatedAt,
+        ...nextTemplate,
       } : item);
+      fullTemplateCacheRef.current.set(nextTemplate.id, nextTemplate);
       templatesRef.current = nextTemplates;
       if (updateState) {
         setTemplates(nextTemplates);
-      } else if (typeof window !== "undefined") {
-        window.localStorage.setItem(QUOTA_TEMPLATE_STORAGE_KEY, JSON.stringify(nextTemplates));
       }
-      saveTemplatesToServer(nextTemplates);
+      void saveTemplateToServer(nextTemplate).catch(() => {
+        // 页面内已保留当前编辑内容，后续自动保存会继续重试。
+      });
       return;
     }
 
@@ -1078,7 +1181,7 @@ export default function QuotaTemplatesPage() {
     } else {
       clearTemplateDraftFromStorage();
     }
-  }, [saveTemplatesToServer]);
+  }, [saveTemplateToServer]);
 
   const openCreateTemplate = () => {
     clearTemplateDraftFromStorage();
@@ -1103,7 +1206,7 @@ export default function QuotaTemplatesPage() {
     setSpaceAutoSaveStatus("idle");
   };
 
-  const openEditTemplate = (template: QuotaTemplate) => {
+  const openLoadedTemplateEditor = (template: QuotaTemplate) => {
     openedTemplateRef.current = template;
     openedTemplatePayloadRef.current = getTemplateDirtyPayload(template);
     setEditingMode("edit");
@@ -1119,6 +1222,17 @@ export default function QuotaTemplatesPage() {
     lastSpaceAutoSavePayloadRef.current = getTemplateAutoSavePayload(template, "edit");
     setSpaceAutoSaveStatus("idle");
     void loadQuotaLibraryOptions(template.autoScope?.branchOrgUnitId || template.autoScope?.orgUnitId || "");
+  };
+
+  const openEditTemplate = (template: QuotaTemplate) => {
+    void (async () => {
+      try {
+        const fullTemplate = await loadFullTemplate(template.id);
+        openLoadedTemplateEditor(fullTemplate);
+      } catch (error: any) {
+        window.alert(error?.message || "读取预算模板失败，请稍后重试");
+      }
+    })();
   };
 
   const buildCopiedTemplate = (template: QuotaTemplate, name: string): QuotaTemplate => {
@@ -1162,9 +1276,17 @@ export default function QuotaTemplatesPage() {
 
   const handleCopyTemplate = (template: QuotaTemplate) => {
     if (!window.confirm(`确认复制模板“${template.name}”吗？\n复制后会生成一份新的模板副本。`)) return;
-    const copyTemplate = buildCopiedTemplate(template, `${template.name} 副本`);
-    persistTemplates([copyTemplate, ...templatesRef.current]);
-    setSelectedId(copyTemplate.id);
+    void (async () => {
+      try {
+        const fullTemplate = await loadFullTemplate(template.id);
+        const copyTemplate = buildCopiedTemplate(fullTemplate, `${template.name} 副本`);
+        await saveTemplateToServer(copyTemplate);
+        replaceLocalTemplate(copyTemplate);
+        setSelectedId(copyTemplate.id);
+      } catch (error: any) {
+        window.alert(error?.message || "复制预算模板失败，请稍后重试");
+      }
+    })();
   };
 
   const handleTemplateBranchChange = (branchId: string) => {
@@ -1198,29 +1320,41 @@ export default function QuotaTemplatesPage() {
     const nextStatus: TemplateStatus = template.status === "disabled" ? "enabled" : "disabled";
     const actionText = nextStatus === "disabled" ? "停用" : "启用";
     if (!window.confirm(`确认${actionText}模板“${template.name}”吗？`)) return;
-    const nextUpdatedAt = todayText();
-    const nextTemplates = templatesRef.current.map((currentTemplate) => currentTemplate.id === template.id
-      ? { ...currentTemplate, status: nextStatus, updatedAt: nextUpdatedAt }
-      : currentTemplate
-    );
-    persistTemplates(nextTemplates);
-    if (editingTemplate?.id === template.id) {
-      setEditingTemplate({ ...editingTemplate, status: nextStatus, updatedAt: nextUpdatedAt });
-    }
+    void (async () => {
+      try {
+        const fullTemplate = await loadFullTemplate(template.id);
+        const nextUpdatedAt = todayText();
+        const nextTemplate = { ...fullTemplate, status: nextStatus, updatedAt: nextUpdatedAt };
+        await saveTemplateToServer(nextTemplate);
+        replaceLocalTemplate(nextTemplate);
+        if (editingTemplate?.id === template.id) {
+          setEditingTemplate((current) => current ? { ...current, status: nextStatus, updatedAt: nextUpdatedAt } : current);
+        }
+      } catch (error: any) {
+        window.alert(error?.message || `${actionText}预算模板失败，请稍后重试`);
+      }
+    })();
   };
 
   const handleDeleteTemplate = (template: QuotaTemplate) => {
     if (!window.confirm(`确认删除模板“${template.name}”吗？`)) return;
-    persistTemplates(templatesRef.current.filter((currentTemplate) => currentTemplate.id !== template.id));
-    if (selectedId === template.id) setSelectedId("");
-    if (editingTemplate?.id === template.id) {
-      setEditingTemplate(null);
-      setActiveSpaceId("");
-      setQuotaPickerTarget(null);
-      setPickedQuotaIds([]);
-      setConstructionTemplatePickerOpen(false);
-      setConstructionTemplateSearch("");
-    }
+    void (async () => {
+      try {
+        await deleteTemplateOnServer(template.id);
+        removeLocalTemplate(template.id);
+        if (selectedId === template.id) setSelectedId("");
+        if (editingTemplate?.id === template.id) {
+          setEditingTemplate(null);
+          setActiveSpaceId("");
+          setQuotaPickerTarget(null);
+          setPickedQuotaIds([]);
+          setConstructionTemplatePickerOpen(false);
+          setConstructionTemplateSearch("");
+        }
+      } catch (error: any) {
+        window.alert(error?.message || "删除预算模板失败，请稍后重试");
+      }
+    })();
   };
 
   const selectConstructionTemplate = (template: ConstructionTemplateOption) => {
@@ -1443,30 +1577,90 @@ export default function QuotaTemplatesPage() {
     });
   };
 
+  const setComprehensiveFeeFinalTotal = (feeId: string) => {
+    setEditingTemplate((current) => current ? {
+      ...current,
+      comprehensiveFees: current.comprehensiveFees.map((fee) => ({
+        ...fee,
+        isFinalTotal: fee.id === feeId,
+      })),
+    } : current);
+  };
+
   const addComprehensiveFee = () => {
     setEditingTemplate((current) => current ? {
       ...current,
       comprehensiveFees: [
         ...current.comprehensiveFees,
-        makeComprehensiveFeeItem({
-          name: "",
-          fee_calc_method: "percent",
-          fee_calc_base: "直接费",
-          fee_rate: 0,
-        }),
+        comprehensiveFeeMode === "formula"
+          ? makeComprehensiveFeeItem({
+            name: "",
+            fee_calc_method: "formula",
+            fee_calc_base: "",
+          })
+          : makeComprehensiveFeeItem({
+            name: "",
+            fee_calc_method: "percent",
+            fee_calc_base: "直接费",
+            fee_rate: 0,
+          }),
       ],
     } : current);
   };
 
   const updateComprehensiveFee = (feeId: string, patch: Partial<TemplateComprehensiveFee>) => {
+    if (patch.valueSource && patch.valueSource !== "formula") {
+      setFeeFormulaDrafts((current) => {
+        const next = { ...current };
+        delete next[feeId];
+        return next;
+      });
+    } else if (normalizeFeeCalcMethod(patch.fee_calc_method) === "formula") {
+      setFeeFormulaDrafts((current) => {
+        const next = { ...current };
+        delete next[feeId];
+        return next;
+      });
+    }
     setEditingTemplate((current) => current ? {
       ...current,
       comprehensiveFees: current.comprehensiveFees.map((fee) => {
         if (fee.id !== feeId) return fee;
         const nextFee = { ...fee, ...patch };
+        const valueSource = comprehensiveFeeMode === "formula"
+          ? nextFee.valueSource || "formula"
+          : "formula";
+        if (comprehensiveFeeMode === "formula" && valueSource !== "formula") {
+          const isFixedAmount = valueSource === "fixed";
+          return {
+            ...nextFee,
+            valueSource,
+            fee_calc_method: valueSource === "manual" ? "fixed" : isFixedAmount ? "formula" : "reference",
+            fee_calc_base: valueSource === "direct"
+              ? "直接费"
+              : isFixedAmount
+                ? normalizeFeeCalcBase(nextFee.fee_calc_base) || "0"
+                : "",
+            fee_rate: 0,
+            unit_price: 0,
+            isFinalTotal: nextFee.isFinalTotal === true,
+          };
+        }
+        if (comprehensiveFeeMode === "formula") {
+          return {
+            ...nextFee,
+            valueSource: "formula",
+            fee_calc_method: "formula",
+            fee_calc_base: normalizeFeeCalcBase(nextFee.fee_calc_base),
+            fee_rate: 0,
+            unit_price: 0,
+            isFinalTotal: nextFee.isFinalTotal === true,
+          };
+        }
         const method = normalizeFeeCalcMethod(nextFee.fee_calc_method);
         return {
           ...nextFee,
+          valueSource: "formula",
           fee_calc_method: method,
           fee_calc_base: method === "fixed" ? "" : method === "area_unit" ? "房屋面积" : normalizeFeeCalcBase(nextFee.fee_calc_base),
           fee_rate: method === "percent" ? toAmount(nextFee.fee_rate) : 0,
@@ -1481,7 +1675,7 @@ export default function QuotaTemplatesPage() {
       ...current,
       comprehensiveFees: current.comprehensiveFees.map((fee) => fee.id === feeId ? {
         ...fee,
-        fee_calc_base: bindStableFeeFormula(displayFormula, current.comprehensiveFees),
+        fee_calc_base: bindStableFeeFormula(displayFormula, current.comprehensiveFees, 0, templateFeeScopeReferences),
       } : fee),
     } : current);
   };
@@ -1504,6 +1698,89 @@ export default function QuotaTemplatesPage() {
     });
   };
 
+  const openTemplateFeeSuggestion = (feeId: string, input: HTMLInputElement) => {
+    const rect = input.getBoundingClientRect();
+    templateFeeSuggestionInputRef.current = input;
+    setTemplateFeeSuggestion({
+      feeId,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 260)),
+      top: Math.min(rect.bottom + 6, window.innerHeight - 280),
+      width: Math.max(220, rect.width),
+    });
+    setTemplateFeeSuggestionActiveIndex(0);
+  };
+
+  const showTemplateFeeErrorTooltip = (target: HTMLElement, message: string) => {
+    if (!message) return;
+    const rect = target.getBoundingClientRect();
+    const width = 260;
+    const estimatedHeight = 36;
+    const preferredLeft = rect.left - width - 8;
+    const left = preferredLeft >= 8 ? preferredLeft : Math.min(rect.right + 8, window.innerWidth - width - 8);
+    const top = Math.max(8, Math.min(rect.top + rect.height / 2 - estimatedHeight / 2, window.innerHeight - estimatedHeight - 8));
+    setTemplateFeeErrorTooltip({ left, top, message });
+  };
+
+  const hideTemplateFeeErrorTooltip = () => setTemplateFeeErrorTooltip(null);
+
+  useEffect(() => {
+    if (!templateFeeErrorTooltip) return;
+    const closeTooltip = () => setTemplateFeeErrorTooltip(null);
+    window.addEventListener("resize", closeTooltip);
+    window.addEventListener("scroll", closeTooltip, true);
+    return () => {
+      window.removeEventListener("resize", closeTooltip);
+      window.removeEventListener("scroll", closeTooltip, true);
+    };
+  }, [templateFeeErrorTooltip]);
+
+  const insertTemplateFeeSuggestion = (value: string) => {
+    const input = templateFeeSuggestionInputRef.current;
+    const feeId = templateFeeSuggestion?.feeId || "";
+    if (!input || !feeId) return;
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? start;
+    const nextValue = `${input.value.slice(0, start)}${value}${input.value.slice(end)}`;
+    changeComprehensiveFeeFormulaDraft(feeId, nextValue);
+    setTemplateFeeSuggestion(null);
+    window.requestAnimationFrame(() => {
+      input.focus();
+      const nextCursor = start + value.length;
+      input.setSelectionRange(nextCursor, nextCursor);
+    });
+  };
+
+  useEffect(() => {
+    if (!templateFeeSuggestion) return;
+    const closeSuggestion = () => setTemplateFeeSuggestion(null);
+    const handleScroll = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Node && templateFeeSuggestionMenuRef.current?.contains(target)) return;
+      closeSuggestion();
+    };
+    document.addEventListener("pointerdown", closeSuggestion);
+    window.addEventListener("resize", closeSuggestion);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeSuggestion);
+      window.removeEventListener("resize", closeSuggestion);
+      window.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [templateFeeSuggestion]);
+
+  useEffect(() => {
+    const handleOtherDropdownOpen = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      if (detail?.id && detail.id !== TEMPLATE_FEE_SUGGESTION_DROPDOWN_ID) setTemplateFeeSuggestion(null);
+    };
+    window.addEventListener(EXCLUSIVE_DROPDOWN_OPEN_EVENT, handleOtherDropdownOpen);
+    return () => window.removeEventListener(EXCLUSIVE_DROPDOWN_OPEN_EVENT, handleOtherDropdownOpen);
+  }, []);
+
+  useEffect(() => {
+    if (templateFeeSuggestion) notifyExclusiveDropdownOpen(TEMPLATE_FEE_SUGGESTION_DROPDOWN_ID);
+  }, [templateFeeSuggestion]);
+
   const toggleComprehensiveFeeScopeName = (feeId: string, name: string) => {
     const scopeName = name.trim();
     if (!scopeName) return;
@@ -1520,6 +1797,11 @@ export default function QuotaTemplatesPage() {
   };
 
   const removeComprehensiveFee = (feeId: string) => {
+    const feeToRemove = editingTemplate?.comprehensiveFees.find((fee) => fee.id === feeId);
+    if (comprehensiveFeeMode === "formula" && feeToRemove?.isFinalTotal) {
+      window.alert("当前行是报价总额行，请先将其它行设为报价总额后再删除。");
+      return;
+    }
     const referencedBy = (editingTemplate?.comprehensiveFees || [])
       .filter((fee) => fee.id !== feeId && getStableFeeReferenceIds(fee.fee_calc_base).includes(feeId))
       .map((fee) => fee.name || "未命名费用");
@@ -1534,7 +1816,17 @@ export default function QuotaTemplatesPage() {
   };
 
   const addSpace = () => {
-    const nextSpace = makeSpace(`空间${(editingTemplate?.spaces.length || 0) + 1}`);
+    const existingNames = new Set([
+      ...(editingTemplate?.spaces || []).map((space) => normalizeTemplateScopeName(space.name)),
+      ...getTemplateProjectGroups(editingTemplate).map((group) => normalizeTemplateScopeName(group.name)),
+    ].filter(Boolean));
+    let index = (editingTemplate?.spaces.length || 0) + 1;
+    let nextName = `空间${index}`;
+    while (existingNames.has(normalizeTemplateScopeName(nextName))) {
+      index += 1;
+      nextName = `空间${index}`;
+    }
+    const nextSpace = makeSpace(nextName);
     setEditingTemplate((current) => current ? {
       ...current,
       spaces: [...current.spaces, nextSpace],
@@ -1566,6 +1858,16 @@ export default function QuotaTemplatesPage() {
     const fixedGroup = BUILTIN_PROJECT_GROUPS.find((group) => group.id === groupId);
     if (!fixedGroup) {
       window.alert("项目分组只能选择基装、产品、定制柜");
+      return;
+    }
+    const groupAlreadyExists = currentGroups.some((group) => group.id === fixedGroup.id);
+    const normalizedGroupName = normalizeTemplateScopeName(fixedGroup.name);
+    const duplicateScopeName = !groupAlreadyExists && [
+      ...(editingTemplate?.spaces || []).map((space) => normalizeTemplateScopeName(space.name)),
+      ...currentGroups.filter((group) => group.id !== fixedGroup.id).map((group) => normalizeTemplateScopeName(group.name)),
+    ].includes(normalizedGroupName);
+    if (duplicateScopeName) {
+      window.alert(`空间/类别名称不能重复：「${fixedGroup.name}」已存在。`);
       return;
     }
     const currentSpaceGroups = getSpaceProjectGroups(activeSpace, currentGroups);
@@ -1619,11 +1921,67 @@ export default function QuotaTemplatesPage() {
     setActiveQuotaScope("");
   };
 
+  const getSpaceNameConflictMessage = (spaceId: string, value: string) => {
+    const nextName = normalizeTemplateScopeName(value);
+    if (!nextName) return "空间名称不能为空";
+    const duplicate = (
+      (editingTemplate?.spaces || []).some((space) => (
+        space.id !== spaceId && normalizeTemplateScopeName(space.name) === nextName
+      ))
+      || getTemplateProjectGroups(editingTemplate).some((group) => normalizeTemplateScopeName(group.name) === nextName)
+    );
+    return duplicate ? `空间/类别名称不能重复：「${String(value || "").trim()}」已存在。` : "";
+  };
+
   const updateSpace = (spaceId: string, patch: Partial<TemplateSpace>) => {
+    if (patch.name !== undefined) {
+      const error = getSpaceNameConflictMessage(spaceId, String(patch.name || ""));
+      if (error) {
+        window.alert(error);
+        return false;
+      }
+    }
     setEditingTemplate((current) => current ? {
       ...current,
       spaces: current.spaces.map((space) => space.id === spaceId ? { ...space, ...patch } : space),
+      comprehensiveFees: patch.name
+        ? current.comprehensiveFees.map((fee) => ({
+          ...fee,
+          fee_calc_base: updateStableScopeReferenceLabel(fee.fee_calc_base, `space:${spaceId}`, patch.name || ""),
+        }))
+        : current.comprehensiveFees,
     } : current);
+    return true;
+  };
+
+  const commitSpaceNameDraft = (spaceId: string) => {
+    const draft = spaceNameDrafts[spaceId];
+    if (draft === undefined) return true;
+    const nextName = String(draft || "").trim();
+    const currentSpace = editingTemplate?.spaces.find((space) => space.id === spaceId);
+    if (!currentSpace) {
+      setSpaceNameDrafts((current) => {
+        const next = { ...current };
+        delete next[spaceId];
+        return next;
+      });
+      return true;
+    }
+    if (nextName === String(currentSpace.name || "").trim()) {
+      setSpaceNameDrafts((current) => {
+        const next = { ...current };
+        delete next[spaceId];
+        return next;
+      });
+      return true;
+    }
+    if (!updateSpace(spaceId, { name: nextName })) return false;
+    setSpaceNameDrafts((current) => {
+      const next = { ...current };
+      delete next[spaceId];
+      return next;
+    });
+    return true;
   };
 
   const removeSpace = (spaceId: string) => {
@@ -2456,19 +2814,39 @@ export default function QuotaTemplatesPage() {
   }, [hasUnsavedTemplateChanges]);
 
   useEffect(() => {
+    const handleBeforeAppNavigation = (event: Event) => {
+      if (!hasUnsavedTemplateChanges || !editingTemplate) return;
+      const navigationEvent = event as CustomEvent<{ href?: string }>;
+      const href = String(navigationEvent.detail?.href || "").trim();
+      if (!href) return;
+      event.preventDefault();
+      pendingTemplateNavigationHrefRef.current = href;
+      setPendingTemplateNavigationHref(href);
+      setUnsavedClosePromptOpen(true);
+    };
+    window.addEventListener("app:before-navigation", handleBeforeAppNavigation);
+    return () => window.removeEventListener("app:before-navigation", handleBeforeAppNavigation);
+  }, [editingTemplate, hasUnsavedTemplateChanges]);
+
+  useEffect(() => {
     return () => {
       if (templateSaveTimerRef.current) window.clearTimeout(templateSaveTimerRef.current);
       if (templateSaveStatusTimerRef.current) window.clearTimeout(templateSaveStatusTimerRef.current);
+      if (templateScopeErrorTimerRef.current) window.clearTimeout(templateScopeErrorTimerRef.current);
+      if (comprehensiveFeeErrorTimerRef.current) window.clearTimeout(comprehensiveFeeErrorTimerRef.current);
     };
   }, []);
 
   const forceCloseEditingTemplate = () => {
+    const pendingNavigationHref = pendingTemplateNavigationHrefRef.current;
+    pendingTemplateNavigationHrefRef.current = "";
     if (spaceAutoSaveTimerRef.current) window.clearTimeout(spaceAutoSaveTimerRef.current);
     if (templateSaveTimerRef.current) window.clearTimeout(templateSaveTimerRef.current);
     if (templateSaveStatusTimerRef.current) window.clearTimeout(templateSaveStatusTimerRef.current);
     templateSaveTimerRef.current = null;
     templateSaveStatusTimerRef.current = null;
     setUnsavedClosePromptOpen(false);
+    setPendingTemplateNavigationHref("");
     setEditingTemplate(null);
     setActiveSpaceId("");
     setQuotaPickerTarget(null);
@@ -2478,14 +2856,82 @@ export default function QuotaTemplatesPage() {
     setQuotaDiffOpen(false);
     setSpaceAutoSaveStatus("idle");
     setTemplateSaveStatus("idle");
+    if (pendingNavigationHref) {
+      router.push(pendingNavigationHref);
+    }
   };
 
   const closeEditingTemplate = () => {
     if (hasUnsavedTemplateChanges) {
+      pendingTemplateNavigationHrefRef.current = "";
+      setPendingTemplateNavigationHref("");
       setUnsavedClosePromptOpen(true);
       return;
     }
     forceCloseEditingTemplate();
+  };
+
+  const continueEditingTemplate = () => {
+    pendingTemplateNavigationHrefRef.current = "";
+    setPendingTemplateNavigationHref("");
+    setUnsavedClosePromptOpen(false);
+  };
+
+  const revealComprehensiveFeeError = (feeId: string) => {
+    setHighlightedComprehensiveFeeId(feeId);
+    if (comprehensiveFeeErrorTimerRef.current) {
+      window.clearTimeout(comprehensiveFeeErrorTimerRef.current);
+    }
+    comprehensiveFeeErrorTimerRef.current = window.setTimeout(() => {
+      setHighlightedComprehensiveFeeId("");
+      comprehensiveFeeErrorTimerRef.current = null;
+    }, 3600);
+    window.requestAnimationFrame(() => {
+      const row = Array.from(document.querySelectorAll<HTMLElement>("[data-template-fee-row]"))
+        .find((item) => item.dataset.feeId === feeId);
+      comprehensiveFeesSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (!row) return;
+      window.requestAnimationFrame(() => {
+        row.scrollIntoView({ behavior: "smooth", block: "center" });
+        const input = row.querySelector<HTMLInputElement>("[data-template-fee-validation-target]");
+        input?.focus();
+        input?.select();
+      });
+    });
+  };
+
+  const revealTemplateScopeError = (conflict: { type: "space" | "category"; id: string }) => {
+    setHighlightedTemplateSpaceId(conflict.type === "space" ? conflict.id : "");
+    setHighlightedTemplateProjectGroupId(conflict.type === "category" ? conflict.id : "");
+    if (templateScopeErrorTimerRef.current) {
+      window.clearTimeout(templateScopeErrorTimerRef.current);
+    }
+    templateScopeErrorTimerRef.current = window.setTimeout(() => {
+      setHighlightedTemplateSpaceId("");
+      setHighlightedTemplateProjectGroupId("");
+      templateScopeErrorTimerRef.current = null;
+    }, 3600);
+    templateSpaceConfigRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    window.requestAnimationFrame(() => {
+      if (conflict.type === "space") {
+        const tab = Array.from(document.querySelectorAll<HTMLElement>("[data-template-space-tab]"))
+          .find((item) => item.dataset.spaceId === conflict.id);
+        tab?.scrollIntoView({ behavior: "smooth", block: "center" });
+        tab?.querySelector<HTMLInputElement>("[data-template-scope-name-input]")?.focus();
+        return;
+      }
+      const targetSpace = editingTemplate?.spaces.find((space) => (
+        getSpaceProjectGroups(space, templateProjectGroups).some((group) => group.id === conflict.id)
+      )) || editingTemplate?.spaces[0];
+      if (!targetSpace) return;
+      setActiveSpaceId(targetSpace.id);
+      setActiveQuotaScope(conflict.id);
+      window.setTimeout(() => {
+        const tab = Array.from(document.querySelectorAll<HTMLElement>("[data-template-project-group-tab]"))
+          .find((item) => item.dataset.projectGroupId === conflict.id);
+        tab?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 80);
+    });
   };
 
   const discardTemplateChangesAndClose = () => {
@@ -2494,8 +2940,10 @@ export default function QuotaTemplatesPage() {
       clearTemplateDraftFromStorage();
     } else if (openedTemplateRef.current) {
       const originalTemplate = openedTemplateRef.current;
-      const nextTemplates = templatesRef.current.map((template) => template.id === originalTemplate.id ? originalTemplate : template);
-      persistTemplates(nextTemplates);
+      replaceLocalTemplate(originalTemplate);
+      void saveTemplateToServer(originalTemplate).catch((error: any) => {
+        window.alert(error?.message || "恢复预算模板失败，请稍后重试");
+      });
       setSelectedId(originalTemplate.id);
     }
     openedTemplateRef.current = null;
@@ -2513,6 +2961,70 @@ export default function QuotaTemplatesPage() {
     const nextTemplateScope = normalizeEditableTemplateScope(editingTemplate);
     if (!nextTemplateScope?.orgUnitId) {
       window.alert("请选择模板适用的分公司");
+      return;
+    }
+    const scopeNameConflicts = getTemplateScopeNameConflicts(editingTemplate);
+    const firstScopeNameConflict = scopeNameConflicts[0];
+    if (firstScopeNameConflict) {
+      window.alert(
+        `空间/类别名称不能重复：「${firstScopeNameConflict.conflictNames.join("、")}」。\n\n请修改为不同名称后再保存。`,
+      );
+      revealTemplateScopeError(firstScopeNameConflict);
+      return;
+    }
+    const comprehensiveFeesWithDrafts = editingTemplate.comprehensiveFees.map((fee) => (
+      comprehensiveFeeMode === "formula" && (fee.valueSource || "formula") !== "formula"
+        ? fee
+        : feeFormulaDrafts[fee.id] !== undefined
+        ? {
+          ...fee,
+          fee_calc_base: bindStableFeeFormula(
+            feeFormulaDrafts[fee.id],
+            editingTemplate.comprehensiveFees,
+            0,
+            templateFeeScopeReferences,
+          ),
+        }
+        : fee
+    ));
+    const comprehensiveFeeValidationItems = buildTemplateFormulaFeeItems(comprehensiveFeesWithDrafts);
+    const formulaFinalFeeCount = comprehensiveFeesWithDrafts.filter((fee) => fee.isFinalTotal).length;
+    if (comprehensiveFeeMode === "formula" && formulaFinalFeeCount !== 1) {
+      window.alert("自由公式表必须且只能设置一行“报价总额”。");
+      const targetFee = comprehensiveFeesWithDrafts.find((fee) => fee.isFinalTotal) || comprehensiveFeesWithDrafts[0];
+      if (targetFee) revealComprehensiveFeeError(targetFee.id);
+      return;
+    }
+    const comprehensiveFeeErrors = comprehensiveFeesWithDrafts.map((fee, feeIndex) => {
+      const valueSource = comprehensiveFeeMode === "formula" ? fee.valueSource || "formula" : "formula";
+      const method = normalizeFeeCalcMethod(fee.fee_calc_method);
+      const errors = [
+        String(fee.name || "").trim() ? "" : "请填写费用名称",
+        valueSource === "fixed"
+          ? /^-?\d+(?:\.\d+)?$/.test(String(fee.fee_calc_base || "").trim())
+            ? ""
+            : "固定金额请填写数字"
+          : valueSource !== "formula" || method === "fixed" || method === "area_unit"
+            ? ""
+            : getFeeCalcBaseError(
+              fee.fee_calc_base,
+              0,
+              0,
+              {},
+              templateFeeFormulaContext,
+              comprehensiveFeeValidationItems,
+              feeIndex,
+            ),
+      ].filter(Boolean);
+      return errors.length > 0 ? { feeId: fee.id, feeIndex, message: Array.from(new Set(errors)).join("；") } : null;
+    }).filter((error): error is { feeId: string; feeIndex: number; message: string } => Boolean(error));
+    const firstComprehensiveFeeError = comprehensiveFeeErrors[0];
+    if (firstComprehensiveFeeError) {
+      const fee = comprehensiveFeesWithDrafts[firstComprehensiveFeeError.feeIndex];
+      window.alert(
+        `综合费用配置有误，无法保存。\n\n第 ${formatAlphaSequence(firstComprehensiveFeeError.feeIndex)} 行「${String(fee?.name || "").trim() || "未命名费用"}」：${firstComprehensiveFeeError.message}\n\n已定位到该费用项目，请修改后重试。`,
+      );
+      revealComprehensiveFeeError(firstComprehensiveFeeError.feeId);
       return;
     }
     const nextConstructionTemplateConfig = makeDefaultConstructionTemplateConfig({
@@ -2563,18 +3075,36 @@ export default function QuotaTemplatesPage() {
         calculationNote: editingTemplate.quoteConfig.calculationNote.trim(),
       },
       projectGroups: normalizeTemplateProjectGroups(editingTemplate.projectGroups, editingTemplate.spaces),
-      comprehensiveFees: normalizeComprehensiveFees(editingTemplate.comprehensiveFees)
-        .map((fee) => ({
-          ...fee,
-          name: fee.name.trim(),
-          fee_calc_method: normalizeFeeCalcMethod(fee.fee_calc_method),
-          fee_calc_base: normalizeFeeCalcMethod(fee.fee_calc_method) === "fixed" ? "" : normalizeFeeCalcMethod(fee.fee_calc_method) === "area_unit" ? "房屋面积" : normalizeFeeCalcBase(fee.fee_calc_base),
-          fee_rate: normalizeFeeCalcMethod(fee.fee_calc_method) === "percent" ? toAmount(fee.fee_rate) : 0,
-          unit_price: normalizeFeeCalcMethod(fee.fee_calc_method) === "fixed" || normalizeFeeCalcMethod(fee.fee_calc_method) === "area_unit" ? toAmount(fee.unit_price) : 0,
-          remark: fee.remark.trim(),
-	          fee_scope_mode: (fee.fee_scope_mode === "include" || fee.fee_scope_mode === "exclude" ? fee.fee_scope_mode : "all") as FeeScopeMode,
-          fee_scope_space_names: Array.from(new Set((fee.fee_scope_space_names || []).map((name) => name.trim()).filter(Boolean))),
-        }))
+      comprehensiveFees: normalizeComprehensiveFees(comprehensiveFeesWithDrafts)
+        .map((fee) => {
+          const valueSource = comprehensiveFeeMode === "formula" ? fee.valueSource || "formula" : "formula";
+          const method = comprehensiveFeeMode === "formula"
+            ? valueSource === "manual"
+              ? "fixed"
+              : valueSource === "formula" || valueSource === "fixed"
+                ? "formula"
+                : "reference"
+            : normalizeFeeCalcMethod(fee.fee_calc_method);
+          return {
+            ...fee,
+            name: fee.name.trim(),
+            valueSource,
+            isFinalTotal: comprehensiveFeeMode === "formula" && fee.isFinalTotal === true,
+            fee_calc_method: method,
+            fee_calc_base: valueSource === "fixed"
+              ? normalizeFeeCalcBase(fee.fee_calc_base) || "0"
+              : method === "fixed" || valueSource === "discount"
+                ? ""
+                : method === "area_unit"
+                  ? "房屋面积"
+                  : normalizeFeeCalcBase(fee.fee_calc_base),
+            fee_rate: method === "percent" ? toAmount(fee.fee_rate) : 0,
+            unit_price: method === "fixed" || method === "area_unit" ? toAmount(fee.unit_price) : 0,
+            remark: fee.remark.trim(),
+            fee_scope_mode: (fee.fee_scope_mode === "include" || fee.fee_scope_mode === "exclude" ? fee.fee_scope_mode : "all") as FeeScopeMode,
+            fee_scope_space_names: Array.from(new Set((fee.fee_scope_space_names || []).map((name) => name.trim()).filter(Boolean))),
+          };
+        })
         .filter((fee) => fee.name),
       appendixNote: editingTemplate.appendixNote.trim(),
       budgetCompilationHtml: editingTemplate.budgetCompilationHtml.trim(),
@@ -2604,10 +3134,10 @@ export default function QuotaTemplatesPage() {
       updatedAt: todayText(),
     };
     setTemplateSaveStatus("saving");
-    const nextTemplates = templatesRef.current.some((template) => template.id === nextTemplate.id)
-      ? templatesRef.current.map((template) => template.id === nextTemplate.id ? nextTemplate : template)
-      : [nextTemplate, ...templatesRef.current];
-    persistTemplates(nextTemplates);
+    replaceLocalTemplate(nextTemplate);
+    void saveTemplateToServer(nextTemplate).catch((error: any) => {
+      window.alert(error?.message || "保存预算模板失败，请稍后重试");
+    });
     setSelectedId(nextTemplate.id);
     openedTemplateRef.current = nextTemplate;
     openedTemplatePayloadRef.current = getTemplateDirtyPayload(nextTemplate);
@@ -2807,7 +3337,7 @@ export default function QuotaTemplatesPage() {
       </section>
 
       {editingTemplate && (
-        <div className="quota-template-editor fixed bottom-0 right-0 top-0 z-50 bg-surface-50 max-md:left-0 md:left-[var(--active-sidebar-width)]">
+        <div className="quota-template-editor fixed bottom-0 right-0 top-0 z-[70] bg-surface-50 max-md:left-0 md:left-[var(--active-sidebar-width)]">
           <div className="flex h-full w-full flex-col overflow-hidden bg-surface-50">
             <div className="quota-template-editor-header flex items-center justify-between gap-4 border-b border-surface-200 bg-white px-6 py-4">
               <div className="min-w-0 flex-1">
@@ -3211,7 +3741,7 @@ export default function QuotaTemplatesPage() {
                   </div>
                 </div>
               </section>
-              <section className="quota-template-editor-section quota-template-space-config rounded-lg border border-surface-200 bg-white">
+              <section ref={templateSpaceConfigRef} className="quota-template-editor-section quota-template-space-config rounded-lg border border-surface-200 bg-white">
                 <div className="quota-template-space-config-head flex items-center justify-between border-b border-surface-200 bg-surface-100 px-4 py-3">
                   <div className="quota-template-space-config-title">
                     <span className="quota-template-space-config-icon"><LayoutGrid /></span>
@@ -3260,6 +3790,11 @@ export default function QuotaTemplatesPage() {
                         <div className="quota-template-space-toolbar-inner flex flex-wrap items-center gap-2 border-b border-surface-200 pb-3">
                           {editingTemplate.spaces.map((space, spaceIndex) => {
                             const isActive = activeSpace?.id === space.id;
+                            const spaceNameDraft = spaceNameDrafts[space.id];
+                            const displayedSpaceName = spaceNameDraft ?? space.name;
+                            const spaceNameError = spaceNameDraft !== undefined
+                              ? getSpaceNameConflictMessage(space.id, spaceNameDraft)
+                              : "";
                             const spaceDropBefore = dragOverSpace?.id === space.id && dragOverSpace.position === "before";
                             const spaceDropAfter = dragOverSpace?.id === space.id && dragOverSpace.position === "after";
                             return (
@@ -3270,7 +3805,7 @@ export default function QuotaTemplatesPage() {
                                 className={`${isActive
                                   ? "inline-flex h-9 w-32 items-center rounded-md border border-primary-600 bg-primary-600 px-1.5 shadow-sm"
                                   : "inline-flex h-9 w-32 items-center rounded-md border border-surface-200 bg-white px-1.5 transition hover:border-primary-200 hover:bg-primary-50"
-                                } ${draggingSpaceId === space.id ? "scale-[0.98] opacity-55" : ""} ${recentlyMovedSpaceId === space.id ? "template-space-tab-moved" : ""} ${spaceDropBefore ? "template-space-drop-before" : ""} ${spaceDropAfter ? "template-space-drop-after" : ""}`}
+                                } ${highlightedTemplateSpaceId === space.id ? "ring-2 ring-red-400 ring-offset-1" : ""} ${draggingSpaceId === space.id ? "scale-[0.98] opacity-55" : ""} ${recentlyMovedSpaceId === space.id ? "template-space-tab-moved" : ""} ${spaceDropBefore ? "template-space-drop-before" : ""} ${spaceDropAfter ? "template-space-drop-after" : ""}`}
                                 title={space.name || `空间${spaceIndex + 1}`}
                               >
                                 <button
@@ -3286,15 +3821,33 @@ export default function QuotaTemplatesPage() {
                                   <GripVertical className="h-3.5 w-3.5" />
                                 </button>
                                 <input
-                                  value={space.name}
+                                  value={displayedSpaceName}
                                   onFocus={() => setActiveSpaceId(space.id)}
                                   onClick={() => setActiveSpaceId(space.id)}
-                                  onChange={(event) => updateSpace(space.id, { name: event.target.value })}
+                                  onChange={(event) => setSpaceNameDrafts((current) => ({ ...current, [space.id]: event.target.value }))}
+                                  onBlur={() => commitSpaceNameDraft(space.id)}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                      event.preventDefault();
+                                      if (commitSpaceNameDraft(space.id)) event.currentTarget.blur();
+                                    }
+                                    if (event.key === "Escape") {
+                                      event.preventDefault();
+                                      setSpaceNameDrafts((current) => {
+                                        const next = { ...current };
+                                        delete next[space.id];
+                                        return next;
+                                      });
+                                    }
+                                  }}
+                                  data-template-scope-name-input
+                                  aria-invalid={!!spaceNameError}
                                   className={isActive
-	                                    ? "h-full min-w-0 flex-1 bg-transparent text-center text-xs font-medium text-white outline-none placeholder:text-primary-100"
-	                                    : "h-full min-w-0 flex-1 bg-transparent text-center text-xs font-medium text-surface-500 outline-none placeholder:text-surface-400"
+	                                    ? `h-full min-w-0 flex-1 rounded bg-transparent text-center text-xs font-medium text-white outline-none placeholder:text-primary-100 ${spaceNameError ? "ring-2 ring-inset ring-red-300" : ""}`
+	                                    : `h-full min-w-0 flex-1 rounded bg-transparent text-center text-xs font-medium text-surface-500 outline-none placeholder:text-surface-400 ${spaceNameError ? "ring-2 ring-inset ring-red-300" : ""}`
                                   }
                                   placeholder={`空间${spaceIndex + 1}`}
+                                  title={spaceNameError || undefined}
                                 />
                                 <span className="quota-template-space-item-count">{space.quotaItems.length}</span>
                               </div>
@@ -3403,8 +3956,8 @@ export default function QuotaTemplatesPage() {
                                           data-template-project-group-tab
                                           data-project-group-id={section.scope}
                                           className={isActive
-	                                            ? `inline-flex h-8 min-w-28 items-center rounded px-1.5 text-xs font-medium text-white shadow-sm transition bg-primary-600 ${isDragging ? "scale-[0.98] opacity-55" : ""} ${recentlyMoved ? "template-project-group-tab-moved" : ""} ${dropBefore ? "template-project-group-drop-before" : ""} ${dropAfter ? "template-project-group-drop-after" : ""}`
-	                                            : `inline-flex h-8 min-w-28 items-center rounded px-1.5 text-xs font-medium text-surface-600 transition hover:bg-surface-50 hover:text-surface-900 ${isDragging ? "scale-[0.98] opacity-55" : ""} ${recentlyMoved ? "template-project-group-tab-moved" : ""} ${dropBefore ? "template-project-group-drop-before" : ""} ${dropAfter ? "template-project-group-drop-after" : ""}`
+	                                            ? `inline-flex h-8 min-w-28 items-center rounded px-1.5 text-xs font-medium text-white shadow-sm transition bg-primary-600 ${highlightedTemplateProjectGroupId === section.scope ? "ring-2 ring-red-400 ring-offset-1" : ""} ${isDragging ? "scale-[0.98] opacity-55" : ""} ${recentlyMoved ? "template-project-group-tab-moved" : ""} ${dropBefore ? "template-project-group-drop-before" : ""} ${dropAfter ? "template-project-group-drop-after" : ""}`
+	                                            : `inline-flex h-8 min-w-28 items-center rounded px-1.5 text-xs font-medium text-surface-600 transition hover:bg-surface-50 hover:text-surface-900 ${highlightedTemplateProjectGroupId === section.scope ? "ring-2 ring-red-400 ring-offset-1" : ""} ${isDragging ? "scale-[0.98] opacity-55" : ""} ${recentlyMoved ? "template-project-group-tab-moved" : ""} ${dropBefore ? "template-project-group-drop-before" : ""} ${dropAfter ? "template-project-group-drop-after" : ""}`
                                           }
                                           title={section.title}
                                         >
@@ -3730,11 +4283,11 @@ export default function QuotaTemplatesPage() {
                   )}
                 </div>
               </section>
-              <section className="quota-template-editor-section rounded-lg border border-surface-200 bg-white">
+              <section ref={comprehensiveFeesSectionRef} data-comprehensive-fee-section className="quota-template-editor-section rounded-lg border border-surface-200 bg-white">
                 <div className="flex items-center justify-between border-b border-surface-200 bg-surface-100 px-4 py-3">
                   <div>
                     <p className="text-sm font-semibold text-surface-900">综合费用配置</p>
-                    <p className="mt-0.5 text-xs text-surface-500">和报价单综合费用逻辑一致，可预设管理费、税费、远程费等费用规则。</p>
+                    <p className="mt-0.5 text-xs text-surface-500">按行配置公式，金额完全由公式决定；报价总额取已标记的汇总行。</p>
                   </div>
                   <button
                     type="button"
@@ -3760,23 +4313,19 @@ export default function QuotaTemplatesPage() {
                             <col className="w-[6%]" />
                             <col className="w-[13%]" />
                             <col className="w-[10%]" />
+                            <col className="w-[24%]" />
                             <col className="w-[9%]" />
-                            <col className="w-[8%]" />
-                            <col className="w-[18%]" />
-                            <col className="w-[14%]" />
-                            <col className="w-[11%]" />
-                            <col className="w-[6%]" />
+                            <col className="w-[24%]" />
+                            <col className="w-[9%]" />
                           </colgroup>
                           <thead className="bg-surface-50 text-xs font-semibold text-surface-600">
                             <tr className="border-b border-surface-200">
                               <th className="px-2 py-2 text-center"></th>
                               <th className="px-3 py-2 text-center">编号</th>
                               <th className="px-3 py-2 text-left">费用名称</th>
-                              <th className="px-3 py-2 text-center">计算方式</th>
+                              <th className="px-3 py-2 text-center">{comprehensiveFeeMode === "formula" ? "取值方式" : "计算方式"}</th>
                               <th className="px-3 py-2 text-left">基础公式</th>
-                              <th className="px-3 py-2 text-right">金额/比例</th>
-                              <th className="px-3 py-2 text-left">计费范围</th>
-                              <th className="px-3 py-2 text-left">规则预览</th>
+                              <th className="px-3 py-2 text-center">默认统计范围</th>
                               <th className="px-3 py-2 text-left">备注</th>
                               <th className="px-3 py-2 text-center">操作</th>
                             </tr>
@@ -3785,75 +4334,181 @@ export default function QuotaTemplatesPage() {
                             {editingTemplate.comprehensiveFees.map((fee, feeIndex) => {
                               const feeMethod = normalizeFeeCalcMethod(fee.fee_calc_method);
                               const feeBaseError = templateFeeBaseErrors[feeIndex] || "";
+                              const feeNameError = templateFeeNameErrors[feeIndex] || "";
+                              const highlighted = highlightedComprehensiveFeeId === fee.id;
                               const isDragging = draggingFeeId === fee.id;
                               const dropBefore = dragOverFee?.id === fee.id && dragOverFee.position === "before";
                               const dropAfter = dragOverFee?.id === fee.id && dragOverFee.position === "after";
                               const recentlyMoved = recentlyMovedFeeId === fee.id;
-                              const displayFee = feeFormulaDrafts[fee.id] !== undefined ? { ...fee, fee_calc_base: feeFormulaDrafts[fee.id] } : fee;
+                              const feeValueSource = fee.valueSource || "formula";
+                              const formulaInputValue = feeValueSource === "direct"
+                                ? "直接费"
+                                : feeValueSource === "discount"
+                                  ? "报价优惠"
+                                  : feeValueSource === "manual"
+                                    ? ""
+                                    : feeFormulaDrafts[fee.id] ?? formatStableFeeFormula(fee.fee_calc_base, editingTemplate.comprehensiveFees);
                               return (
                                 <tr
                                   key={fee.id}
                                   data-template-fee-row
                                   data-fee-id={fee.id}
-                                  className={`template-fee-row align-middle transition ${isDragging ? "opacity-45" : ""} ${recentlyMoved ? "quote-item-row-moved" : ""} ${dropBefore ? "quote-item-row-drop-before border-t-2 border-t-teal-500" : ""} ${dropAfter ? "quote-item-row-drop-after border-b-2 border-b-teal-500" : ""}`}
+                                  data-value-source={feeValueSource}
+                                  data-final-total={fee.isFinalTotal ? "true" : undefined}
+                                  className={`template-fee-row align-middle transition ${isDragging ? "opacity-45" : ""} ${recentlyMoved ? "quote-item-row-moved" : ""} ${highlighted ? "bg-red-50 ring-2 ring-inset ring-red-400" : ""} ${dropBefore ? "quote-item-row-drop-before border-t-2 border-t-teal-500" : ""} ${dropAfter ? "quote-item-row-drop-after border-b-2 border-b-teal-500" : ""}`}
                                 >
                                   <td className="px-2 py-2 text-center">
-                                    <button
-                                      type="button"
-                                      onPointerDown={(event) => startPointerFeeDrag(event, fee.id)}
-                                      className="inline-flex h-7 w-7 cursor-grab touch-none items-center justify-center rounded-md text-surface-300 transition hover:bg-surface-100 hover:text-primary-600 active:cursor-grabbing"
-                                      title="拖动调整综合费用顺序"
-                                      aria-label={`拖动${fee.name || formatAlphaSequence(feeIndex)}调整顺序`}
-                                    >
-                                      <GripVertical className="h-4 w-4" />
-                                    </button>
+                                    {fee.isFinalTotal ? (
+                                      <button
+                                        type="button"
+                                        onPointerDown={(event) => startPointerFeeDrag(event, fee.id)}
+                                        className="inline-flex h-7 w-7 cursor-grab touch-none items-center justify-center rounded-md bg-surface-100 text-surface-300 transition hover:bg-surface-200 active:cursor-grabbing"
+                                        title="报价总额，拖动调整顺序"
+                                        aria-label={`报价总额，拖动${fee.name || formatAlphaSequence(feeIndex)}调整顺序`}
+                                      >
+                                        <Star className="h-4 w-4 fill-red-500 text-red-500" />
+                                      </button>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onPointerDown={(event) => startPointerFeeDrag(event, fee.id)}
+                                        className="inline-flex h-7 w-7 cursor-grab touch-none items-center justify-center rounded-md text-surface-300 transition hover:bg-surface-100 hover:text-primary-600 active:cursor-grabbing"
+                                        title="拖动调整综合费用顺序"
+                                        aria-label={`拖动${fee.name || formatAlphaSequence(feeIndex)}调整顺序`}
+                                      >
+                                        <GripVertical className="h-4 w-4" />
+                                      </button>
+                                    )}
                                   </td>
-                                  <td className="px-3 py-2 text-center font-semibold text-surface-500">{formatAlphaSequence(feeIndex)}</td>
-                                  <td className="px-2 py-2">
-                                    <input
-                                      value={fee.name}
-                                      onChange={(event) => updateComprehensiveFee(fee.id, { name: event.target.value })}
-                                      className="quota-template-fee-plain-field h-8 w-full bg-transparent text-xs font-medium leading-5 text-surface-500 outline-none"
-                                      placeholder="如：管理费"
-                                    />
-                                  </td>
-                                  <td className="px-2 py-2">
-                                    <SystemSelect
-                                      value={feeMethod}
-                                      onChange={(event) => updateComprehensiveFee(fee.id, getComprehensiveFeeMethodPatch(event.target.value as FeeCalcMethod, fee))}
-                                      className="quota-template-fee-plain-field input-field h-8 w-full py-0 text-xs font-medium leading-5 text-surface-500"
-                                    >
-                                      {Object.entries(feeCalcMethodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                                    </SystemSelect>
+                                  <td className="px-3 py-2 text-center">
+                                    <span className="template-fee-index">{formatAlphaSequence(feeIndex)}</span>
                                   </td>
                                   <td className="px-2 py-2">
-                                    <input
-                                      value={feeMethod === "fixed" ? "" : feeMethod === "area_unit" ? "房屋面积" : feeFormulaDrafts[fee.id] ?? formatStableFeeFormula(fee.fee_calc_base, editingTemplate.comprehensiveFees)}
-                                      onFocus={() => startEditingComprehensiveFeeFormula(fee.id, formatStableFeeFormula(fee.fee_calc_base, editingTemplate.comprehensiveFees))}
-                                      onChange={(event) => changeComprehensiveFeeFormulaDraft(fee.id, event.target.value)}
-                                      onBlur={() => commitComprehensiveFeeFormulaDraft(fee.id)}
-                                      disabled={feeMethod === "fixed" || feeMethod === "area_unit"}
-                                      aria-invalid={!!feeBaseError}
-                                      className={`quota-template-fee-plain-field input-field h-8 w-full py-1 text-xs font-medium leading-5 text-surface-500 disabled:text-surface-300 ${feeBaseError ? "border-red-300 bg-red-50 text-red-700 ring-1 ring-inset ring-red-300 focus:border-red-400 focus:ring-red-100" : ""}`}
-                                      placeholder={feeMethod === "fixed" ? "" : feeMethod === "area_unit" ? "房屋面积" : templateFeeFormulaPlaceholder}
-                                      title={feeBaseError || (feeMethod === "fixed" ? "" : feeMethod === "area_unit" ? "按当前报价房屋面积计算" : `可输入 ${templateFeeFormulaExampleText} 等`)}
-                                    />
-                                    {feeBaseError && <div className="mt-1 text-xs font-medium text-red-600">{feeBaseError}</div>}
-                                  </td>
-                                  <td className="px-2 py-2">
-                                    <div className="flex items-center justify-end gap-1.5">
+                                    <div className="relative">
                                       <input
-                                        type="text"
-                                        disabled={feeMethod === "reference"}
-                                        placeholder={feeMethod === "reference" ? "" : "0"}
-                                        {...getTemplateNumberInputProps(
-                                          `comprehensiveFees.${fee.id}.${feeMethod === "percent" ? "fee_rate" : "unit_price"}`,
-                                          feeMethod === "percent" ? fee.fee_rate : fee.unit_price,
-                                          (value) => updateComprehensiveFee(fee.id, feeMethod === "percent" ? { fee_rate: value } : { unit_price: value }),
-                                        )}
-                                        className="quota-template-fee-plain-field input-field h-8 w-16 py-1 text-right text-xs font-medium leading-5 tabular-nums text-surface-500 disabled:text-surface-300"
+                                        value={fee.name}
+                                        onChange={(event) => updateComprehensiveFee(fee.id, { name: event.target.value })}
+                                        data-template-fee-validation-target={feeNameError ? "true" : undefined}
+                                        aria-invalid={!!feeNameError}
+                                        className={`quota-template-fee-plain-field h-8 w-full text-xs font-medium leading-5 outline-none ${feeNameError ? "rounded border border-red-300 bg-red-50 pl-2 pr-7 text-red-700 ring-1 ring-inset ring-red-300" : "bg-transparent text-surface-500"}`}
+                                        placeholder="如：管理费"
                                       />
-                                      <span className="min-w-10 whitespace-nowrap text-left text-xs font-medium leading-5 text-surface-500">{feeMethod === "percent" ? "%" : feeMethod === "fixed" ? "元" : feeMethod === "area_unit" ? "元/㎡" : ""}</span>
+                                      {feeNameError && (
+                                        <span
+                                          className="absolute right-1.5 top-1/2 -translate-y-1/2 cursor-help text-red-600"
+                                          tabIndex={0}
+                                          role="button"
+                                          aria-label={feeNameError}
+                                          onMouseEnter={(event) => showTemplateFeeErrorTooltip(event.currentTarget, feeNameError)}
+                                          onMouseLeave={hideTemplateFeeErrorTooltip}
+                                          onFocus={(event) => showTemplateFeeErrorTooltip(event.currentTarget, feeNameError)}
+                                          onBlur={hideTemplateFeeErrorTooltip}
+                                        >
+                                          <AlertTriangle className="h-3.5 w-3.5" />
+                                        </span>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="px-2 py-2">
+                                    {comprehensiveFeeMode === "formula" ? (
+                                      <SystemSelect
+                                        value={fee.valueSource || "formula"}
+                                        onChange={(event) => updateComprehensiveFee(fee.id, {
+                                          valueSource: event.target.value as TemplateComprehensiveFee["valueSource"],
+                                        })}
+                                        className="quota-template-fee-plain-field input-field h-8 w-full py-0 text-xs font-medium leading-5 text-surface-500"
+                                      >
+                                        {templateFeeValueSourceOptions.map((option) => (
+                                          <option key={option.value} value={option.value}>{option.label}</option>
+                                        ))}
+                                      </SystemSelect>
+                                    ) : (
+                                      <SystemSelect
+                                        value={feeMethod}
+                                        onChange={(event) => updateComprehensiveFee(fee.id, getComprehensiveFeeMethodPatch(event.target.value as FeeCalcMethod, fee))}
+                                        className="quota-template-fee-plain-field input-field h-8 w-full py-0 text-xs font-medium leading-5 text-surface-500"
+                                      >
+                                        {Object.entries(feeCalcMethodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                                      </SystemSelect>
+                                    )}
+                                  </td>
+                                  <td className="px-2 py-2">
+                                    <div className="relative">
+                                      <input
+                                        id={`template-fee-formula-${fee.id}`}
+                                        value={formulaInputValue}
+                                        onFocus={() => {
+                                          if (feeFormulaDrafts[fee.id] === undefined) {
+                                            startEditingComprehensiveFeeFormula(fee.id, formatStableFeeFormula(fee.fee_calc_base, editingTemplate.comprehensiveFees));
+                                          }
+                                        }}
+                                        onChange={(event) => changeComprehensiveFeeFormulaDraft(fee.id, event.target.value)}
+                                        onBlur={() => commitComprehensiveFeeFormulaDraft(fee.id)}
+                                        disabled={
+                                          feeValueSource === "manual"
+                                          || feeValueSource === "direct"
+                                          || feeValueSource === "discount"
+                                          || feeMethod === "area_unit"
+                                        }
+                                        data-template-fee-validation-target={feeBaseError ? "true" : undefined}
+                                        aria-invalid={!!feeBaseError}
+                                        className={`quota-template-fee-plain-field input-field h-8 w-full py-1 text-xs font-medium leading-5 text-surface-500 disabled:text-surface-300 ${feeBaseError && feeValueSource === "formula" ? "pr-14" : "pr-8"} ${feeBaseError ? "border-red-300 bg-red-50 text-red-700 ring-1 ring-inset ring-red-300 focus:border-red-400 focus:ring-red-100" : ""}`}
+                                        placeholder={
+                                          comprehensiveFeeMode === "formula"
+                                            ? (fee.valueSource || "formula") === "manual"
+                                              ? "报价时填写金额"
+                                              : fee.valueSource === "fixed"
+                                                ? "填写固定金额，如 500"
+                                              : fee.valueSource === "direct"
+                                                ? "自动读取工程直接费"
+                                                : fee.valueSource === "discount"
+                                                  ? "自动读取报价优惠"
+                                                  : "如 A+B+优惠"
+                                            : feeMethod === "fixed"
+                                              ? ""
+                                              : feeMethod === "area_unit"
+                                                ? "房屋面积"
+                                                : feeMethod === "formula"
+                                                  ? "如 (直接费+G)*3%+A"
+                                                  : templateFeeFormulaPlaceholder
+                                        }
+                                        title={feeBaseError || (feeValueSource === "fixed" ? "填写固定金额" : feeMethod === "area_unit" ? "按当前报价房屋面积计算" : `可输入 ${templateFeeFormulaExampleText} 等`)}
+                                      />
+                                      {feeBaseError && (
+                                        <span
+                                          className={`absolute top-1/2 -translate-y-1/2 cursor-help text-red-600 ${feeValueSource === "formula" ? "right-8" : "right-1"}`}
+                                          tabIndex={0}
+                                          role="button"
+                                          aria-label={feeBaseError}
+                                          onMouseEnter={(event) => showTemplateFeeErrorTooltip(event.currentTarget, feeBaseError)}
+                                          onMouseLeave={hideTemplateFeeErrorTooltip}
+                                          onFocus={(event) => showTemplateFeeErrorTooltip(event.currentTarget, feeBaseError)}
+                                          onBlur={hideTemplateFeeErrorTooltip}
+                                        >
+                                          <AlertTriangle className="h-3.5 w-3.5" />
+                                        </span>
+                                      )}
+                                      {feeValueSource === "formula" && feeMethod !== "fixed" && feeMethod !== "area_unit" && (
+                                        <button
+                                          type="button"
+                                          tabIndex={-1}
+                                          onMouseDown={(event) => {
+                                            event.preventDefault();
+                                            const input = document.getElementById(`template-fee-formula-${fee.id}`) as HTMLInputElement | null;
+                                            if (input) openTemplateFeeSuggestion(fee.id, input);
+                                          }}
+                                          className="absolute right-1 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-surface-400 transition hover:bg-primary-50 hover:text-primary-600"
+                                          aria-label={`选择${fee.name || "费用"}公式名称`}
+                                          title="插入空间、类别或内置公式名称"
+                                        >
+                                          <ChevronDown className="h-3.5 w-3.5" />
+                                        </button>
+                                      )}
+                                      {feeValueSource === "fixed" && (
+                                        <span className="pointer-events-none absolute right-2 top-1/2 inline-flex -translate-y-1/2 items-center whitespace-nowrap text-xs font-semibold text-[#475467]">
+                                          元
+                                        </span>
+                                      )}
                                     </div>
                                   </td>
                                   <td className="px-2 py-2">
@@ -3868,7 +4523,6 @@ export default function QuotaTemplatesPage() {
                                       onToggleName={(name) => toggleComprehensiveFeeScopeName(fee.id, name)}
                                     />
                                   </td>
-                                  <td className={`px-3 py-2 text-xs font-medium leading-5 ${feeBaseError ? "text-red-600" : "text-surface-500"}`}>{feeBaseError ? "无法计算" : getTemplateFeeRulePreview(displayFee, editingTemplate.comprehensiveFees)}</td>
                                   <td className="px-2 py-2">
                                     <input
                                       value={fee.remark}
@@ -3878,14 +4532,30 @@ export default function QuotaTemplatesPage() {
                                     />
                                   </td>
                                   <td className="px-3 py-2 text-center">
-                                    <button
-                                      type="button"
-                                      onClick={() => removeComprehensiveFee(fee.id)}
-                                      className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-red-100 bg-white text-red-500 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600"
-                                      title="删除费用项目"
-                                    >
-                                      <Trash2 className="h-3.5 w-3.5" />
-                                    </button>
+                                    <div className="flex flex-nowrap items-center justify-center gap-1">
+                                      {comprehensiveFeeMode === "formula" && (
+                                        <button
+                                          type="button"
+                                          onClick={() => setComprehensiveFeeFinalTotal(fee.id)}
+                                          className={`inline-flex h-8 min-w-[62px] shrink-0 items-center justify-center whitespace-nowrap rounded px-2 text-[11px] font-semibold transition ${
+                                            fee.isFinalTotal
+                                              ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                                              : "bg-surface-100 text-surface-500 hover:bg-surface-200 hover:text-surface-700"
+                                          }`}
+                                          title="将本行结果作为报价总额"
+                                        >
+                                          {fee.isFinalTotal ? "报价总额" : "设为总额"}
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => removeComprehensiveFee(fee.id)}
+                                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-red-100 bg-white text-red-500 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+                                        title="删除费用项目"
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                      </button>
+                                    </div>
                                   </td>
                                 </tr>
                               );
@@ -3896,7 +4566,9 @@ export default function QuotaTemplatesPage() {
                     </div>
                   )}
                   <div className="mt-3 rounded-md border border-primary-100 bg-primary-50/60 px-3 py-2 text-xs leading-5 text-primary-800">
-                    基础公式支持：{templateFeeFormulaExampleText} 等；也可直接引用上方项目名称，A/B/C 对应上方综合费用编号。
+                    {comprehensiveFeeMode === "formula"
+                      ? "自由公式表按行计算，A/B/C 对应上方行编号；可根据取值方式使用公式、报价时填写、工程直接费或报价优惠；固定金额直接填写数值即可。必须指定一行“报价总额”，系统不再额外应用优惠和税率。"
+                      : `基础公式支持：${templateFeeFormulaExampleText} 等；可直接输入空间或类别名称，例如“打拆”，表示该范围下全部直接项目合计。A/B/C 对应上方综合费用编号，复杂运算请选择“自定义公式”。`}
                   </div>
                 </div>
               </section>
@@ -3926,45 +4598,10 @@ export default function QuotaTemplatesPage() {
                   <span className="text-xs text-surface-400">富文本</span>
                 </div>
                 <div className="p-4">
-                  <div className="quota-template-rich-editor overflow-hidden rounded-lg border border-surface-200 bg-white">
-                    <div className="quota-template-rich-toolbar flex flex-wrap items-center gap-1 border-b border-surface-200 bg-[#F8FAFC] px-2 py-2">
-                      {[
-                        { label: "加粗", command: "bold", icon: Bold },
-                        { label: "斜体", command: "italic", icon: Italic },
-                        { label: "下划线", command: "underline", icon: Underline },
-                        { label: "无序列表", command: "insertUnorderedList", icon: List },
-                        { label: "有序列表", command: "insertOrderedList", icon: ListOrdered },
-                        { label: "左对齐", command: "justifyLeft", icon: AlignLeft },
-                        { label: "居中", command: "justifyCenter", icon: AlignCenter },
-                        { label: "清除格式", command: "removeFormat", icon: Eraser },
-                      ].map((tool) => {
-                        const Icon = tool.icon;
-                        return (
-                          <button
-                            key={tool.command}
-                            type="button"
-                            onMouseDown={(event) => event.preventDefault()}
-                            onClick={() => runBudgetCompilationCommand(tool.command)}
-                            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-surface-600 transition hover:bg-white hover:text-surface-900"
-                            title={tool.label}
-                            aria-label={tool.label}
-                          >
-                            <Icon className="h-4 w-4" />
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <div
-                      ref={budgetCompilationEditorRef}
-                      className="quota-template-rich-content min-h-[180px] px-4 py-3 text-sm leading-7 text-surface-900 outline-none empty:before:text-surface-400 empty:before:content-[attr(data-placeholder)]"
-                      contentEditable
-                      suppressContentEditableWarning
-                      data-placeholder="填写预算编制说明、计价口径、施工边界或需要随报价书输出的说明内容"
-                      onInput={syncBudgetCompilationHtml}
-                      onBlur={syncBudgetCompilationHtml}
-                      onPaste={handleBudgetCompilationPaste}
-                    />
-                  </div>
+                  <BudgetCompilationEditor
+                    value={editingTemplate.budgetCompilationHtml}
+                    onChange={(html) => setEditingTemplate((current) => current ? { ...current, budgetCompilationHtml: html } : current)}
+                  />
                 </div>
               </section>
             </div>
@@ -3996,16 +4633,20 @@ export default function QuotaTemplatesPage() {
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
                       <p id="quota-template-unsaved-title" className="text-base font-semibold leading-6 text-surface-900">模板内容尚未保存</p>
-                      <p className="mt-2 text-sm leading-6 text-surface-600">当前定额模板有未保存的修改。保存后会写入模板；不保存会放弃本次进入编辑器后的修改。</p>
+                      <p className="mt-2 text-sm leading-6 text-surface-600">
+                        {pendingTemplateNavigationHref
+                          ? "当前定额模板有未保存的修改。离开当前页面前，请选择保存或放弃本次进入编辑器后的修改。"
+                          : "当前定额模板有未保存的修改。保存后会写入模板；不保存会放弃本次进入编辑器后的修改。"}
+                      </p>
                     </div>
-                    <button type="button" onClick={() => setUnsavedClosePromptOpen(false)} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-surface-500 hover:bg-surface-100 hover:text-surface-900" aria-label="取消关闭">
+                    <button type="button" onClick={continueEditingTemplate} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-surface-500 hover:bg-surface-100 hover:text-surface-900" aria-label="取消关闭">
                       <X className="h-4 w-4" />
                     </button>
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-2 px-5 py-5">
                   <button type="button" onClick={discardTemplateChangesAndClose} className="btn-secondary min-h-9 px-3 text-xs">不保存并关闭</button>
-                  <button type="button" onClick={() => setUnsavedClosePromptOpen(false)} className="btn-secondary min-h-9 px-3 text-xs">继续编辑</button>
+                  <button type="button" onClick={continueEditingTemplate} className="btn-secondary min-h-9 px-3 text-xs">继续编辑</button>
                   <button type="button" onClick={saveEditingTemplate} className="btn-primary min-h-9 px-3 text-xs" disabled={templateSaveStatus !== "idle"}>
                     {templateSaveStatus === "saving" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                     <span>保存并关闭</span>
@@ -4265,7 +4906,7 @@ export default function QuotaTemplatesPage() {
           )}
           {quotaPickerTarget && (
             <div
-              className="quota-template-picker fixed inset-0 z-[9998] flex items-center justify-center bg-[#0b1220]/35 px-4 py-6 backdrop-blur-[2px]"
+              className="quota-template-picker fixed inset-0 z-[120] flex items-center justify-center bg-[#0b1220]/35 px-4 py-6 backdrop-blur-[2px]"
               onClick={(event) => {
                 event.stopPropagation();
                 setQuotaPickerTarget(null);
@@ -4630,6 +5271,58 @@ export default function QuotaTemplatesPage() {
           onRemove={removeTemplateQuantityEditorFormula}
         />
       )}
+      {templateFeeSuggestion && typeof document !== "undefined" && createPortal(
+        <div
+          ref={templateFeeSuggestionMenuRef}
+          className="system-select-menu fixed z-[10020] flex flex-col overflow-hidden rounded-[10px] border border-[#dce8f8] bg-white p-1.5 shadow-[0_18px_44px_rgba(27,51,88,0.14),0_4px_14px_rgba(27,51,88,0.06)]"
+          style={{
+            left: templateFeeSuggestion.left,
+            top: templateFeeSuggestion.top,
+            width: templateFeeSuggestion.width,
+            maxHeight: 300,
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          role="listbox"
+          aria-label="公式名称建议"
+        >
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            {visibleTemplateFeeSuggestionOptions.map((option, index) => {
+              const active = index === Math.min(templateFeeSuggestionActiveIndex, visibleTemplateFeeSuggestionOptions.length - 1);
+              return (
+              <button
+                key={option.key}
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => setTemplateFeeSuggestionActiveIndex(index)}
+                onClick={() => insertTemplateFeeSuggestion(option.label)}
+                className={`flex min-h-9 w-full items-center justify-between gap-2 rounded-[8px] px-3 py-2 text-left text-sm font-semibold transition-colors ${
+                  active
+                    ? "bg-[#407AFF] text-white"
+                    : "text-[#34445a] hover:bg-[#f4f8ff] hover:text-[#162033]"
+                }`}
+                role="option"
+                aria-selected={active}
+              >
+                <span className="min-w-0 truncate">{option.label}</span>
+                {active && <Check className="h-4 w-4 shrink-0" />}
+              </button>
+              );
+            })}
+          </div>
+        </div>,
+        document.body,
+      )}
+      {templateFeeErrorTooltip && typeof document !== "undefined" && createPortal(
+        <div
+          className="pointer-events-none fixed z-[10030] flex max-w-[260px] items-start gap-2 rounded-[8px] border border-red-100 bg-white px-3 py-2 text-xs font-medium leading-5 text-red-700 shadow-[0_12px_30px_rgba(127,29,29,0.14)]"
+          style={{ left: templateFeeErrorTooltip.left, top: templateFeeErrorTooltip.top }}
+          role="tooltip"
+        >
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span className="whitespace-pre-wrap">{templateFeeErrorTooltip.message}</span>
+        </div>,
+        document.body,
+      )}
       <style jsx global>{`
         .quota-template-space-config {
           overflow: hidden;
@@ -4693,6 +5386,25 @@ export default function QuotaTemplatesPage() {
           background: #fbfdff;
           padding: 6px;
           box-shadow: 0 10px 28px rgba(38, 56, 84, 0.08);
+        }
+        .quota-template-fee-scope-popover-copy {
+          padding: 7px 8px 9px;
+          color: #526275;
+        }
+        .quota-template-fee-scope-popover-copy strong {
+          display: block;
+          color: #34445a;
+          font-size: 12px;
+          font-weight: 700;
+          line-height: 18px;
+        }
+        .quota-template-fee-scope-popover-copy span {
+          display: block;
+          margin-top: 3px;
+          color: #7a8699;
+          font-size: 11px;
+          font-weight: 500;
+          line-height: 16px;
         }
         .quota-template-fee-scope-popover-segment {
           display: grid;
@@ -6575,30 +7287,6 @@ export default function QuotaTemplatesPage() {
         }
         .quote-item-row-drop-after > td {
           box-shadow: inset 0 -2px 0 rgba(64, 122, 255, 0.95) !important;
-        }
-        .quota-template-rich-editor {
-          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
-        }
-        .quota-template-rich-toolbar button {
-          border: 1px solid transparent;
-        }
-        .quota-template-rich-toolbar button:hover {
-          border-color: #dce4ef;
-        }
-        .quota-template-rich-content p {
-          margin: 0 0 8px;
-        }
-        .quota-template-rich-content ul,
-        .quota-template-rich-content ol {
-          margin: 0 0 8px 20px;
-          padding: 0;
-        }
-        .quota-template-rich-content li {
-          margin: 0 0 4px;
-        }
-        .quota-template-rich-content b,
-        .quota-template-rich-content strong {
-          font-weight: 600;
         }
         @keyframes quote-item-settle {
           0% { transform: translateY(-8px); }

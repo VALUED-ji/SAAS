@@ -77,6 +77,7 @@ export default function QuotaLibraryPage() {
   const [quotaItems, setQuotaItems] = useState<QuotaItem[]>(initialQuotaItems);
   const [quotaItemsLoaded, setQuotaItemsLoaded] = useState(false);
   const quotaItemsPersistSkipRef = useRef(true);
+  const quotaItemsPersistSkipOnceRef = useRef(false);
   const quotaDictionariesLoadedRef = useRef(false);
   const activeStoreScopeOptionsRef = useRef<string[]>([]);
   const orgUnitsLoadedRef = useRef(false);
@@ -98,6 +99,7 @@ export default function QuotaLibraryPage() {
   const [importIsExample, setImportIsExample] = useState(false);
   const [hasRealImportFile, setHasRealImportFile] = useState(false);
   const [importErrors, setImportErrors] = useState<QuotaImportError[]>([]);
+  const [importSubmitting, setImportSubmitting] = useState(false);
   const [exportingQuota, setExportingQuota] = useState(false);
   const [importScope, setImportScope] = useState("");
   const [unitOptionsOpen, setUnitOptionsOpen] = useState(false);
@@ -111,14 +113,14 @@ export default function QuotaLibraryPage() {
   const [historyError, setHistoryError] = useState("");
   const priceSceneFieldRef = useRef<HTMLDivElement | null>(null);
 
-  const saveQuotaItemsToServer = useCallback((nextItems: QuotaItem[]) => {
-    fetch("/api/quota/library", {
+  const saveQuotaItemsToServer = useCallback(async (nextItems: QuotaItem[]) => {
+    const response = await fetch("/api/quota/library", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ items: nextItems }),
-    }).catch(() => {
-      // 保留本地缓存兜底，网络异常时不打断用户编辑。
     });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data?.message || "保存基装定额失败");
   }, []);
 
   useEffect(() => {
@@ -302,7 +304,13 @@ export default function QuotaLibraryPage() {
       quotaItemsPersistSkipRef.current = false;
       return;
     }
-    saveQuotaItemsToServer(quotaItems);
+    if (quotaItemsPersistSkipOnceRef.current) {
+      quotaItemsPersistSkipOnceRef.current = false;
+      return;
+    }
+    void saveQuotaItemsToServer(quotaItems).catch(() => {
+      // 保留本地缓存兜底，网络异常时不打断用户编辑。
+    });
   }, [quotaItems, quotaItemsLoaded, saveQuotaItemsToServer]);
   const storeFilterOptions = storeScopeOptions;
   const importTargetScope = currentUserStore?.name?.trim() || importScope.trim();
@@ -687,7 +695,8 @@ export default function QuotaLibraryPage() {
     setNotice(editMode === "create" ? `已新增定额：${nextItem.name}` : `已保存定额：${nextItem.name}`);
     setEditingItem(null);
   };
-  const handleImportQuota = () => {
+  const handleImportQuota = async () => {
+    if (importSubmitting) return;
     if (importIsExample) {
       setImportMessage("当前内容只是示例，用于查看格式，不能直接导入。请上传真实 Excel 文件后再确认导入。");
       return;
@@ -713,17 +722,29 @@ export default function QuotaLibraryPage() {
       return;
     }
     const importedCodes = new Set(result.items.map((item) => item.code));
-    setQuotaItems((current) => [
+    const nextItems = [
       ...result.items,
-      ...current.filter((item) => !importedCodes.has(item.code)),
-    ]);
-    setImportMessage("");
-    setImportText("");
-    setImportIsExample(false);
-    setHasRealImportFile(false);
-    setImportErrors([]);
-    setImportOpen(false);
-    setNotice(`已导入 ${result.items.length} 条定额到${importTargetScope}，定额编码已按门店自动生成`);
+      ...quotaItems.filter((item) => !importedCodes.has(item.code)),
+    ];
+    setImportSubmitting(true);
+    setImportMessage(`正在导入 ${result.items.length} 条定额到${importTargetScope}，请稍候...`);
+    try {
+      await saveQuotaItemsToServer(nextItems);
+      window.localStorage.setItem(QUOTA_LIBRARY_STORAGE_KEY, JSON.stringify(nextItems));
+      quotaItemsPersistSkipOnceRef.current = true;
+      setQuotaItems(nextItems);
+      setImportMessage("");
+      setImportText("");
+      setImportIsExample(false);
+      setHasRealImportFile(false);
+      setImportErrors([]);
+      setImportOpen(false);
+      setNotice(`已导入 ${result.items.length} 条定额到${importTargetScope}，定额编码已按门店自动生成`);
+    } catch (error: any) {
+      setImportMessage(error?.message || "导入保存失败，请检查网络后重试。");
+    } finally {
+      setImportSubmitting(false);
+    }
   };
   const handleImportScopeChange = (nextScope: string) => {
     setImportScope(nextScope);
@@ -1437,8 +1458,8 @@ export default function QuotaLibraryPage() {
                 <p className="qm-modal-title text-base font-semibold text-surface-900">导入定额</p>
                 <p className="qm-modal-subtitle mt-0.5 text-xs text-surface-500">请下载模板填写后上传 Excel 文件，系统会预览导入内容。</p>
               </div>
-              <button type="button" onClick={() => setImportOpen(false)} className="qm-icon-button inline-flex h-9 w-9 items-center justify-center text-surface-500 hover:bg-surface-100 hover:text-surface-900" aria-label="关闭">
-                <X className="h-4 w-4" />
+              <button type="button" onClick={() => setImportOpen(false)} disabled={importSubmitting} className="qm-icon-button inline-flex h-9 w-9 items-center justify-center text-surface-500 hover:bg-surface-100 hover:text-surface-900 disabled:cursor-not-allowed disabled:opacity-50" aria-label="关闭">
+                {importSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
               </button>
             </div>
             <div className="qm-import-actions border-b border-surface-200 bg-surface-50 px-5 py-4">
@@ -1452,7 +1473,7 @@ export default function QuotaLibraryPage() {
                     <span className="mt-0.5 block text-xs text-surface-500">按模板字段填写更稳妥</span>
                   </span>
                 </button>
-                <label className="group flex min-h-[72px] cursor-pointer items-center gap-3 rounded-xl border border-primary-200 bg-white px-4 text-left transition hover:bg-primary-50">
+                <label className={`group flex min-h-[72px] items-center gap-3 rounded-xl border border-primary-200 bg-white px-4 text-left transition hover:bg-primary-50 ${importSubmitting ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
                   <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary-50 text-primary-700 group-hover:bg-white">
                     <Upload className="h-4 w-4" />
                   </span>
@@ -1462,6 +1483,7 @@ export default function QuotaLibraryPage() {
                   </span>
                   <input
                     type="file"
+                    disabled={importSubmitting}
                     accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
                     className="hidden"
                     onChange={(event) => {
@@ -1484,7 +1506,7 @@ export default function QuotaLibraryPage() {
                       {currentUserStore.name}
                     </div>
                   ) : (
-                    <SystemSelect value={importScope} onChange={(event) => handleImportScopeChange(event.target.value)} className="input-field h-10 w-full py-0 lg:w-48">
+                    <SystemSelect value={importScope} onChange={(event) => handleImportScopeChange(event.target.value)} disabled={importSubmitting} className="input-field h-10 w-full py-0 lg:w-48">
                       <option value="">请选择导入门店</option>
                       {activeStoreScopeOptions.map((scope) => <option key={scope} value={scope}>{scope}</option>)}
                     </SystemSelect>
@@ -1497,16 +1519,17 @@ export default function QuotaLibraryPage() {
                   <span className="flex items-center gap-3 text-xs text-surface-500">
                     {importIsExample && <span className="rounded-full bg-amber-50 px-2 py-0.5 font-semibold text-amber-700">当前为示例，不会导入</span>}
                     {!hasRealImportFile && (
-                      <button type="button" onClick={fillImportExample} className="inline-flex items-center gap-1 font-semibold text-primary-700 hover:text-primary-800">
+                      <button type="button" onClick={fillImportExample} disabled={importSubmitting} className="inline-flex items-center gap-1 font-semibold text-primary-700 hover:text-primary-800 disabled:cursor-not-allowed disabled:opacity-50">
                         <Pencil className="h-3.5 w-3.5" />
                         查看示例
                       </button>
                     )}
                     {hasRealImportFile && (
-                      <label className="cursor-pointer font-semibold text-primary-700 hover:text-primary-800">
+                      <label className={`font-semibold text-primary-700 hover:text-primary-800 ${importSubmitting ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
                         重新选择文件
                         <input
                           type="file"
+                          disabled={importSubmitting}
                           accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
                           className="hidden"
                           onChange={(event) => {
@@ -1575,7 +1598,8 @@ export default function QuotaLibraryPage() {
 	                )}
               </div>
               {importMessage && (
-                <div className={importErrors.length > 0 ? "flex items-center justify-between gap-3 rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-700" : "rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700"}>
+                <div className={importErrors.length > 0 ? "flex items-center justify-between gap-3 rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-700" : importSubmitting ? "flex items-center gap-2 rounded-lg bg-primary-50 px-3 py-2 text-xs font-medium text-primary-700" : "rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700"}>
+                  {importSubmitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                   <span>{importMessage}</span>
                   {importErrors.length > 0 && (
                     <button type="button" onClick={() => downloadQuotaImportErrors(importErrors)} className="shrink-0 rounded-lg border border-red-200 bg-white px-2.5 py-1 font-semibold text-red-700 hover:bg-red-50">
@@ -1598,8 +1622,11 @@ export default function QuotaLibraryPage() {
               </div>
             </div>
             <div className="qm-modal-footer flex justify-end gap-2 border-t border-surface-200 px-5 py-4">
-              <button type="button" onClick={() => setImportOpen(false)} className="btn-secondary">取消</button>
-              <button type="button" onClick={handleImportQuota} className="btn-primary">确认导入</button>
+              <button type="button" onClick={() => setImportOpen(false)} disabled={importSubmitting} className="btn-secondary disabled:cursor-not-allowed disabled:opacity-50">取消</button>
+              <button type="button" onClick={handleImportQuota} disabled={importSubmitting} className="btn-primary disabled:cursor-not-allowed disabled:opacity-70">
+                {importSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
+                <span>{importSubmitting ? "导入中" : "确认导入"}</span>
+              </button>
             </div>
           </div>
         </div>

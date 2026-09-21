@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import { formatQuotationQuantityFormulaRows } from "@/lib/quotationQuantityLinks";
 import {
   applyTemplateSpaceQuantityLinks,
+  getTemplateFeeRulePreview,
+  makeEmptyTemplate,
   makeSpaceCopy,
   makeSpaceQuotaItem,
+  normalizeComprehensiveFees,
   normalizeSpaceQuotaItem,
   repairTemplateSpaceQuantityLinksAfterDeletion,
   type TemplateSpace,
@@ -38,6 +41,51 @@ function formula(itemId: string, terms: Array<{ operator: "add" | "subtract"; it
 }
 
 describe("quota template quantity presets", () => {
+  it("starts new templates with only the direct project fee as the final total", () => {
+    const template = makeEmptyTemplate();
+
+    expect(template.comprehensiveFees).toHaveLength(1);
+    expect(template.comprehensiveFees[0]).toMatchObject({
+      name: "工程直接费",
+      valueSource: "direct",
+      fee_calc_method: "formula",
+      fee_calc_base: "直接费",
+      isFinalTotal: true,
+    });
+  });
+
+  it("converts legacy fixed comprehensive fees to numeric formulas", () => {
+    const [fixedFee, manualFee] = normalizeComprehensiveFees([
+      {
+        id: "fee-fixed",
+        name: "固定设计费",
+        valueSource: "fixed",
+        fee_calc_method: "fixed",
+        unit_price: 500,
+      },
+      {
+        id: "fee-manual",
+        name: "报价时填写",
+        valueSource: "manual",
+        fee_calc_method: "fixed",
+        unit_price: 300,
+      },
+    ]);
+
+    expect(fixedFee).toMatchObject({
+      valueSource: "fixed",
+      fee_calc_method: "formula",
+      fee_calc_base: "500",
+      unit_price: 0,
+    });
+    expect(getTemplateFeeRulePreview(fixedFee)).toBe("固定金额 500 元");
+    expect(manualFee).toMatchObject({
+      valueSource: "manual",
+      fee_calc_method: "fixed",
+      unit_price: 0,
+    });
+  });
+
   it("normalizes preset quantity and formula", () => {
     const normalized = normalizeSpaceQuotaItem({
       id: "quota-a",

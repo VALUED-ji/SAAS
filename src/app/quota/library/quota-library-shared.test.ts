@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildQuotaExportRows, calculateQuotaExportLayout, quotaExportHeaders, type QuotaItem } from "./quota-library-shared";
+import { buildQuotaExportRows, calculateQuotaExportLayout, parseQuotaImport, quotaExportHeaders, quotaImportHeaders, type QuotaItem } from "./quota-library-shared";
 
 describe("quota library export", () => {
   it("keeps the export headers and item values aligned", () => {
@@ -67,5 +67,43 @@ describe("quota library export", () => {
     expect(layout.widths[7]).toBeLessThanOrEqual(116);
     expect(layout.rowHeights[1]).toBeGreaterThan(30);
     expect(layout.rowHeights[1]).toBeLessThanOrEqual(120);
+  });
+});
+
+describe("quota library import", () => {
+  it("keeps the import template price columns aligned with the list", () => {
+    expect(quotaImportHeaders.slice(5, 7)).toEqual(["材料单价", "人工单价"]);
+  });
+
+  it("imports the new template order as material price before labor price", () => {
+    const text = [
+      quotaImportHeaders.join("\t"),
+      ["标准", "泥瓦工程", "墙砖铺贴", "基层清理后铺贴", "㎡", "10", "52", "7", "3", "0", "否"].join("\t"),
+    ].join("\n");
+
+    const result = parseQuotaImport(text, [], ["番禺店"], "番禺店");
+
+    expect(result.errors).toEqual([]);
+    expect(result.items[0]).toMatchObject({
+      materialPrice: 10,
+      laborPrice: 52,
+      totalPrice: 62,
+    });
+  });
+
+  it("still imports old header order by column labels", () => {
+    const text = [
+      ["价格类型", "分类", "项目名称", "施工说明", "单位", "人工单价", "材料单价", "内部人工成本", "内部材料成本", "损耗率", "是否特价"].join("\t"),
+      ["标准", "泥瓦工程", "墙砖铺贴", "基层清理后铺贴", "㎡", "52", "10", "3", "7", "0", "否"].join("\t"),
+    ].join("\n");
+
+    const result = parseQuotaImport(text, [], ["番禺店"], "番禺店");
+
+    expect(result.errors).toEqual([]);
+    expect(result.items[0]).toMatchObject({
+      materialPrice: 10,
+      laborPrice: 52,
+      totalPrice: 62,
+    });
   });
 });

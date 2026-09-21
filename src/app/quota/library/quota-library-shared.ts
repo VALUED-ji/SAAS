@@ -53,7 +53,7 @@ export const DEFAULT_QUOTA_SCOPE = "全部门店";
 export const DEFAULT_PRICE_SCENE = "标准";
 export const FALLBACK_STORE_SCOPES = ["番禺店", "新塘店"];
 export const COMMON_QUOTA_UNITS = ["㎡", "m", "项", "个", "套", "处", "间", "樘", "组", "台", "块", "片", "根", "卷", "桶", "kg"];
-export const quotaImportHeaders = ["价格类型", "分类", "项目名称", "施工说明", "单位", "人工单价", "材料单价", "内部人工成本", "内部材料成本", "损耗率", "是否特价"];
+export const quotaImportHeaders = ["价格类型", "分类", "项目名称", "施工说明", "单位", "材料单价", "人工单价", "内部人工成本", "内部材料成本", "损耗率", "是否特价"];
 export const quotaExportHeaders = ["定额编码", "分类", "项目名称", "单位", "材料单价", "人工单价", "客户单价", "施工说明", "适用门店", "价格类型", "状态"];
 export const requiredQuotaImportHeaders = new Set(["项目名称", "单位", "人工单价", "材料单价"]);
 export const QUOTA_LIBRARY_STORAGE_KEY = "zxgj_quota_library_items";
@@ -476,14 +476,14 @@ export function parseQuotaImport(text: string, existingItems: QuotaItem[], allSc
     const category = readCell(row, legacyNoHeaderRow ? 0 : 1, ["分类", "定额分类", "专业"]).trim() || "未分类";
     const name = readCell(row, legacyNoHeaderRow ? 1 : 2, ["项目名称", "名称", "定额名称"]).trim();
     const unit = readCell(row, legacyNoHeaderRow ? 3 : 4, ["单位", "计量单位"]).trim();
-    const laborPrice = parseImportAmount(readCell(row, legacyNoHeaderRow ? 4 : 5, ["人工费", "人工单价"]));
-    const materialPrice = parseImportAmount(readCell(row, legacyNoHeaderRow ? 5 : 6, ["材料费", "材料单价"]));
+    const materialPrice = parseImportAmount(readCell(row, 5, ["材料费", "材料单价"]));
+    const laborPrice = parseImportAmount(readCell(row, legacyNoHeaderRow ? 4 : 6, ["人工费", "人工单价"]));
     const reasons = [
       isDisallowedQuotaScope(scope) ? "请选择导入门店，且不能为全部门店通用" : "",
       !name ? "项目名称不能为空" : "",
       !unit ? "单位不能为空" : "",
-      isNegativeImportAmount(readCell(row, legacyNoHeaderRow ? 4 : 5, ["人工费", "人工单价"])) ? "人工单价不能为负数" : "",
-      isNegativeImportAmount(readCell(row, legacyNoHeaderRow ? 5 : 6, ["材料费", "材料单价"])) ? "材料单价不能为负数" : "",
+      isNegativeImportAmount(readCell(row, 5, ["材料费", "材料单价"])) ? "材料单价不能为负数" : "",
+      isNegativeImportAmount(readCell(row, legacyNoHeaderRow ? 4 : 6, ["人工费", "人工单价"])) ? "人工单价不能为负数" : "",
     ].filter(Boolean);
     if (reasons.length > 0) {
       errors.push({
@@ -704,16 +704,28 @@ export function buildQuotaImportPreviewData(text: string) {
     { header: "项目名称", fallbackIndex: 2, labels: ["项目名称", "名称", "定额名称"] },
     { header: "施工说明", fallbackIndex: 3, labels: ["施工说明", "施工描述", "工艺说明", "说明"] },
     { header: "单位", fallbackIndex: 4, labels: ["单位", "计量单位"] },
-    { header: "人工单价", fallbackIndex: 5, labels: ["人工费", "人工单价"] },
-    { header: "材料单价", fallbackIndex: 6, labels: ["材料费", "材料单价"] },
+    { header: "材料单价", fallbackIndex: 5, labels: ["材料费", "材料单价"] },
+    { header: "人工单价", fallbackIndex: 6, labels: ["人工费", "人工单价"] },
     { header: "内部人工成本", fallbackIndex: 7, labels: ["内部人工成本", "人工成本", "成本人工单价"] },
     { header: "内部材料成本", fallbackIndex: 8, labels: ["内部材料成本", "材料成本", "成本材料单价"] },
     { header: "损耗率", fallbackIndex: 9, labels: ["损耗率", "材料损耗率"] },
     { header: "是否特价", fallbackIndex: 10, labels: ["是否特价", "是否特价项目", "特价"] },
   ];
+  const legacyPreviewFields = [
+    { header: "分类", fallbackIndex: 0, labels: ["分类", "定额分类", "专业"] },
+    { header: "项目名称", fallbackIndex: 1, labels: ["项目名称", "名称", "定额名称"] },
+    { header: "施工说明", fallbackIndex: 2, labels: ["施工说明", "施工描述", "工艺说明", "说明"] },
+    { header: "单位", fallbackIndex: 3, labels: ["单位", "计量单位"] },
+    { header: "人工单价", fallbackIndex: 4, labels: ["人工费", "人工单价"] },
+    { header: "材料单价", fallbackIndex: 5, labels: ["材料费", "材料单价"] },
+    { header: "内部人工成本", fallbackIndex: 6, labels: ["内部人工成本", "人工成本", "成本人工单价"] },
+    { header: "内部材料成本", fallbackIndex: 7, labels: ["内部材料成本", "材料成本", "成本材料单价"] },
+    { header: "损耗率", fallbackIndex: 8, labels: ["损耗率", "材料损耗率"] },
+    { header: "是否特价", fallbackIndex: 9, labels: ["是否特价", "是否特价项目", "特价"] },
+  ];
   const legacyNoHeaderRows = !hasHeader && dataRows.some((row) => row.length - fallbackDataOffset <= quotaImportHeaders.length - 1);
   const visibleFields = legacyNoHeaderRows
-    ? previewFields.slice(1).map((field, index) => ({ ...field, fallbackIndex: index }))
+    ? legacyPreviewFields
     : hasHeader
     ? previewFields.filter((field) => findHeaderIndex(field.labels) >= 0)
     : previewFields;
@@ -868,7 +880,7 @@ export async function downloadQuotaImportTemplate() {
     ["项目名称", "必填", "填写定额项目名称，如墙砖铺贴 300x600。"],
     ["施工说明", "选填", "填写施工范围、工艺要求、验收口径等。"],
     ["单位", "必填", "如 ㎡、m、个、项；不能为空。"],
-    ["人工单价/材料单价", "必填", "可填写 0，不能为负数，客户单价由系统自动合计。"],
+    ["材料单价/人工单价", "必填", "可填写 0，不能为负数，客户单价由系统自动合计。"],
     ["内部人工成本/内部材料成本", "数字", "用于工地成本管控预算核算，不会展示给客户。"],
     ["损耗率", "数字", "材料预算成本会按内部材料成本 × 数量 ×（1 + 损耗率）计算。"],
     ["是否特价", "选填", "填写“是”表示特价项目；填写“否”或留空表示普通项目。"],
