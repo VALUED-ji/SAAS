@@ -63,6 +63,30 @@ function safeJsonStringify(value: unknown) {
   return JSON.stringify(value ?? {});
 }
 
+function makeTemplateSummary(value: any) {
+  if (!value || typeof value !== "object") return null;
+  return {
+    id: cleanText(value.id || value.template_id),
+    name: cleanText(value.name) || "未命名模板",
+    type: cleanText(value.type) || "半包",
+    remark: cleanText(value.remark || value.description || value.pricingRule),
+    status: cleanText(value.status) || "enabled",
+    createdByName: cleanText(value.createdByName || value.created_by_name || value.creatorName || value.creator) || "系统管理员",
+    autoScope: value.autoScope || value.scope || value.accessScope || null,
+    quoteConfig: value.quoteConfig ? {
+      mode: cleanText(value.quoteConfig.mode) || "list",
+    } : { mode: "list" },
+    createdAt: cleanText(value.createdAt || value.created_at || value.updatedAt),
+    updatedAt: cleanText(value.updatedAt || value.updated_at),
+    spaces: [],
+    projectGroups: [],
+    comprehensiveFeeMode: "formula",
+    comprehensiveFees: [],
+    appendixNote: "",
+    budgetCompilationHtml: "",
+  };
+}
+
 function getActiveOrgOptions(db: Db, companyId: string) {
   const rows = db.prepare(`
     SELECT id, name, type, parent_id, COALESCE(is_active, 1) as is_active
@@ -187,6 +211,7 @@ export async function GET(req: NextRequest) {
   const db = getDb();
   ensureQuotaTemplatesTable(db);
   const templateId = cleanText(req.nextUrl.searchParams.get("templateId"));
+  const summaryOnly = req.nextUrl.searchParams.get("summary") === "1";
   const { orgOptions, branchOptions } = getManageableBranchOptions(db, auth);
   backfillBranchTemplateScopes(db, auth.companyId, orgOptions, branchOptions);
   const branchIds = branchOptions.map((option) => option.id);
@@ -220,6 +245,7 @@ export async function GET(req: NextRequest) {
   `).all(auth.companyId, ...branchIds) as Array<{ payload?: string | null }>;
   const templates = rows
     .map((row) => safeJsonParse(row.payload, null))
+    .map((template) => summaryOnly ? makeTemplateSummary(template) : template)
     .filter(Boolean);
   return NextResponse.json({
     templates,
