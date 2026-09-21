@@ -8,6 +8,8 @@ import { getBranchSettingsForCustomer, getBranchSettingsForOrgUnit } from "@/lib
 import {
   calculateChargeableOtherFeeTotals,
   calculateOtherFeeTotals,
+  calculateFormulaTableTotal,
+  buildDirectFeeScopeReferences,
   getFeeFormulaText,
   getFeeRuleText,
   getLegacyManagementFeeRate,
@@ -29,6 +31,7 @@ import { createQuotationShareShortUrl } from "@/lib/quotationShareShortLinks";
 
 type ExportItem = {
   id?: string;
+  client_key?: string;
   category: string;
   space?: string | null;
   work_type_id?: string | null;
@@ -53,6 +56,8 @@ type ExportItem = {
   fee_scope_mode?: string | null;
   fee_scope_space_ids?: string[] | string | null;
   fee_scope_space_names?: string[] | string | null;
+  cost_source?: string | null;
+  fee_value_source?: string | null;
 };
 
 type DiscountRule = {
@@ -275,6 +280,13 @@ function parseSettings(value: string | null) {
   } catch {
     return {};
   }
+}
+
+function getStoredQuotationValidUntil(settings: unknown) {
+  const value = settings && typeof settings === "object" ? settings as Record<string, unknown> : {};
+  return [value.quotationValidUntil, value.validUntil, value.effectiveUntil, value.valid_until]
+    .map((item) => String(item || "").trim())
+    .find((item) => /^\d{4}-\d{2}-\d{2}$/.test(item)) || "";
 }
 
 function roundMoney(value: number) {
@@ -568,15 +580,18 @@ function getDiscountScopeOptions(items: ExportItem[], settings: any, totals: { o
     .filter((item) => !isBaseCategory(item.category) && !isOtherCategory(item.category) && !isMainMaterialCategory(item.category))
     .reduce((sum, item) => roundMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
   const discountableDirectAmount = discountableBaseAmount + discountableProductAmount + discountableCustomCategoryAmount;
+  const totalDiscountAmount =
+    settings?.comprehensiveFeeMode === "formula" && String(settings?.formulaFinalFeeItemId || "").trim()
+      ? totals.otherAmount
+      : discountableDirectAmount + totals.otherAmount;
   const fixedOptions: DiscountScopeOption[] = [
     { value: "base", label: "基装直接费", amount: discountableBaseAmount },
     { value: "base_labor", label: "基装直接费（人工）", amount: discountableItems.reduce((sum, item) => roundMoney(sum + getItemLaborSubtotal(item)), 0) },
     { value: "base_material", label: "基装直接费（材料）", amount: discountableItems.reduce((sum, item) => roundMoney(sum + getItemMaterialSubtotal(item)), 0) },
     { value: "product", label: "产品费用", amount: discountableProductAmount },
     { value: "custom_cabinet", label: "定制柜费用", amount: customCabinetAmount },
-    { value: "other", label: "综合费用", amount: totals.otherAmount },
     { value: "direct", label: "工程直接费", amount: discountableDirectAmount },
-    { value: "total", label: "总价", amount: discountableDirectAmount + totals.otherAmount },
+    { value: "total", label: "总价", amount: totalDiscountAmount },
   ];
   const fixedLabels = new Set(fixedOptions.map((option) => option.label));
   const dynamicOptions = customCategoryOptions.filter((option) => !fixedLabels.has(option.label) && !/组合包|套餐|一口价|package|定制柜/i.test(option.label));
@@ -652,6 +667,10 @@ function getDiscountRuleValue(rule: DiscountRule) {
   return rule.scope || "total";
 }
 
+function isRemovedOtherFeeDiscountScope(value: string) {
+  return value.startsWith("fee:");
+}
+
 function getDiscountRuleScope(rule: DiscountRule, items: ExportItem[], settings: any, totals: { otherAmount: number }, houseArea = 0) {
   const options = rule.type === "space"
     ? getDiscountSpaceOptions(items, settings)
@@ -659,6 +678,9 @@ function getDiscountRuleScope(rule: DiscountRule, items: ExportItem[], settings:
       ? getDiscountWorkTypeOptions(items, settings)
       : getDiscountScopeOptions(items, settings, totals, houseArea);
   const value = getDiscountRuleValue(rule);
+  if (rule.type === "fee" && isRemovedOtherFeeDiscountScope(value)) {
+    return options.find((option) => option.value === value);
+  }
   return options.find((option) => option.value === value)
     || options.find((option) => option.value === "total")
     || options[0];
@@ -743,6 +765,16 @@ function buildFeeFormulaContext(items: ExportItem[], categories: string[] = [], 
   });
 
   const customCategoryAmount = Object.values(categoryAmounts).reduce((sum, amount) => sum + toNumber(amount), 0);
+  const directItems = items
+    .filter((item) => !isOtherCategory(item.category))
+    .map((item) => ({
+      category: getCategoryKey(item.category),
+      categoryLabel: getCategoryLabel(item.category),
+      space: inferItemSpace(item),
+      total: getBaseOrMaterialItemTotal(item),
+      laborAmount: getItemLaborSubtotal(item),
+      materialCostAmount: getItemMaterialSubtotal(item),
+    }));
   return {
     houseArea,
     mainMaterialAmount,
@@ -750,16 +782,8 @@ function buildFeeFormulaContext(items: ExportItem[], categories: string[] = [], 
     laborAmount,
     materialCostAmount,
     categoryAmounts,
-    directItems: items
-      .filter((item) => !isOtherCategory(item.category))
-      .map((item) => ({
-        category: getCategoryKey(item.category),
-        categoryLabel: getCategoryLabel(item.category),
-        space: inferItemSpace(item),
-        total: getBaseOrMaterialItemTotal(item),
-        laborAmount: getItemLaborSubtotal(item),
-        materialCostAmount: getItemMaterialSubtotal(item),
-      })),
+    scopeReferences: buildDirectFeeScopeReferences(directItems),
+    directItems,
   };
 }
 
@@ -768,12 +792,12 @@ function shouldShowAutoOtherFeeRule(item: ExportItem) {
   return name === "工程直接费" || name === "直接费" || name === "工程总造价" || name === "总造价";
 }
 
-function getOtherFeeRuleDisplay(item: ExportItem, total: number, context?: FeeFormulaContext) {
+function getOtherFeeRuleDisplay(item: ExportItem, total: number, context?: FeeFormulaContext, items?: ExportItem[]) {
   const remark = String(item.remark || "").trim();
   if (remark) return remark;
   if (!shouldShowAutoOtherFeeRule(item)) return remark;
 
-  const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context);
+  const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context, items);
   return rule;
 }
 
@@ -1402,7 +1426,9 @@ function addOtherFeeSection(
   const engineeringDirectRule = hasProductDirectAmount
     ? `基装直接费 ${formatExportAmount(baseAmount)} + 产品直接费 ${formatExportAmount(materialAmount)} = ${formatExportAmount(engineeringDirectAmount)}`
     : `基装直接费 ${formatExportAmount(baseAmount)} = ${formatExportAmount(engineeringDirectAmount)}`;
-  const otherAmount = calculateChargeableOtherFeeTotals(items, baseAmount, materialAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
+  const formulaTableMode = settings?.comprehensiveFeeMode === "formula" && Boolean(String(settings.formulaFinalFeeItemId || "").trim());
+  const feeSequenceOffset = formulaTableMode ? 0 : 1;
+  const otherAmount = formulaTableMode ? finalAmount : calculateChargeableOtherFeeTotals(items, baseAmount, materialAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
   const finalFormulaParts = ["工程直接费"];
   const finalRuleParts = [`工程直接费 ${formatExportAmount(engineeringDirectAmount)}`];
   if (otherAmount > 0) {
@@ -1417,8 +1443,8 @@ function addOtherFeeSection(
     finalFormulaParts.push("- 优惠");
     finalRuleParts.push(`- 优惠 ${formatExportAmount(discount)}`);
   }
-  const discountRows = getDiscountRuleRows(allItems, settings, { otherAmount }, houseArea);
-  const fallbackDiscountRows = discount > 0 && discountRows.length === 0
+  const discountRows = formulaTableMode ? [] : getDiscountRuleRows(allItems, settings, { otherAmount }, houseArea);
+  const fallbackDiscountRows = !formulaTableMode && discount > 0 && discountRows.length === 0
     ? [{
         id: "legacy",
         label: getDiscountScopeLabel(settings),
@@ -1460,17 +1486,19 @@ function addOtherFeeSection(
     rowNumber += 1;
   };
 
-  addFeeRow([formatAlphaSequence(0), "工程直接费", engineeringDirectFormula, engineeringDirectAmount, engineeringDirectRule], { fill: EXPORT_SECTION_FILL, bold: true });
+  if (!formulaTableMode) {
+    addFeeRow([formatAlphaSequence(0), "工程直接费", engineeringDirectFormula, engineeringDirectAmount, engineeringDirectRule], { fill: EXPORT_SECTION_FILL, bold: true });
+  }
 
   items.forEach((item, index) => {
     const total = otherFeeTotals[index] || 0;
-    const ruleText = getOtherFeeRuleDisplay(item, total, feeFormulaContext);
-    addFeeRow([formatAlphaSequence(index + 1), item.name || "", getFeeFormulaText(item, items, 1), total, ruleText], { rowColor: item.row_color });
+    const ruleText = getOtherFeeRuleDisplay(item, total, feeFormulaContext, items);
+    addFeeRow([formatAlphaSequence(index + feeSequenceOffset), item.name || "", getFeeFormulaText(item, items, feeSequenceOffset), total, ruleText], { rowColor: item.row_color });
   });
 
   fallbackDiscountRows.forEach((row, index) => {
     addFeeRow([
-      formatAlphaSequence(items.length + index + 1),
+      formatAlphaSequence(items.length + index + feeSequenceOffset),
       "优惠",
       row.formula,
       -Math.abs(row.amount),
@@ -1478,13 +1506,15 @@ function addOtherFeeSection(
     ]);
   });
 
-  addFeeRow([
-    formatAlphaSequence(items.length + fallbackDiscountRows.length + 1),
-    "工程总造价",
-    finalFormulaParts.join(" "),
-    finalAmount,
-    `${finalRuleParts.join(" ")} = ${formatExportAmount(finalAmount)}`,
-  ], { fill: EXPORT_SECTION_FILL, bold: true, amountColor: "DC2626" });
+  if (!formulaTableMode) {
+    addFeeRow([
+      formatAlphaSequence(items.length + fallbackDiscountRows.length + feeSequenceOffset),
+      "工程总造价",
+      finalFormulaParts.join(" "),
+      finalAmount,
+      `${finalRuleParts.join(" ")} = ${formatExportAmount(finalAmount)}`,
+    ], { fill: EXPORT_SECTION_FILL, bold: true, amountColor: "DC2626" });
+  }
   return rowNumber;
 }
 
@@ -1878,7 +1908,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   const exportScope = parseExportScope(req.nextUrl.searchParams.get("scope"));
   const baseExportColumns = parseBaseExportColumns(req.nextUrl.searchParams.get("baseColumns"), exportScope);
   const includeBudgetCompilation = req.nextUrl.searchParams.get("includeBudgetCompilation") !== "0";
-  const quotationValidUntil = req.nextUrl.searchParams.get("validUntil") || req.nextUrl.searchParams.get("vu") || "";
+  let quotationValidUntil = req.nextUrl.searchParams.get("validUntil") || req.nextUrl.searchParams.get("vu") || "";
   const shareClaims = verifyQuotationShareToken(req.nextUrl.searchParams.get("share") || "", params.id);
   const auth = getAuthContext(req);
   if (shareClaims && !auth) return NextResponse.json({ message: "分享报价单仅支持查看，不能导出" }, { status: 403 });
@@ -1919,6 +1949,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
     WHERE q.id = ? AND q.company_id = ? AND q.deleted_at IS NULL
   `).get(params.id, companyId) as any;
   if (!quotation) return NextResponse.json({ message: "报价不存在" }, { status: 404 });
+  if (!quotationValidUntil) quotationValidUntil = getStoredQuotationValidUntil(parseSettings(quotation.settings));
 
   const rawSettings = parseSettings(quotation.settings);
   const appendixNote = buildAppendixNoteContent(rawSettings, quotation);
@@ -1954,15 +1985,56 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   const mainMaterialAmount = items.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const materialAmount = materialGroups.reduce((sum, group) => sum + group.items.reduce((groupSum, item) => groupSum + getBaseOrMaterialItemTotal(item), 0), 0);
   const quotationHouseArea = toNumber(quotation.customer_area_size ?? quotation.project_area);
-  const feeFormulaContext = buildFeeFormulaContext(items, quoteCategories, quotationHouseArea);
-  const otherFeeTotals = calculateOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext);
-  const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
-  const discountRows = getDiscountRuleRows(items, rawSettings, { otherAmount }, quotationHouseArea);
-  const discount = discountRows.length > 0
+  const formulaTableMode = rawSettings.comprehensiveFeeMode === "formula" && String(rawSettings.formulaFinalFeeItemId || "").trim();
+  let discount = 0;
+  let feeFormulaContext = {
+    ...buildFeeFormulaContext(items, quoteCategories, quotationHouseArea),
+    discountAmount: Number(rawSettings.discount || 0),
+  };
+  if (formulaTableMode) {
+    const undiscountedFeeFormulaContext = {
+      ...buildFeeFormulaContext(items, quoteCategories, quotationHouseArea),
+      discountAmount: 0,
+    };
+    const undiscountedFormulaTable = calculateFormulaTableTotal(
+      otherItems,
+      baseAmount,
+      materialAmount,
+      String(rawSettings.formulaFinalFeeItemId || "").trim(),
+      undiscountedFeeFormulaContext,
+    );
+    const discountRows = getDiscountRuleRows(items, rawSettings, { otherAmount: undiscountedFormulaTable.finalAmount }, quotationHouseArea);
+    discount = discountRows.length > 0
+      ? Math.min(undiscountedFormulaTable.finalAmount, discountRows.reduce((sum, row) => roundMoney(sum + row.amount), 0))
+      : Number(rawSettings.discount || quotation.discount || 0);
+    feeFormulaContext = {
+      ...buildFeeFormulaContext(items, quoteCategories, quotationHouseArea),
+      discountAmount: discount,
+    };
+  }
+  const formulaTable = formulaTableMode
+    ? calculateFormulaTableTotal(
+      otherItems,
+      baseAmount,
+      materialAmount,
+      String(rawSettings.formulaFinalFeeItemId || "").trim(),
+      feeFormulaContext,
+    )
+    : null;
+  const otherFeeTotals = formulaTable
+    ? formulaTable.details.map((detail) => detail.total)
+    : calculateOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext);
+  const otherAmount = formulaTable
+    ? formulaTable.finalAmount
+    : calculateChargeableOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
+  const discountRows = formulaTable ? [] : getDiscountRuleRows(items, rawSettings, { otherAmount }, quotationHouseArea);
+  discount = formulaTable ? discount : discountRows.length > 0
     ? Math.min(baseAmount + materialAmount + otherAmount, discountRows.reduce((sum, row) => roundMoney(sum + row.amount), 0))
     : Number(rawSettings.discount || quotation.discount || 0);
-  const taxAmount = Math.max(0, baseAmount + materialAmount + otherAmount - discount) * Number(rawSettings.taxRate || 0) / 100;
-  const finalAmount = Math.max(0, roundMoney(baseAmount + materialAmount + otherAmount + taxAmount - discount));
+  const taxAmount = formulaTable ? 0 : Math.max(0, baseAmount + materialAmount + otherAmount - discount) * Number(rawSettings.taxRate || 0) / 100;
+  const finalAmount = formulaTable
+    ? formulaTable.finalAmount
+    : Math.max(0, roundMoney(baseAmount + materialAmount + otherAmount + taxAmount - discount));
   const costComposition = buildCostComposition(items);
   const branchSettings = quotation.quotation_org_unit_id
     ? getBranchSettingsForOrgUnit(db, quotation.quotation_org_unit_id, quotation.company_id)

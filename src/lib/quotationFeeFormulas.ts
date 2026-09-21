@@ -1,6 +1,6 @@
 import { formatAlphaSequence } from "./quotationSequence";
 
-export type FeeCalcMethod = "fixed" | "reference" | "percent" | "area_unit";
+export type FeeCalcMethod = "fixed" | "reference" | "percent" | "area_unit" | "formula";
 export type FeeCalcBase = "base" | "main_material" | "base_material" | string;
 export type FeeScopeMode = "all" | "include" | "exclude";
 
@@ -15,6 +15,8 @@ export type FormulaFeeItem = {
   total_price?: number | null;
   fee_calc_method?: string | null;
   fee_calc_base?: string | null;
+  fee_value_source?: string | null;
+  cost_source?: string | null;
   fee_rate?: number | null;
   fee_scope_mode?: string | null;
   fee_scope_space_ids?: string[] | string | null;
@@ -22,6 +24,27 @@ export type FormulaFeeItem = {
 };
 
 const STABLE_FEE_REFERENCE_PATTERN = /\[\[fee:([^\]]+)\]\]/gi;
+const STABLE_SCOPE_REFERENCE_PATTERN = /\[\[scope:([^|\]]+)\|([^\]]+)\]\]/gi;
+const BUILT_IN_FORMULA_LABELS = new Set([
+  "基装直接费",
+  "基装项目",
+  "基装",
+  "人工费合计",
+  "人工费",
+  "人工",
+  "材料费合计",
+  "材料费",
+  "材料",
+  "产品直接费",
+  "产品项目",
+  "产品",
+  "主材直接费",
+  "主材项目",
+  "主材",
+  "直接费合计",
+  "工程直接费",
+  "直接费",
+]);
 
 function getFormulaFeeItemId(item: FormulaFeeItem, index: number) {
   return String(item.id || item.client_key || `fee-index-${index}`).trim();
@@ -40,6 +63,61 @@ export function hasStableFeeReferences(value: unknown) {
   return STABLE_FEE_REFERENCE_PATTERN.test(String(value || ""));
 }
 
+export function hasStableScopeReferences(value: unknown) {
+  STABLE_SCOPE_REFERENCE_PATTERN.lastIndex = 0;
+  return STABLE_SCOPE_REFERENCE_PATTERN.test(String(value || ""));
+}
+
+export function makeStableScopeReference(key: string, label: string) {
+  const normalizedKey = String(key || "").trim();
+  const normalizedLabel = String(label || "").trim();
+  if (!normalizedKey || !normalizedLabel) return "";
+  return `[[scope:${encodeURIComponent(normalizedKey)}|${encodeURIComponent(normalizedLabel)}]]`;
+}
+
+export function getStableScopeReferenceKeys(value: unknown) {
+  const keys: string[] = [];
+  String(value || "").replace(STABLE_SCOPE_REFERENCE_PATTERN, (_match, encodedKey: string) => {
+    try {
+      keys.push(decodeURIComponent(encodedKey));
+    } catch {
+      keys.push(encodedKey);
+    }
+    return _match;
+  });
+  return Array.from(new Set(keys));
+}
+
+export function remapStableScopeReferenceKeys(value: unknown, keyMap: Map<string, string> | Record<string, string>) {
+  const resolveKey = (key: string) => keyMap instanceof Map ? keyMap.get(key) : keyMap[key];
+  return String(value || "").replace(STABLE_SCOPE_REFERENCE_PATTERN, (match, encodedKey: string, encodedLabel: string) => {
+    let key = encodedKey;
+    let label = encodedLabel;
+    try {
+      key = decodeURIComponent(encodedKey);
+    } catch {}
+    try {
+      label = decodeURIComponent(encodedLabel);
+    } catch {}
+    const nextKey = resolveKey(key);
+    const nextLabel = nextKey?.startsWith("space:") ? nextKey.slice("space:".length) : label;
+    return nextKey ? makeStableScopeReference(nextKey, nextLabel) : match;
+  });
+}
+
+export function updateStableScopeReferenceLabel(value: unknown, key: string, label: string) {
+  const normalizedKey = String(key || "").trim();
+  const normalizedLabel = String(label || "").trim();
+  if (!normalizedKey || !normalizedLabel) return String(value || "");
+  return String(value || "").replace(STABLE_SCOPE_REFERENCE_PATTERN, (match, encodedKey: string) => {
+    let currentKey = encodedKey;
+    try {
+      currentKey = decodeURIComponent(encodedKey);
+    } catch {}
+    return currentKey === normalizedKey ? makeStableScopeReference(normalizedKey, normalizedLabel) : match;
+  });
+}
+
 export function getStableFeeReferenceIds(value: unknown) {
   const ids: string[] = [];
   String(value || "").replace(STABLE_FEE_REFERENCE_PATTERN, (_match, encodedId: string) => {
@@ -54,14 +132,45 @@ export function formatStableFeeFormula(value: unknown, items: FormulaFeeItem[], 
   items.forEach((item, index) => {
     sequenceById.set(getFormulaFeeItemId(item, index), formatAlphaSequence(index + sequenceOffset));
   });
-  return String(value || "").replace(STABLE_FEE_REFERENCE_PATTERN, (_match, encodedId: string) => (
+  const formattedFees = String(value || "").replace(STABLE_FEE_REFERENCE_PATTERN, (_match, encodedId: string) => (
     sequenceById.get(decodeStableFeeReference(encodedId)) || "[已删除费用]"
   ));
+  return formattedFees.replace(STABLE_SCOPE_REFERENCE_PATTERN, (_match, _encodedKey: string, encodedLabel: string) => {
+    try {
+      return decodeURIComponent(encodedLabel) || "[已删除范围]";
+    } catch {
+      return encodedLabel || "[已删除范围]";
+    }
+  });
 }
 
-export function bindStableFeeFormula(value: unknown, items: FormulaFeeItem[], sequenceOffset = 0) {
+export function formatStableFeeFormulaLabels(value: unknown, items: FormulaFeeItem[], sequenceOffset = 0) {
+  const labelById = new Map<string, string>();
+  items.forEach((item, index) => {
+    const sequence = formatAlphaSequence(index + sequenceOffset);
+    const name = String(item.name || "").trim();
+    labelById.set(getFormulaFeeItemId(item, index), name || sequence);
+  });
+  const formattedFees = String(value || "").replace(STABLE_FEE_REFERENCE_PATTERN, (_match, encodedId: string) => (
+    labelById.get(decodeStableFeeReference(encodedId)) || "[已删除费用]"
+  ));
+  return formattedFees.replace(STABLE_SCOPE_REFERENCE_PATTERN, (_match, _encodedKey: string, encodedLabel: string) => {
+    try {
+      return decodeURIComponent(encodedLabel) || "[已删除范围]";
+    } catch {
+      return encodedLabel || "[已删除范围]";
+    }
+  });
+}
+
+export function bindStableFeeFormula(
+  value: unknown,
+  items: FormulaFeeItem[],
+  sequenceOffset = 0,
+  scopeReferences: FeeFormulaScopeReference[] = [],
+) {
   const displayFormula = formatStableFeeFormula(value, items, sequenceOffset);
-  return displayFormula.replace(
+  const withFeeReferences = displayFormula.replace(
     /(^|[^A-Za-z0-9_])([A-Za-z]{1,3})(?=$|[^A-Za-z0-9_])/g,
     (match, prefix: string, sequence: string) => {
       const sequenceIndex = alphaSequenceToIndex(sequence);
@@ -72,6 +181,20 @@ export function bindStableFeeFormula(value: unknown, items: FormulaFeeItem[], se
       return `${prefix}[[fee:${encodeURIComponent(stableId)}]]`;
     },
   );
+  const aliasCounts = new Map<string, number>();
+  scopeReferences.forEach((reference) => {
+    const label = String(reference.label || "").trim();
+    if (label) aliasCounts.set(label, (aliasCounts.get(label) || 0) + 1);
+  });
+  return [...scopeReferences]
+    .filter((reference) => String(reference.key || "").trim() && String(reference.label || "").trim())
+    .sort((left, right) => right.label.length - left.label.length)
+    .reduce((formula, reference) => {
+      const label = String(reference.label || "").trim();
+      if (!label || BUILT_IN_FORMULA_LABELS.has(label) || /^[A-Za-z]{1,3}$/.test(label) || aliasCounts.get(label) !== 1) return formula;
+      const pattern = new RegExp(`(^|[^\\p{L}\\p{N}_])(${escapeRegExp(label)})(?=$|[^\\p{L}\\p{N}_])`, "gu");
+      return formula.replace(pattern, (_match, prefix: string) => `${prefix}${makeStableScopeReference(reference.key, label)}`);
+    }, withFeeReferences);
 }
 
 export function remapStableFeeFormulaIds(value: unknown, idMap: Map<string, string> | Record<string, string>) {
@@ -88,7 +211,9 @@ export type FeeFormulaContext = {
   directItemAmount?: number;
   laborAmount?: number;
   materialCostAmount?: number;
+  discountAmount?: number;
   categoryAmounts?: Record<string, number>;
+  scopeReferences?: FeeFormulaScopeReference[];
   directItems?: Array<{
     category?: string | null;
     categoryLabel?: string | null;
@@ -99,11 +224,49 @@ export type FeeFormulaContext = {
   }>;
 };
 
+export type FeeFormulaScopeReference = {
+  key: string;
+  label: string;
+  amount: number;
+};
+
+export function buildDirectFeeScopeReferences(
+  directItems: NonNullable<FeeFormulaContext["directItems"]> = [],
+): FeeFormulaScopeReference[] {
+  const references = new Map<string, FeeFormulaScopeReference>();
+  directItems.forEach((item) => {
+    const amount = toNumber(item.total);
+    const space = String(item.space || "").trim();
+    if (space) {
+      const key = `space:${space}`;
+      const current = references.get(key);
+      references.set(key, {
+        key,
+        label: space,
+        amount: toMoney(toNumber(current?.amount) + amount),
+      });
+    }
+    const category = String(item.category || "").trim();
+    if (category) {
+      const key = `category:${category}`;
+      const label = String(item.categoryLabel || category).trim() || category;
+      const current = references.get(key);
+      references.set(key, {
+        key,
+        label,
+        amount: toMoney(toNumber(current?.amount) + amount),
+      });
+    }
+  });
+  return Array.from(references.values());
+}
+
 export const feeCalcMethodLabels: Record<FeeCalcMethod, string> = {
   fixed: "固定金额",
   reference: "引用金额",
   percent: "按比例",
   area_unit: "按面积单价",
+  formula: "自定义公式",
 };
 
 export const feeCalcBaseLabels = {
@@ -140,6 +303,7 @@ export function toNumber(value: unknown) {
 export function normalizeFeeCalcMethod(value: unknown): FeeCalcMethod {
   if (value === "reference") return "reference";
   if (value === "area_unit" || value === "area" || value === "house_area_unit") return "area_unit";
+  if (value === "formula" || value === "custom_formula" || value === "expression") return "formula";
   return value === "percent" ? "percent" : "fixed";
 }
 
@@ -224,12 +388,31 @@ export function getFeeScopeText(item: FormulaFeeItem) {
   const mode = normalizeFeeScopeMode(item.fee_scope_mode);
   const names = getFeeScopeSpaceNames(item);
   if (mode === "all" || names.length === 0) return "";
-  const prefix = mode === "include" ? "仅含" : "不含";
+  const prefix = mode === "include" ? "仅统计" : "排除";
   return `${prefix}：${names.join("、")}`;
 }
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isFeeSequenceAlias(value: string) {
+  return /^[A-Za-z]{1,3}$/.test(value.trim());
+}
+
+function resolveStableScopeReferences(expression: unknown, context?: FeeFormulaContext) {
+  const scopeReferences = context?.scopeReferences || [];
+  return String(expression || "").replace(
+    STABLE_SCOPE_REFERENCE_PATTERN,
+    (_match, encodedKey: string) => {
+      let key = encodedKey;
+      try {
+        key = decodeURIComponent(encodedKey);
+      } catch {}
+      const referenceIndex = scopeReferences.findIndex((reference) => reference.key === key);
+      return referenceIndex >= 0 ? `SCOPE_${referenceIndex}` : "INVALID_SCOPE";
+    },
+  );
 }
 
 function getReferenceData(
@@ -281,6 +464,7 @@ function getReferenceData(
   const addAlias = (label: string, key: string) => {
     const normalizedLabel = String(label || "").trim();
     if (!normalizedLabel) return;
+    if (aliases.some((alias) => alias.label === normalizedLabel)) return;
     aliases.push({ label: normalizedLabel, key });
   };
 
@@ -290,6 +474,19 @@ function getReferenceData(
     const key = `CAT${index}`;
     references[key] = toNumber(amount);
     addAlias(normalizedLabel, key);
+  });
+
+  const scopeReferences = context?.scopeReferences || [];
+  const scopeAliasCounts = new Map<string, number>();
+  scopeReferences.forEach((reference) => {
+    const label = String(reference.label || "").trim();
+    if (label) scopeAliasCounts.set(label, (scopeAliasCounts.get(label) || 0) + 1);
+  });
+  scopeReferences.forEach((reference, index) => {
+    const key = `SCOPE_${index}`;
+    references[key] = toNumber(reference.amount);
+    const label = String(reference.label || "").trim();
+    if (label && !isFeeSequenceAlias(label) && scopeAliasCounts.get(label) === 1) addAlias(label, key);
   });
 
   return { references, aliases };
@@ -479,8 +676,13 @@ function parseExpression(expression: string, referenceAmounts: Record<string, nu
   return result;
 }
 
-export function evaluateFeeFormula(expression: unknown, referenceAmounts: Record<string, number>, aliases: FormulaAlias[] = []) {
-  const text = String(expression || "").trim();
+export function evaluateFeeFormula(
+  expression: unknown,
+  referenceAmounts: Record<string, number>,
+  aliases: FormulaAlias[] = [],
+  context?: FeeFormulaContext,
+) {
+  const text = resolveStableScopeReferences(expression, context).trim();
   if (!text) return null;
   return parseExpression(text, referenceAmounts, aliases);
 }
@@ -533,7 +735,7 @@ function calculateOtherFeeDetailsInternal(
 
     const stableResolution = resolveStableReferences(normalizedBase);
     if (stableResolution.missingReference) return { value: null, error: "公式引用的费用项已删除" };
-    const resolvedBase = stableResolution.expression;
+    const resolvedBase = resolveStableScopeReferences(stableResolution.expression, scoped.context);
 
     const { references, aliases } = getReferenceData(scoped.baseAmount, scoped.materialAmount, {}, scoped.context);
     const tokenKeys = getFormulaTokenKeys(resolvedBase, aliases);
@@ -549,7 +751,7 @@ function calculateOtherFeeDetailsInternal(
       references[key] = referenceTotal;
     }
 
-    const formulaValue = evaluateFeeFormula(resolvedBase, references, aliases);
+    const formulaValue = evaluateFeeFormula(resolvedBase, references, aliases, scoped.context);
     return formulaValue === null
       ? { value: null, error: "基础公式无法识别" }
       : { value: formulaValue, error: "" };
@@ -579,24 +781,47 @@ function calculateOtherFeeDetailsInternal(
         const scoped = getScopedBaseAmounts(item, baseAmount, materialAmount, context);
         total = toMoney(getFeeBaseAmount(scoped.baseAmount, scoped.materialAmount, "base_material", scoped.context) * legacyManagementFeeRate / 100);
       } else {
+        const valueSource = String(
+          item.fee_value_source
+          || String(item.cost_source || "").match(/^fee_source:(.+)$/)?.[1]
+          || "",
+        ).trim();
+        if (valueSource === "direct") {
+          const scoped = getScopedBaseAmounts(item, baseAmount, materialAmount, context);
+          total = toMoney(getFeeBaseAmount(scoped.baseAmount, scoped.materialAmount, "直接费", scoped.context));
+          error = "";
+        } else if (valueSource === "discount") {
+          total = toMoney(Math.max(0, toNumber(context?.discountAmount)));
+          error = "";
+        } else if (valueSource === "manual") {
+          total = toMoney(toNumber(item.quantity) * toNumber(item.unit_price));
+          error = "";
+        } else if (valueSource === "fixed") {
+          const fixedBase = normalizeFeeCalcBase(item.fee_calc_base);
+          total = fixedBase.trim() && Number.isFinite(Number(fixedBase))
+            ? toMoney(Number(fixedBase))
+            : toMoney(toNumber(item.quantity) * toNumber(item.unit_price));
+          error = "";
+        } else {
         const method = normalizeFeeCalcMethod(item.fee_calc_method);
         if (method === "area_unit") {
           total = toMoney(toNumber(context?.houseArea) * toNumber(item.unit_price));
-        } else if (method === "reference" || method === "percent") {
+        } else if (method === "reference" || method === "formula" || method === "percent") {
           const resolvedBase = resolveBaseForItem(item, index);
           if (resolvedBase.value === null) {
             total = null;
             error = resolvedBase.error;
           } else {
-            total = method === "reference"
+            total = method === "reference" || method === "formula"
               ? toMoney(resolvedBase.value)
               : toMoney(resolvedBase.value * toNumber(item.fee_rate) / 100);
           }
         } else {
-          total = toMoney(toNumber(item.quantity) * toNumber(item.unit_price));
+            total = toMoney(toNumber(item.quantity) * toNumber(item.unit_price));
+          }
+        }
         }
       }
-    }
 
     resolving.delete(index);
     errors[index] = error;
@@ -624,7 +849,7 @@ export function getFeeCalcBaseError(
   if (!normalizedBase) return "请填写基础公式";
   if (isLegacyFeeCalcBase(normalizedBase)) return "";
   const { references, aliases } = getReferenceData(baseAmount, materialAmount, referenceAmounts, context);
-  const formulaValue = evaluateFeeFormula(normalizedBase, references, aliases);
+  const formulaValue = evaluateFeeFormula(normalizedBase, references, aliases, context);
   return formulaValue === null ? "基础公式无法识别" : "";
 }
 
@@ -641,7 +866,7 @@ function resolveFormulaBase(
   const scoped = getScopedBaseAmounts(item, baseAmount, materialAmount, context);
   if (isLegacyFeeCalcBase(normalizedBase)) return getFeeBaseAmount(scoped.baseAmount, scoped.materialAmount, normalizedBase, scoped.context);
   const { references, aliases } = getReferenceData(scoped.baseAmount, scoped.materialAmount, referenceAmounts, scoped.context);
-  const formulaValue = evaluateFeeFormula(normalizedBase, references, aliases);
+  const formulaValue = evaluateFeeFormula(normalizedBase, references, aliases, scoped.context);
   return formulaValue;
 }
 
@@ -661,7 +886,7 @@ export function calculateOtherFeeTotal(
     return toMoney(getFeeBaseAmount(scoped.baseAmount, scoped.materialAmount, "base_material", scoped.context) * legacyManagementFeeRate / 100);
   }
   const method = normalizeFeeCalcMethod(item.fee_calc_method);
-  if (method === "reference") {
+  if (method === "reference" || method === "formula") {
     const baseValue = resolveFormulaBase(item.fee_calc_base, baseAmount, materialAmount, referenceAmounts, context, item);
     return toMoney(baseValue ?? 0);
   }
@@ -681,6 +906,25 @@ export function calculateOtherFeeTotals(
   context?: FeeFormulaContext,
 ) {
   return calculateOtherFeeDetailsInternal(items, baseAmount, materialAmount, context).map((item) => item.total);
+}
+
+export function calculateFormulaTableTotal(
+  items: FormulaFeeItem[],
+  baseAmount: number,
+  materialAmount: number,
+  finalItemId: string,
+  context?: FeeFormulaContext,
+) {
+  const details = calculateOtherFeeDetailsInternal(items, baseAmount, materialAmount, context);
+  const finalIndex = items.findIndex((item, index) => (
+    String(item.id || item.client_key || `fee-index-${index}`) === finalItemId
+  ));
+  return {
+    details,
+    finalIndex,
+    finalAmount: finalIndex >= 0 ? details[finalIndex]?.total || 0 : 0,
+    finalError: finalIndex >= 0 ? details[finalIndex]?.error || "" : "未找到报价总额行",
+  };
 }
 
 export function calculateOtherFeeDetails(
@@ -724,11 +968,24 @@ function hasFeeSequenceReference(expression: string) {
 }
 
 export function getFeeFormulaText(item: FormulaFeeItem, items?: FormulaFeeItem[], sequenceOffset = 0) {
+  const valueSource = String(
+    item.fee_value_source
+    || String(item.cost_source || "").match(/^fee_source:(.+)$/)?.[1]
+    || "",
+  ).trim();
+  if (valueSource === "direct") return "工程直接费";
+  if (valueSource === "discount") return "报价优惠";
+  if (valueSource === "manual") return "报价时填写";
+  if (valueSource === "fixed") return "固定金额";
   const legacyManagementFeeRate = !item.fee_calc_method && /^(项目)?管理费$/.test(String(item.name || "").trim())
     ? getLegacyManagementFeeRate(item)
     : 0;
   if (legacyManagementFeeRate > 0) return `${formatPercentBaseLabel(feeCalcBaseLabels.base_material)} x ${legacyManagementFeeRate}%`;
   const method = normalizeFeeCalcMethod(item.fee_calc_method);
+  if (method === "formula") {
+    const formula = items ? formatStableFeeFormula(item.fee_calc_base, items, sequenceOffset) : item.fee_calc_base;
+    return String(formula || "").trim();
+  }
   if (method === "percent") {
     const baseLabel = getFeeBaseLabel(items ? formatStableFeeFormula(item.fee_calc_base, items, sequenceOffset) : item.fee_calc_base);
     return baseLabel ? `${formatPercentBaseLabel(baseLabel)} x ${toNumber(item.fee_rate)}%` : "-";
@@ -805,16 +1062,32 @@ function getDirectFeeRuleDescription(context?: FeeFormulaContext) {
 }
 
 export function getFeeRuleText(item: FormulaFeeItem, total: number, options?: FeeRuleTextOptions, context?: FeeFormulaContext, items?: FormulaFeeItem[], sequenceOffset = 0) {
+  const valueSource = String(
+    item.fee_value_source
+    || String(item.cost_source || "").match(/^fee_source:(.+)$/)?.[1]
+    || "",
+  ).trim();
   const method = normalizeFeeCalcMethod(item.fee_calc_method);
   const calcBase = normalizeFeeCalcBase(items ? formatStableFeeFormula(item.fee_calc_base, items, sequenceOffset) : item.fee_calc_base);
+  const displayCalcBase = normalizeFeeCalcBase(items ? formatStableFeeFormulaLabels(item.fee_calc_base, items, sequenceOffset) : item.fee_calc_base);
   const totalText = formatCurrencyText(total, options?.currencySymbol !== false, options?.useGrouping !== false);
   const includeMethodLabel = options?.includeMethodLabel !== false;
   const scopedContext = getScopedFormulaContext(item, context);
   const scopeText = getFeeScopeText(item);
   const appendScope = (text: string) => scopeText ? `${text}，${scopeText}` : text;
 
+  if (valueSource === "direct") return appendScope(`工程直接费 = ${totalText}`);
+  if (valueSource === "discount") return appendScope(`报价优惠 = ${totalText}`);
+  if (valueSource === "manual") return appendScope(`报价时填写 = ${totalText}`);
+  if (valueSource === "fixed") return appendScope(`固定金额 = ${totalText}`);
+
   if (method === "fixed") {
     return includeMethodLabel ? `固定金额 = ${totalText}` : `金额 = ${totalText}`;
+  }
+
+  if (method === "formula") {
+    if (!displayCalcBase) return includeMethodLabel ? `自定义公式 = ${totalText}` : `金额 = ${totalText}`;
+    return appendScope(`${formatFeeRuleExpression(displayCalcBase)} = ${totalText}`);
   }
 
   if (method === "reference") {
@@ -825,7 +1098,7 @@ export function getFeeRuleText(item: FormulaFeeItem, total: number, options?: Fe
     if (isLaborFeeBase(calcBase)) return appendScope(`人工费 = ${totalText}`);
     if (isMaterialCostFeeBase(calcBase)) return appendScope(`材料费 = ${totalText}`);
     if (isMaterialFeeBase(calcBase)) return appendScope(includeMethodLabel ? `产品 = 产品直接费 = ${totalText}` : `产品直接费 = ${totalText}`);
-    return appendScope(`${formatFeeRuleExpression(calcBase)} = ${totalText}`);
+    return appendScope(`${formatFeeRuleExpression(displayCalcBase || calcBase)} = ${totalText}`);
   }
 
   if (method === "area_unit") {
@@ -842,7 +1115,7 @@ export function getFeeRuleText(item: FormulaFeeItem, total: number, options?: Fe
   if (isMaterialCostFeeBase(calcBase)) return appendScope(`材料费 × ${rate}% = ${totalText}`);
   if (isMaterialFeeBase(calcBase)) return appendScope(`产品直接费 × ${rate}% = ${totalText}`);
 
-  const formulaText = getFeeFormulaText(item, items, sequenceOffset);
+  const formulaText = displayCalcBase || getFeeFormulaText(item, items, sequenceOffset);
   if (formulaText && formulaText !== "-") return appendScope(`${formatFeeRuleExpression(formulaText)} = ${totalText}`);
   const baseLabel = getFeeBaseLabel(calcBase);
   return appendScope(baseLabel ? `${baseLabel} × ${rate}% = ${totalText}` : `按比例计算 = ${totalText}`);

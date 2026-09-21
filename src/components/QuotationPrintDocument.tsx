@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useState, type ReactNode } from "react";
-import { calculateChargeableOtherFeeTotals, calculateOtherFeeTotals, getFeeFormulaText, getFeeRuleText, toMoney, toNumber, type FeeFormulaContext } from "@/lib/quotationFeeFormulas";
+import { calculateChargeableOtherFeeTotals, calculateFormulaTableTotal, calculateOtherFeeTotals, getFeeFormulaText, getFeeRuleText, toMoney, toNumber, type FeeFormulaContext } from "@/lib/quotationFeeFormulas";
 import { getQuotationRowColor } from "@/lib/quotationRowColors";
 import { formatAlphaSequence } from "@/lib/quotationSequence";
 import { normalizeQuotationSignatureLabels } from "@/lib/quotationPrintSettings";
@@ -9,6 +9,7 @@ import NativeImage from "@/components/ui/NativeImage";
 
 export type PrintableQuotationItem = {
   id?: string;
+  client_key?: string;
   category: string;
   space?: string;
   work_type_id?: string | null;
@@ -27,6 +28,7 @@ export type PrintableQuotationItem = {
   labor_cost?: number;
   profit_margin?: number;
   row_color?: string | null;
+  cost_source?: string | null;
   fee_calc_method?: string | null;
   fee_calc_base?: string | null;
   fee_rate?: number | null;
@@ -61,6 +63,8 @@ export type PrintableQuotationSettings = {
   quotationValidUntil?: string | null;
   effectiveUntil?: string | null;
   valid_until?: string | null;
+  comprehensiveFeeMode?: "standard" | "formula";
+  formulaFinalFeeItemId?: string | null;
 };
 
 export type PrintableQuotationDetail = {
@@ -366,15 +370,18 @@ function getDiscountScopeOptions(items: PrintableQuotationItem[], settings: Prin
     .filter((item) => !isBaseCategory(item.category) && !isOtherCategory(item.category) && getCategoryKey(item.category) !== "main_material")
     .reduce((sum, item) => toMoney(sum + getItemTotal(item)), 0);
   const discountableDirectAmount = discountableBaseAmount + discountableProductAmount + discountableCustomCategoryAmount;
+  const totalDiscountAmount =
+    settings?.comprehensiveFeeMode === "formula" && String(settings?.formulaFinalFeeItemId || "").trim()
+      ? totals.otherAmount
+      : discountableDirectAmount + totals.otherAmount;
   const fixedOptions: DiscountScopeOption[] = [
     { value: "base", label: "基装直接费", amount: discountableBaseAmount },
     { value: "base_labor", label: "基装直接费（人工）", amount: discountableItems.reduce((sum, item) => toMoney(sum + getItemLaborSubtotal(item)), 0) },
     { value: "base_material", label: "基装直接费（材料）", amount: discountableItems.reduce((sum, item) => toMoney(sum + getItemMaterialSubtotal(item)), 0) },
     { value: "product", label: "产品费用", amount: discountableProductAmount },
     { value: "custom_cabinet", label: "定制柜费用", amount: customCabinetAmount },
-    { value: "other", label: "综合费用", amount: totals.otherAmount },
     { value: "direct", label: "工程直接费", amount: discountableDirectAmount },
-    { value: "total", label: "总价", amount: discountableDirectAmount + totals.otherAmount },
+    { value: "total", label: "总价", amount: totalDiscountAmount },
   ];
   const fixedLabels = new Set(fixedOptions.map((option) => option.label));
   const dynamicOptions = customCategoryOptions.filter((option) => !fixedLabels.has(option.label) && !/组合包|套餐|一口价|package|定制柜/i.test(option.label));
@@ -450,6 +457,10 @@ function getDiscountRuleValue(rule: DiscountRule) {
   return rule.scope || "total";
 }
 
+function isRemovedOtherFeeDiscountScope(value: string) {
+  return value.startsWith("fee:");
+}
+
 function getDiscountRuleScope(rule: DiscountRule, items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }, houseArea = 0) {
   const options = rule.type === "space"
     ? getDiscountSpaceOptions(items, settings)
@@ -457,6 +468,9 @@ function getDiscountRuleScope(rule: DiscountRule, items: PrintableQuotationItem[
       ? getDiscountWorkTypeOptions(items, settings)
       : getDiscountScopeOptions(items, settings, totals, houseArea);
   const value = getDiscountRuleValue(rule);
+  if (rule.type === "fee" && isRemovedOtherFeeDiscountScope(value)) {
+    return options.find((option) => option.value === value);
+  }
   return options.find((option) => option.value === value)
     || options.find((option) => option.value === "total")
     || options[0];
@@ -566,12 +580,12 @@ function shouldShowAutoOtherFeeRule(item: PrintableQuotationItem) {
   return name === "工程直接费" || name === "直接费" || name === "工程总造价" || name === "总造价";
 }
 
-function getOtherFeeRuleDisplay(item: PrintableQuotationItem, total: number, context?: FeeFormulaContext) {
+function getOtherFeeRuleDisplay(item: PrintableQuotationItem, total: number, context?: FeeFormulaContext, items?: PrintableQuotationItem[]) {
   const remark = String(item.remark || "").trim();
   if (remark) return remark;
   if (!shouldShowAutoOtherFeeRule(item)) return remark;
 
-  const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context);
+  const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context, items);
   return rule;
 }
 
@@ -581,7 +595,51 @@ function calculateQuotationTotals(items: PrintableQuotationItem[], settings?: Pr
   const customCategoryAmount = items.filter((item) => !isBaseCategory(item.category) && !isOtherCategory(item.category) && getCategoryKey(item.category) !== "main_material").reduce((sum, item) => sum + getItemTotal(item), 0);
   const materialAmount = mainMaterialAmount + customCategoryAmount;
   const otherItems = items.filter((item) => isOtherCategory(item.category));
-  const feeFormulaContext = buildFeeFormulaContext(items, settings?.quoteCategories, houseArea);
+  const formulaTableMode = settings?.comprehensiveFeeMode === "formula" && String(settings?.formulaFinalFeeItemId || "").trim();
+  if (formulaTableMode) {
+    const undiscountedFeeFormulaContext = {
+      ...buildFeeFormulaContext(items, settings?.quoteCategories, houseArea),
+      discountAmount: 0,
+    };
+    const undiscountedFormulaTable = calculateFormulaTableTotal(
+      otherItems,
+      baseAmount,
+      materialAmount,
+      String(settings?.formulaFinalFeeItemId || "").trim(),
+      undiscountedFeeFormulaContext,
+    );
+    const discountRuleRows = getDiscountRuleRows(items, settings, { otherAmount: undiscountedFormulaTable.finalAmount }, houseArea);
+    const ruleDiscount = discountRuleRows.reduce((sum, row) => toMoney(sum + row.amount), 0);
+    const discount = Math.min(undiscountedFormulaTable.finalAmount, Math.max(0, discountRuleRows.length > 0 ? ruleDiscount : toNumber(settings?.discount)));
+    const feeFormulaContext = {
+      ...buildFeeFormulaContext(items, settings?.quoteCategories, houseArea),
+      discountAmount: discount,
+    };
+    const formulaTable = calculateFormulaTableTotal(
+      otherItems,
+      baseAmount,
+      materialAmount,
+      String(settings?.formulaFinalFeeItemId || "").trim(),
+      feeFormulaContext,
+    );
+    return {
+      baseAmount,
+      materialAmount,
+      mainMaterialAmount,
+      customCategoryAmount,
+      otherAmount: formulaTable.finalAmount,
+      directAmount: formulaTable.finalAmount,
+      managementFee: 0,
+      taxAmount: 0,
+      discount,
+      finalAmount: formulaTable.finalAmount,
+      feeFormulaContext,
+    };
+  }
+  const feeFormulaContext = {
+    ...buildFeeFormulaContext(items, settings?.quoteCategories, houseArea),
+    discountAmount: toNumber(settings?.discount),
+  };
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
   const directAmount = baseAmount + materialAmount + otherAmount;
   const managementFee = 0;
@@ -1440,9 +1498,11 @@ function OtherFeesTable({ items, allItems, totals, settings, houseArea = 0 }: { 
   const engineeringDirectRule = hasProductDirectAmount
     ? `基装直接费 ${formatPrintAmount(totals.baseAmount)} + 产品直接费 ${formatPrintAmount(totals.materialAmount)} = ${formatPrintAmount(engineeringDirectAmount)}`
     : `基装直接费 ${formatPrintAmount(totals.baseAmount)} = ${formatPrintAmount(engineeringDirectAmount)}`;
-  const otherAmount = otherFeeTotals.reduce((sum, amount) => toMoney(sum + amount), 0);
-  const hasDiscount = totals.discount > 0;
-  const discountRows = getDiscountRuleRows(allItems, settings, { otherAmount }, houseArea);
+  const formulaTableMode = settings?.comprehensiveFeeMode === "formula" && Boolean(String(settings.formulaFinalFeeItemId || "").trim());
+  const feeSequenceOffset = formulaTableMode ? 0 : 1;
+  const otherAmount = formulaTableMode ? totals.finalAmount : otherFeeTotals.reduce((sum, amount) => toMoney(sum + amount), 0);
+  const hasDiscount = !formulaTableMode && totals.discount > 0;
+  const discountRows = formulaTableMode ? [] : getDiscountRuleRows(allItems, settings, { otherAmount }, houseArea);
   const fallbackDiscountRows = hasDiscount && discountRows.length === 0
     ? [{
         id: "legacy",
@@ -1490,7 +1550,7 @@ function OtherFeesTable({ items, allItems, totals, settings, houseArea = 0 }: { 
           </tr>
         </thead>
         <tbody>
-          <tr className="quotation-print-fee-anchor-row">
+          {!formulaTableMode && <tr className="quotation-print-fee-anchor-row">
             <td className="text-center">{formatAlphaSequence(0)}</td>
             <td className="quotation-print-item-name">工程直接费</td>
             <td>{engineeringDirectFormula}</td>
@@ -1500,17 +1560,17 @@ function OtherFeesTable({ items, allItems, totals, settings, houseArea = 0 }: { 
             <td className="quotation-print-rule-cell leading-relaxed text-surface-600">
               {engineeringDirectRule}
             </td>
-          </tr>
+          </tr>}
           {items.map((item, index) => {
             return (
               <tr key={item.id || `other-${index}`} style={printRowStyle(item.row_color)}>
-                <td className="text-center">{formatAlphaSequence(index + 1)}</td>
+                <td className="text-center">{formatAlphaSequence(index + feeSequenceOffset)}</td>
                 <td className="quotation-print-item-name">{text(item.name)}</td>
-                <td>{getFeeFormulaText(item, items, 1)}</td>
+                <td>{getFeeFormulaText(item, items, feeSequenceOffset)}</td>
                 <td className="text-right font-semibold text-surface-950">
                   {formatPrintAmount(otherFeeTotals[index] || 0)}
                 </td>
-                <td className="quotation-print-rule-cell leading-relaxed text-surface-600">{getOtherFeeRuleDisplay(item, otherFeeTotals[index] || 0, totals.feeFormulaContext)}</td>
+                <td className="quotation-print-rule-cell leading-relaxed text-surface-600">{getOtherFeeRuleDisplay(item, otherFeeTotals[index] || 0, totals.feeFormulaContext, items)}</td>
               </tr>
             );
           })}
@@ -1527,7 +1587,7 @@ function OtherFeesTable({ items, allItems, totals, settings, houseArea = 0 }: { 
               </td>
             </tr>
           ))}
-          <tr className="quotation-print-fee-final-row">
+          {!formulaTableMode && <tr className="quotation-print-fee-final-row">
             <td className="text-center">{formatAlphaSequence(finalSequenceIndex)}</td>
             <td className="quotation-print-item-name">工程总造价</td>
             <td>{finalFormula}</td>
@@ -1537,7 +1597,7 @@ function OtherFeesTable({ items, allItems, totals, settings, houseArea = 0 }: { 
             <td className="quotation-print-rule-cell leading-relaxed text-surface-600">
               {finalRuleParts.join(" ")} = {formatPrintAmount(totals.finalAmount)}
             </td>
-          </tr>
+          </tr>}
         </tbody>
       </table>
     </div>

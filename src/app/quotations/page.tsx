@@ -15,9 +15,12 @@ import {
   getCustomerHouseText,
   getRecordAmount,
   getRecordCostSummary,
+  getRecordFinalFeeAmount,
+  getRecordFinalFeeLabel,
   getRecordStatusClass,
   getSignedContractAmount,
   getTemplateModeLabel,
+  isFormulaFeeRecord,
   isUsedBySignedContract,
   isSentToDesigner,
   loadQuotaTemplatesFromStorage,
@@ -326,6 +329,17 @@ function getRecordQuotaTemplateName(record: any) {
   return String(settings?.quotaTemplateName || record?.quota_template_name || "").trim();
 }
 
+function getRecordQuotationValidUntil(record: any) {
+  const settings = getRecordSettings(record);
+  return [
+    settings?.quotationValidUntil,
+    record?.quotation_valid_until,
+    record?.quotationValidUntil,
+  ]
+    .map((value) => String(value || "").trim())
+    .find((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)) || "";
+}
+
 function buildQuotationCompareSummary(record: any) {
   const detailItems = Array.isArray(record?.items) ? record.items : [];
   const totals = record?.totals || {};
@@ -602,6 +616,7 @@ export default function QuotationsPage() {
   const [shareLinkDialog, setShareLinkDialog] = useState<any | null>(null);
   const [shareExpireDays, setShareExpireDays] = useState<number | "24h" | null>(7);
   const [shareQuotationValidUntil, setShareQuotationValidUntil] = useState("");
+  const [shareQuotationValidUntilOverrides, setShareQuotationValidUntilOverrides] = useState<Record<string, string>>({});
   const [shareBaseColumns, setShareBaseColumns] = useState<QuotationShareBaseColumnKey[]>(() => quotationShareBaseColumnOptions.map((option) => option.key));
   const [shareProductColumns, setShareProductColumns] = useState<QuotationShareProductColumnKey[]>(() => quotationShareProductColumnOptions.map((option) => option.key));
   const [shareCabinetColumns, setShareCabinetColumns] = useState<QuotationShareCabinetColumnKey[]>(() => quotationShareCabinetColumnOptions.map((option) => option.key));
@@ -1831,11 +1846,32 @@ export default function QuotationsPage() {
   const openShareLinkDialog = (record: any) => {
     setShareLinkDialog(record);
     setShareExpireDays(7);
-    setShareQuotationValidUntil("");
+    setShareQuotationValidUntil(
+      shareQuotationValidUntilOverrides[String(record?.id || "")] ?? getRecordQuotationValidUntil(record),
+    );
     setShareBaseColumns(quotationShareBaseColumnOptions.map((option) => option.key));
     setShareProductColumns(quotationShareProductColumnOptions.map((option) => option.key));
     setShareCabinetColumns(quotationShareCabinetColumnOptions.map((option) => option.key));
     setMessage("");
+  };
+
+  const updateShareQuotationValidUntil = (value: string) => {
+    const nextValue = /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : "";
+    if (!shareLinkDialog) return;
+    const recordId = String(shareLinkDialog.id || "");
+    const previousValue = shareQuotationValidUntil;
+    setShareQuotationValidUntil(nextValue);
+    setShareQuotationValidUntilOverrides((current) => ({ ...current, [recordId]: nextValue }));
+    void api.post(`/api/quotations/${shareLinkDialog.id}`, {
+      action: "updateQuotationValidUntil",
+      quotationValidUntil: nextValue || null,
+    }).then(() => {
+      setMessage("");
+    }).catch((error: any) => {
+      setShareQuotationValidUntil(previousValue);
+      setShareQuotationValidUntilOverrides((current) => ({ ...current, [recordId]: previousValue }));
+      setMessage(error?.message || "保存报价执行有效期失败");
+    });
   };
 
   const toggleShareColumn = <Key extends string>(key: Key, setter: Dispatch<SetStateAction<Key[]>>) => {
@@ -2373,7 +2409,9 @@ export default function QuotationsPage() {
 	                    const costBreakdown = [
 	                      { label: "基装", amount: Number(record?.base_amount || 0) },
 	                      { label: "产品", amount: Number(record?.main_material_amount || 0) + Number(record?.custom_direct_amount || 0) },
-	                      { label: "综合费用", amount: Number(record?.other_amount || 0), alwaysShow: true },
+	                      ...(!isFormulaFeeRecord(record)
+	                        ? [{ label: getRecordFinalFeeLabel(record), amount: getRecordFinalFeeAmount(record), alwaysShow: true }]
+	                        : []),
 	                    ].filter((item) => Number.isFinite(item.amount) && (item.alwaysShow || Math.abs(item.amount) >= 0.01));
 	                    const quotationType = getRecordQuotationType(record);
 	                    const quotaTemplateName = getRecordQuotaTemplateName(record);
@@ -2670,14 +2708,14 @@ export default function QuotationsPage() {
                         type="date"
                         aria-label="报价执行有效期"
                         value={shareQuotationValidUntil}
-                        onChange={(event) => setShareQuotationValidUntil(event.target.value)}
+                        onChange={(event) => updateShareQuotationValidUntil(event.target.value)}
                         disabled={sharingLink}
                         className="h-10 min-w-0 flex-1 rounded-[9px] border border-[#dbe3ee] bg-white px-3 text-sm text-[#344054] outline-none transition focus:border-[#64d795] focus:ring-4 focus:ring-[#64d795]/10 disabled:opacity-60"
                       />
                       {shareQuotationValidUntil && (
                         <button
                           type="button"
-                          onClick={() => setShareQuotationValidUntil("")}
+                          onClick={() => updateShareQuotationValidUntil("")}
                           disabled={sharingLink}
                           className="h-10 rounded-[9px] border border-[#bfe8d2] bg-[#f3fbf6] px-3 text-xs font-semibold text-[#159a68] transition hover:bg-[#e8f8ee] disabled:opacity-60"
                         >

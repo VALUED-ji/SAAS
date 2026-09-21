@@ -30,6 +30,13 @@ type ParsedOption = {
 
 type MenuStyle = Pick<CSSProperties, "bottom" | "left" | "maxHeight" | "top" | "width">;
 
+export const EXCLUSIVE_DROPDOWN_OPEN_EVENT = "system:exclusive-dropdown-open";
+
+export function notifyExclusiveDropdownOpen(id: string) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(EXCLUSIVE_DROPDOWN_OPEN_EVENT, { detail: { id } }));
+}
+
 type SystemSelectProps = Omit<HTMLAttributes<HTMLDivElement>, "onChange" | "onKeyDown"> & {
   value?: string | number;
   defaultValue?: string | number;
@@ -138,6 +145,19 @@ export default function SystemSelect({
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    const handleOtherDropdownOpen = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      if (detail?.id && detail.id !== menuId) setOpen(false);
+    };
+    window.addEventListener(EXCLUSIVE_DROPDOWN_OPEN_EVENT, handleOtherDropdownOpen);
+    return () => window.removeEventListener(EXCLUSIVE_DROPDOWN_OPEN_EVENT, handleOtherDropdownOpen);
+  }, [menuId]);
+
+  useEffect(() => {
+    if (open) notifyExclusiveDropdownOpen(menuId);
+  }, [menuId, open]);
 
   useLayoutEffect(() => {
     if (!open) return;

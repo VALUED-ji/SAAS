@@ -7,9 +7,11 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { AlertTriangle, BookmarkPlus, Calculator, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Eraser, Eye, FileText, GripVertical, History, Home, LayoutGrid, Link2, List, Loader2, MapPin, Maximize2, Minimize2, Palette, Pencil, Phone, Plus, RefreshCw, Replace, Ruler, Search, Tags, Trash2, Unlink2, X } from "lucide-react";
 import {
   bindStableFeeFormula,
+  buildDirectFeeScopeReferences,
   calculateChargeableOtherFeeTotals,
   calculateOtherFeeDetails,
   calculateOtherFeeTotal,
+  calculateFormulaTableTotal,
   feeCalcMethodLabels,
   formatStableFeeFormula,
   getFeeFormulaText,
@@ -21,6 +23,7 @@ import {
   normalizeFeeCalcMethod,
   normalizeFeeScopeMode,
   parseFeeScopeValues,
+  remapStableScopeReferenceKeys,
   toMoney,
   toNumber,
   type FeeCalcBase,
@@ -53,7 +56,7 @@ const QuotationPrintDocument = dynamic(() => import("@/components/QuotationPrint
   loading: () => <div className="flex min-h-[300px] items-center justify-center text-sm text-surface-400">打印文档加载中...</div>,
 });
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
-import SystemSelect from "@/components/ui/SystemSelect";
+import SystemSelect, { EXCLUSIVE_DROPDOWN_OPEN_EVENT, notifyExclusiveDropdownOpen } from "@/components/ui/SystemSelect";
 import NativeImage from "@/components/ui/NativeImage";
 import QuotationChangeLogModal from "@/components/QuotationChangeLogModal";
 import { AmapLocationPicker, type LocationPick } from "@/components/ui/AddCustomerModal";
@@ -505,6 +508,8 @@ type QuotationDetail = {
     budgetCompilation?: string | null;
 	    quotaTemplateId?: string | null;
 	    quotaTemplateName?: string | null;
+	    comprehensiveFeeMode?: "standard" | "formula";
+	    formulaFinalFeeItemId?: string | null;
 	    quotationType?: string | null;
 	    quoteSpaces?: string[];
     quoteCategories?: string[];
@@ -555,10 +560,18 @@ const quoteCategoryCreateOptions = [
   { value: "main_material", label: "产品" },
   { value: "custom_cabinet", label: "定制柜" },
 ] as const;
+const quotationFeeValueSourceOptions = [
+  { value: "formula", label: "自定义公式" },
+  { value: "direct", label: "工程直接费" },
+  { value: "fixed", label: "固定金额" },
+  { value: "manual", label: "报价时填写" },
+  { value: "discount", label: "报价优惠" },
+] as const;
 const allSpacesValue = "__ALL_SPACES__";
 const defaultQuoteSpaces: string[] = [];
 const quotaLibraryStorageKey = "zxgj_quota_library_items";
 const budgetRecordReturnStateKey = "quotationBudgetRecordReturnState";
+const QUOTE_FEE_SUGGESTION_DROPDOWN_ID = "quotation-detail-fee-suggestion";
 let clientItemKeySeed = 0;
 
 function formatProjectInfoArea(value: unknown) {
@@ -1118,6 +1131,8 @@ function QuoteNumberInput({
   emptyWhenDisabled = false,
   allowFormula = false,
   decimalPlaces,
+  placeholder,
+  emptyWhenZero = false,
 }: {
   value: number;
   onChange: (value: number) => void;
@@ -1126,9 +1141,14 @@ function QuoteNumberInput({
   emptyWhenDisabled?: boolean;
   allowFormula?: boolean;
   decimalPlaces?: number;
+  placeholder?: string;
+  emptyWhenZero?: boolean;
 }) {
-  const [editingValue, setEditingValue] = useState(formatEditableNumber(value, decimalPlaces));
-  const displayValue = formatEditableNumber(value, decimalPlaces);
+  const formatDisplayValue = (nextValue: number) => (
+    emptyWhenZero && nextValue === 0 ? "" : formatEditableNumber(nextValue, decimalPlaces)
+  );
+  const [editingValue, setEditingValue] = useState(formatDisplayValue(value));
+  const displayValue = formatDisplayValue(value);
 
   useEffect(() => {
     setEditingValue(displayValue);
@@ -1140,7 +1160,7 @@ function QuoteNumberInput({
     const normalizedValue = decimalPlaces === undefined
       ? rawNormalizedValue
       : Number(rawNormalizedValue.toFixed(decimalPlaces));
-    setEditingValue(formatEditableNumber(normalizedValue, decimalPlaces));
+    setEditingValue(formatDisplayValue(normalizedValue));
     if (nextValue !== null && normalizedValue !== value) onChange(normalizedValue);
   };
 
@@ -1149,6 +1169,7 @@ function QuoteNumberInput({
       type="text"
       inputMode={allowFormula ? "text" : "decimal"}
       min={0}
+      placeholder={placeholder}
       disabled={disabled}
       value={disabled && emptyWhenDisabled ? "" : editingValue}
       onChange={(event) => {
@@ -1603,7 +1624,7 @@ function SpaceSelectCell({
   );
 }
 
-function newItem(category: QuotationItem["category"], space?: string): QuotationItem {
+function newItem(category: QuotationItem["category"], space?: string, options: { formulaFeeMode?: boolean } = {}): QuotationItem {
   const isOther = isOtherCategory(category);
   const itemId = makeClientItemId();
   return {
@@ -1624,7 +1645,14 @@ function newItem(category: QuotationItem["category"], space?: string): Quotation
     unit_price: 0,
     material_cost: 0,
     labor_cost: 0,
-    ...(isOther ? { fee_calc_method: "fixed" as const, fee_calc_base: "", fee_rate: 0, fee_scope_mode: "all" as const, fee_scope_space_names: [] } : {}),
+    ...(isOther ? {
+      ...(options.formulaFeeMode ? { cost_source: "fee_source:formula" as const } : {}),
+      fee_calc_method: options.formulaFeeMode ? "formula" as const : "fixed" as const,
+      fee_calc_base: "",
+      fee_rate: 0,
+      fee_scope_mode: "all" as const,
+      fee_scope_space_names: [],
+    } : {}),
   };
 }
 
@@ -1820,10 +1848,76 @@ function getFeeCalcMethodPatch(method: FeeCalcMethod, item: QuotationItem): Part
     return { fee_calc_method: "area_unit", fee_calc_base: "房屋面积", fee_rate: 0, unit_price: toNumber(item.unit_price), quantity: 1 };
   }
   const feeCalcBase = normalizeFeeCalcBase(item.fee_calc_base) || "直接费";
+  if (method === "formula") {
+    return { fee_calc_method: "formula", fee_calc_base: "", fee_rate: 0, unit_price: 0, quantity: 1 };
+  }
   if (method === "reference") {
     return { fee_calc_method: "reference", fee_calc_base: feeCalcBase, fee_rate: 0, quantity: 1 };
   }
   return { fee_calc_method: "percent", fee_calc_base: feeCalcBase, fee_rate: toNumber(item.fee_rate), quantity: 1 };
+}
+
+function getQuotationFeeValueSource(item: Partial<QuotationItem>) {
+  const match = String(item.cost_source || "").match(/^fee_source:(formula|manual|fixed|direct|discount)$/);
+  return match?.[1] as "formula" | "manual" | "fixed" | "direct" | "discount" | undefined;
+}
+
+function getQuotationFeeValueSourcePatch(
+  valueSource: "formula" | "manual" | "fixed" | "direct" | "discount",
+  item: QuotationItem,
+): Partial<QuotationItem> {
+  if (valueSource === "formula") {
+    return {
+      cost_source: "fee_source:formula",
+      fee_calc_method: "formula",
+      fee_calc_base: normalizeFeeCalcBase(item.fee_calc_base),
+      fee_rate: 0,
+      unit_price: 0,
+      quantity: 1,
+    };
+  }
+  if (valueSource === "direct") {
+    return {
+      cost_source: "fee_source:direct",
+      fee_calc_method: "reference",
+      fee_calc_base: "直接费",
+      fee_rate: 0,
+      unit_price: 0,
+      quantity: 1,
+    };
+  }
+  if (valueSource === "discount") {
+    return {
+      cost_source: "fee_source:discount",
+      fee_calc_method: "reference",
+      fee_calc_base: "",
+      fee_rate: 0,
+      unit_price: 0,
+      quantity: 1,
+    };
+  }
+  if (valueSource === "manual") {
+    return {
+      cost_source: "fee_source:manual",
+      fee_calc_method: "fixed",
+      fee_calc_base: "",
+      fee_rate: 0,
+      unit_price: toNumber(item.unit_price),
+      quantity: 1,
+    };
+  }
+  const currentBase = normalizeFeeCalcBase(item.fee_calc_base);
+  const fixedBase = /^-?\d+(?:\.\d+)?$/.test(currentBase)
+    ? currentBase
+    : String(toNumber(item.unit_price) || 0);
+  return {
+    cost_source: "fee_source:fixed",
+    fee_calc_method: "formula",
+    fee_calc_base: fixedBase,
+    fee_rate: 0,
+    unit_price: 0,
+    quantity: 1,
+  };
 }
 
 function inferItemSpace(item: Partial<QuotationItem>) {
@@ -1868,9 +1962,19 @@ function normalizeQuotationItems(items: QuotationItem[], options: { inferMissing
     };
   });
   const otherItems = normalized.filter((item) => isOtherCategory(item.category));
+  const scopeReferences = buildDirectFeeScopeReferences(
+    normalized
+      .filter((item) => !isOtherCategory(item.category))
+      .map((item) => ({
+        category: getFeeScopeCategoryKey(item.category),
+        categoryLabel: getFeeScopeCategoryLabel(item.category),
+        space: inferItemSpace(item),
+        total: getBaseOrMaterialItemTotal(item),
+      })),
+  );
   const withBoundFees = normalized.map((item) => !isOtherCategory(item.category) || normalizeFeeCalcMethod(item.fee_calc_method) === "fixed" || normalizeFeeCalcMethod(item.fee_calc_method) === "area_unit" ? item : {
     ...item,
-    fee_calc_base: bindStableFeeFormula(item.fee_calc_base, otherItems),
+    fee_calc_base: bindStableFeeFormula(item.fee_calc_base, otherItems, 0, scopeReferences),
   });
   return applyQuotationQuantityLinks(withBoundFees);
 }
@@ -2032,6 +2136,7 @@ function buildFeeFormulaContext(items: QuotationItem[], categories: string[] = [
     laborAmount,
     materialCostAmount,
     categoryAmounts,
+    scopeReferences: buildDirectFeeScopeReferences(directItems),
     directItems,
   };
 }
@@ -2041,17 +2146,31 @@ function shouldShowAutoOtherFeeRule(item: QuotationItem) {
   return name === "工程直接费" || name === "直接费" || name === "工程总造价" || name === "总造价";
 }
 
-function getOtherFeeRuleDisplay(item: QuotationItem, total: number, context?: FeeFormulaContext) {
+function getOtherFeeRuleDisplay(item: QuotationItem, total: number, context?: FeeFormulaContext, items?: QuotationItem[]) {
   const remark = String(item.remark || "").trim();
   if (remark) return remark;
   if (!shouldShowAutoOtherFeeRule(item)) return remark;
 
-  const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context);
+  const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context, items);
   return rule;
 }
 
 function calculate(items: QuotationItem[], settings: QuotationDetail["settings"], houseArea = 0) {
-  const rawTotals = calculateRawTotals(items, settings, houseArea);
+  const initialRawTotals = calculateRawTotals(items, settings, houseArea);
+  if (initialRawTotals.formulaTableMode) {
+    const undiscountedRawTotals = calculateRawTotals(items, { ...settings, discount: 0 }, houseArea);
+    const discountRules = getDiscountRules(settings);
+    const ruleDiscount = discountRules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, undiscountedRawTotals, houseArea)), 0);
+    const discount = Math.min(undiscountedRawTotals.directAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : toNumber(settings?.discount)));
+    const rawTotals = calculateRawTotals(items, { ...settings, discount }, houseArea);
+    return {
+      ...rawTotals,
+      taxAmount: 0,
+      discount,
+      finalAmount: rawTotals.directAmount,
+    };
+  }
+  const rawTotals = initialRawTotals;
   const chargeableAmount = rawTotals.directAmount;
   const discountRules = getDiscountRules(settings);
   const ruleDiscount = discountRules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, rawTotals, houseArea)), 0);
@@ -2150,16 +2269,18 @@ function getDiscountScopeOptions(items: QuotationItem[], settings: QuotationDeta
     .filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category))
     .reduce((sum, item) => toMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
   const discountableDirectAmount = discountableBaseAmount + discountableProductAmount + discountableCustomCategoryAmount;
-
+  const totalDiscountAmount =
+    settings?.comprehensiveFeeMode === "formula" && String(settings?.formulaFinalFeeItemId || "").trim()
+      ? totals.otherAmount
+      : discountableDirectAmount + totals.otherAmount;
   const fixedOptions: DiscountScopeOption[] = [
     { value: "base", label: "基装直接费", amount: discountableBaseAmount },
     { value: "base_labor", label: "基装直接费（人工）", amount: discountableItems.reduce((sum, item) => toMoney(sum + getBaseLaborSubtotal(item)), 0) },
     { value: "base_material", label: "基装直接费（材料）", amount: discountableItems.reduce((sum, item) => toMoney(sum + getBaseMaterialSubtotal(item)), 0) },
     { value: "product", label: "产品费用", amount: discountableProductAmount },
     { value: "custom_cabinet", label: "定制柜费用", amount: customCabinetAmount },
-    { value: "other", label: "综合费用", amount: totals.otherAmount },
     { value: "direct", label: "工程直接费", amount: discountableDirectAmount },
-    { value: "total", label: "总价", amount: discountableDirectAmount + totals.otherAmount },
+    { value: "total", label: "总价", amount: totalDiscountAmount },
   ];
 
   const fixedLabels = new Set(fixedOptions.map((option) => option.label));
@@ -2242,6 +2363,10 @@ function getDiscountRuleValue(rule: DiscountRule) {
   return rule.scope || "total";
 }
 
+function isRemovedOtherFeeDiscountScope(value: string) {
+  return value.startsWith("fee:");
+}
+
 function getDiscountRuleScope(rule: DiscountRule, items: QuotationItem[], settings: QuotationDetail["settings"], totals: ReturnType<typeof calculateRawTotals>, houseArea = 0) {
   const options = rule.type === "space"
     ? getDiscountSpaceOptions(items, settings)
@@ -2249,6 +2374,9 @@ function getDiscountRuleScope(rule: DiscountRule, items: QuotationItem[], settin
       ? getDiscountWorkTypeOptions(items, settings)
       : getDiscountScopeOptions(items, settings, totals, houseArea);
   const value = getDiscountRuleValue(rule);
+  if (rule.type === "fee" && isRemovedOtherFeeDiscountScope(value)) {
+    return options.find((option) => option.value === value);
+  }
   return options.find((option) => option.value === value)
     || options.find((option) => option.value === "total")
     || options[0];
@@ -2270,12 +2398,35 @@ function calculateRawTotals(items: QuotationItem[], settings: QuotationDetail["s
   const customCategoryAmount = items.filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const directBaseAmount = materialAmount + customCategoryAmount;
   const otherItems = items.filter((item) => isOtherCategory(item.category));
-  const feeFormulaContext = buildFeeFormulaContext(items, settings?.quoteCategories, houseArea);
+  const feeFormulaContext = {
+    ...buildFeeFormulaContext(items, settings?.quoteCategories, houseArea),
+    discountAmount: toNumber(settings?.discount),
+  };
+  if (settings?.comprehensiveFeeMode === "formula" && String(settings.formulaFinalFeeItemId || "").trim()) {
+    const formulaTable = calculateFormulaTableTotal(
+      otherItems,
+      baseAmount,
+      directBaseAmount,
+      String(settings.formulaFinalFeeItemId || "").trim(),
+      feeFormulaContext,
+    );
+    return {
+      baseAmount,
+      materialAmount: directBaseAmount,
+      mainMaterialAmount: materialAmount,
+      customCategoryAmount,
+      otherAmount: formulaTable.finalAmount,
+      directAmount: formulaTable.finalAmount,
+      totalDirectAmount: baseAmount + directBaseAmount,
+      managementFee: 0,
+      formulaTableMode: true,
+    };
+  }
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, directBaseAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
   const totalDirectAmount = baseAmount + directBaseAmount;
   const managementFee = 0;
   const chargeableAmount = baseAmount + directBaseAmount + otherAmount;
-  return { baseAmount, materialAmount: directBaseAmount, mainMaterialAmount: materialAmount, customCategoryAmount, otherAmount, directAmount: chargeableAmount, totalDirectAmount, managementFee };
+  return { baseAmount, materialAmount: directBaseAmount, mainMaterialAmount: materialAmount, customCategoryAmount, otherAmount, directAmount: chargeableAmount, totalDirectAmount, managementFee, formulaTableMode: false };
 }
 
 function makeSavePayload(
@@ -2871,6 +3022,13 @@ export default function QuotationDetailPage() {
 
   const quotationHouseArea = useMemo(() => toNumber(data?.customer_area_size ?? data?.project_area), [data?.customer_area_size, data?.project_area]);
   const totals = useMemo(() => calculate(items, settings, quotationHouseArea), [items, quotationHouseArea, settings]);
+  const formulaFinalFeeLabel = useMemo(() => {
+    const finalFeeItemId = String(settings?.formulaFinalFeeItemId || "").trim();
+    const finalFeeName = finalFeeItemId
+      ? String(items.find((item) => String(item.id || "") === finalFeeItemId)?.name || "").trim()
+      : "";
+    return finalFeeName || "报价总额";
+  }, [items, settings?.formulaFinalFeeItemId]);
   const discountSettings = discountPanelOpen && discountDraftSettings ? discountDraftSettings : settings;
   const discountPreviewTotals = useMemo(() => calculate(items, discountSettings, quotationHouseArea), [items, discountSettings, quotationHouseArea]);
   const undiscountedTotals = useMemo(() => calculateRawTotals(items, { ...discountSettings, discount: 0, discountRules: [] }, quotationHouseArea), [items, discountSettings, quotationHouseArea]);
@@ -2892,7 +3050,8 @@ export default function QuotationDetailPage() {
     || activeDiscountOptions.find((option) => option.value === "total")
     || activeDiscountOptions[0];
   const discountRules = useMemo(() => getDiscountRules(discountSettings), [discountSettings]);
-  const activeDiscountRule = discountRules.find((rule) => rule.type === discountType && getDiscountRuleValue(rule) === discountSelectionValue) || null;
+  const activeDiscountRuleValue = selectedDiscountScope?.value || discountSelectionValue;
+  const activeDiscountRule = discountRules.find((rule) => rule.type === discountType && getDiscountRuleValue(rule) === activeDiscountRuleValue) || null;
   const discountMode = activeDiscountRule?.mode || (discountSettings?.discountMode === "rate" ? "rate" : "amount");
   const discountRate = Math.min(1, Math.max(0, toNumber(activeDiscountRule?.rate ?? discountSettings?.discountRate ?? 1)));
   const currentRuleDiscountAmount = toNumber(activeDiscountRule?.discount ?? (discountRules.length === 0 ? discountSettings?.discount : 0));
@@ -2905,6 +3064,7 @@ export default function QuotationDetailPage() {
     : discountMode === "rate"
       ? roundMoney(discountBaseAmount * (1 - discountRate))
       : Math.min(currentRuleDiscountAmount, discountBaseAmount);
+  const discountSummaryTotalAmount = Math.max(0, undiscountedTotals.directAmount);
   const discountAfterAmount = Math.max(0, discountPreviewTotals.finalAmount);
   const discountExcludeMeta = useMemo(() => {
     const specialItems = items.filter((item) => !isOtherCategory(item.category) && isSpecialQuoteItem(item));
@@ -2953,8 +3113,10 @@ export default function QuotationDetailPage() {
         rate: Math.min(1, Math.max(0, toNumber(patch.rate ?? currentSettings.discountRate ?? 1))),
       };
       const shouldKeep = rule.mode === "rate" ? toNumber(rule.rate) < 1 : toNumber(rule.discount) > 0;
+      const currentRuleValue = value;
+      const nextRuleValue = getDiscountRuleValue(rule);
       const nextRules = getDiscountRules(currentSettings)
-        .filter((item) => !(item.type === rule.type && getDiscountRuleValue(item) === getDiscountRuleValue(rule)));
+        .filter((item) => !(item.type === rule.type && (getDiscountRuleValue(item) === nextRuleValue || getDiscountRuleValue(item) === currentRuleValue)));
       if (shouldKeep) nextRules.push(rule);
       return recomputeDiscountSettings({
         ...currentSettings,
@@ -2964,7 +3126,7 @@ export default function QuotationDetailPage() {
         discount: rule.discount,
       });
     });
-  }, [items, recomputeDiscountSettings, updateDiscountDraftSettings]);
+  }, [items, quotationHouseArea, recomputeDiscountSettings, updateDiscountDraftSettings]);
   const removeDiscountRule = useCallback((rule: DiscountRule) => {
     updateDiscountDraftSettings((current) => {
       const currentSettings = current || {};
@@ -3228,8 +3390,11 @@ export default function QuotationDetailPage() {
     setActiveCategory(getFirstProjectCategoryForSpace(space));
   }, [getFirstProjectCategoryForSpace]);
   const feeFormulaContext = useMemo(
-    () => buildFeeFormulaContext(items, quoteCategories, quotationHouseArea),
-    [items, quotationHouseArea, quoteCategories],
+    () => ({
+      ...buildFeeFormulaContext(items, quoteCategories, quotationHouseArea),
+      discountAmount: totals.discount,
+    }),
+    [items, quotationHouseArea, quoteCategories, totals.discount],
   );
   const activeSpaces = useMemo(() => getSpacesForCategory(items, activeCategory, customSpaces), [activeCategory, customSpaces, items]);
   const feeScopeOptions = useMemo(() => getFeeScopeOptions(items, customSpaces, quoteCategories), [customSpaces, items, quoteCategories]);
@@ -3920,7 +4085,9 @@ export default function QuotationDetailPage() {
 
   const appendManualItem = (category: QuotationItem["category"], space?: string) => {
     if (isReadonly) return;
-    const item = newItem(category, space);
+    const item = newItem(category, space, {
+      formulaFeeMode: isOtherCategory(category) && settings?.comprehensiveFeeMode === "formula",
+    });
     const itemKey = item.client_key || "";
     pendingRevealItemKeyRef.current = itemKey;
     setItemSearch("");
@@ -4672,6 +4839,15 @@ export default function QuotationDetailPage() {
     return nextName;
   };
 
+  const remapSpaceScopeReferences = (current: QuotationItem[], previousName: string, nextName: string) => {
+    const keyMap = new Map([[`space:${previousName}`, `space:${nextName}`]]);
+    return current.map((item) => (
+      isOtherCategory(item.category) && item.fee_calc_base
+        ? { ...item, fee_calc_base: remapStableScopeReferenceKeys(item.fee_calc_base, keyMap) }
+        : item
+    ));
+  };
+
   const renameSpaceInline = (space: string, value: string) => {
     const nextName = String(value || "").trim();
     if (!nextName || nextName === space) {
@@ -4684,7 +4860,11 @@ export default function QuotationDetailPage() {
       return false;
     }
     updateSpaces((spaces) => spaces.map((item) => item === space ? nextName : item));
-    setItems((current) => current.map((item) => inferItemSpace(item) === space ? { ...item, space: nextName } : item));
+    setItems((current) => remapSpaceScopeReferences(
+      current.map((item) => inferItemSpace(item) === space ? { ...item, space: nextName } : item),
+      space,
+      nextName,
+    ));
     setActiveSpace(nextName);
     setEditingSpaceName(null);
     setEditingSpaceValue("");
@@ -4882,7 +5062,11 @@ export default function QuotationDetailPage() {
           return false;
         }
         updateSpaces((spaces) => spaces.map((item) => item === space ? nextName : item));
-        setItems((current) => current.map((item) => inferItemSpace(item) === space ? { ...item, space: nextName } : item));
+        setItems((current) => remapSpaceScopeReferences(
+          current.map((item) => inferItemSpace(item) === space ? { ...item, space: nextName } : item),
+          space,
+          nextName,
+        ));
         setActiveSpace(nextName);
         return true;
       },
@@ -6519,7 +6703,7 @@ export default function QuotationDetailPage() {
                   >
                     <span className="quote-discount-choice-icon"><FileText className="h-4 w-4" /></span>
                     <span className="quote-discount-mode-title">按费用类型</span>
-                    <span className="quote-discount-mode-desc">从基装、产品、综合费用等范围优惠</span>
+                    <span className="quote-discount-mode-desc">从直接费、产品、空间或工种设置优惠</span>
                   </button>
                   <button
                     type="button"
@@ -6741,8 +6925,8 @@ export default function QuotationDetailPage() {
               )}
               <div className="quote-discount-result-grid grid grid-cols-3 gap-3">
                 <div className="quote-discount-result-card">
-	                  <p className="text-[11px] font-semibold text-surface-500">{discountBaseLabel}金额</p>
-                  <p className="mt-1 text-sm font-semibold tabular-nums text-surface-900">{formatQuoteAmount(discountBaseAmount)}</p>
+                  <p className="text-[11px] font-semibold text-surface-500">总价金额</p>
+                  <p className="mt-1 text-sm font-semibold tabular-nums text-surface-900">{formatQuoteAmount(discountSummaryTotalAmount)}</p>
                 </div>
                 <div className="quote-discount-result-card quote-discount-result-card-warn">
                   <p className="text-[11px] font-semibold text-orange-600">优惠金额</p>
@@ -7245,7 +7429,7 @@ export default function QuotationDetailPage() {
               >
                 <Tags className="h-3.5 w-3.5" />
                 <span>报价优惠</span>
-                <span className="quote-discount-action-amount tabular-nums">{formatQuoteAmount(settings?.discount || 0)}</span>
+                <span className="quote-discount-action-amount tabular-nums">{formatQuoteAmount(totals.discount || 0)}</span>
               </button>
               <button
                 type="button"
@@ -7256,7 +7440,6 @@ export default function QuotationDetailPage() {
               >
                 <Calculator className="h-3.5 w-3.5" />
                 <span>综合费用</span>
-                <span className="quote-comprehensive-fee-amount tabular-nums">{formatQuoteAmount(totals.otherAmount)}</span>
               </button>
               <button
                 type="button"
@@ -7281,10 +7464,18 @@ export default function QuotationDetailPage() {
                   <strong className="tabular-nums">¥{formatQuoteAmount(totals.directAmount)}</strong>
                 </div>
                 <div className="quote-total-breakdown-list">
-                  <div><span>基装</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.baseAmount)}</strong></div>
-                  <div><span>产品</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.mainMaterialAmount)}</strong></div>
-                  <div><span>定制柜</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.customCategoryAmount)}</strong></div>
-                  <div><span>综合费用</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.otherAmount)}</strong></div>
+                  <div className="quote-total-breakdown-section-label">直接费用</div>
+                  <div className="quote-total-breakdown-row"><span>基装</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.baseAmount)}</strong></div>
+                  <div className="quote-total-breakdown-row"><span>产品</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.mainMaterialAmount)}</strong></div>
+                  <div className="quote-total-breakdown-row"><span>定制柜</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.customCategoryAmount)}</strong></div>
+                  <div className="quote-total-breakdown-divider" />
+                  <div className="quote-total-breakdown-section-label">报价结果</div>
+                  <div className="quote-total-breakdown-row quote-total-breakdown-final-row">
+                    <span className="quote-total-breakdown-final-copy">
+                      <span className="quote-total-breakdown-final-name">{formulaFinalFeeLabel}</span>
+                    </span>
+                    <strong className="tabular-nums">¥{formatQuoteAmount(totals.directAmount)}</strong>
+                  </div>
                 </div>
               </div>
             )}
@@ -7718,6 +7909,7 @@ export default function QuotationDetailPage() {
             baseAmount={totals.baseAmount}
             materialAmount={totals.materialAmount}
             feeFormulaContext={feeFormulaContext}
+            formulaFinalFeeItemId={String(settings?.formulaFinalFeeItemId || "")}
             isAllSpaceView={isAllSpaceView}
             searchValue={itemSearch}
             onSearchChange={setItemSearch}
@@ -7814,6 +8006,7 @@ export default function QuotationDetailPage() {
             recentlyMovedItemKey={recentlyMovedItemKey}
             activeFindReplaceHighlight={activeFindReplaceHighlight}
             onItemPointerDown={startPointerItemDrag}
+            onNotify={showAlert}
           />
         )}
       </div>
@@ -9632,7 +9825,7 @@ export default function QuotationDetailPage() {
         .quotation-detail-ui .quote-row-index-inner .quote-row-number {
           min-width: 0;
           font-size: 12px !important;
-          font-weight: 400 !important;
+          font-weight: 600 !important;
           line-height: 1;
           text-align: center;
         }
@@ -9998,6 +10191,25 @@ export default function QuotationDetailPage() {
           background: #fbfdff;
           padding: 6px;
           box-shadow: 0 10px 28px rgba(38, 56, 84, 0.08);
+        }
+        .quotation-detail-ui .quote-fee-scope-popover-copy {
+          padding: 7px 8px 9px;
+          color: #526275;
+        }
+        .quotation-detail-ui .quote-fee-scope-popover-copy strong {
+          display: block;
+          color: #34445a;
+          font-size: 12px;
+          font-weight: 700;
+          line-height: 18px;
+        }
+        .quotation-detail-ui .quote-fee-scope-popover-copy span {
+          display: block;
+          margin-top: 3px;
+          color: #7a8699;
+          font-size: 11px;
+          font-weight: 500;
+          line-height: 16px;
         }
         .quotation-detail-ui .quote-fee-scope-popover-segment {
           display: grid;
@@ -10839,6 +11051,16 @@ export default function QuotationDetailPage() {
           padding-top: 0 !important;
           padding-bottom: 0 !important;
           vertical-align: middle !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-other-fees .quote-other-fees-table > tbody > .quote-item-row > td:not(:nth-last-child(2)) {
+          font-weight: 500 !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-other-fees .quote-other-fees-table > tbody > .quote-item-row > td:not(:nth-last-child(2)) :is(input, textarea, button, .quote-cell-editable, .quote-cell-input, .quote-cell-select) {
+          font-weight: 500 !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section-other-fees .quote-other-fees-table > tbody > .quote-item-row > .quote-other-fee-subtotal-cell,
+        .quotation-detail-ui.quote-workbench-shell .quote-section-other-fees .quote-other-fees-table > tbody > .quote-item-row > .quote-other-fee-subtotal-cell :is(input, textarea, button, .quote-cell-editable, .quote-cell-input, .quote-cell-select) {
+          font-weight: 600 !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-other-fees .quote-fee-method-select,
         .quotation-detail-ui.quote-workbench-shell .quote-section-other-fees .quote-fee-scope-trigger {
@@ -11974,21 +12196,63 @@ export default function QuotationDetailPage() {
         }
         .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-list {
           display: grid;
-          gap: 1px;
-          padding: 7px 14px 9px;
+          gap: 2px;
+          padding: 9px 12px 11px;
         }
-        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-list div {
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-row {
           display: flex;
           align-items: center;
           justify-content: space-between;
           gap: 12px;
           min-height: 30px;
+          padding: 0 2px;
           color: #667085;
           font-size: 12px;
         }
-        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-list strong {
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-row strong {
           color: #344054;
           font-weight: 700;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-section-label {
+          padding: 2px 2px 1px;
+          color: #98a2b3;
+          font-size: 11px;
+          font-weight: 700;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-divider {
+          height: 1px;
+          margin: 7px 0;
+          background: #e7f1eb;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-final-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 10px;
+          min-height: 52px;
+          border-radius: 8px;
+          background: #f5fcf8;
+          padding: 9px 10px;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-final-row strong {
+          flex: 0 0 auto;
+          align-self: center;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-final-copy {
+          display: flex;
+          min-width: 0;
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 4px;
+          color: #176b49;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-total-breakdown-final-name {
+          min-width: 0;
+          color: #176b49;
+          font-size: 12px;
+          font-weight: 700;
+          line-height: 18px;
+          overflow-wrap: anywhere;
         }
         .quotation-detail-ui.quote-workbench-shell .screen-quote-sections > section.quote-compact-navigation-single-row {
           position: sticky !important;
@@ -13649,7 +13913,7 @@ function QuoteCategoryChooser({
   );
 }
 
-function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, spaceOptions, feeScopeOptions, otherFeeRows, baseAmount, materialAmount, feeFormulaContext, isAllSpaceView, searchValue, onSearchChange, onAdd, onManualAdd, onOpenFindReplace, quotaUpdateEntry, categoryNavigation, useQuotaLibraryAction, quantityLinkPanel, quantityLinkPickMode, onQuantityLinkPick, selectedItemKeys, selectedItemCount, onToggleItemSelection, onToggleAllItemSelection, onDeleteSelectedItems, onChange, onOpenRowMenu, onOpenQuantityLink, onReplaceBaseItem, readOnly, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onItemPointerDown }: {
+function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, spaceOptions, feeScopeOptions, otherFeeRows, baseAmount, materialAmount, feeFormulaContext, formulaFinalFeeItemId, isAllSpaceView, searchValue, onSearchChange, onAdd, onManualAdd, onOpenFindReplace, quotaUpdateEntry, categoryNavigation, useQuotaLibraryAction, quantityLinkPanel, quantityLinkPickMode, onQuantityLinkPick, selectedItemKeys, selectedItemCount, onToggleItemSelection, onToggleAllItemSelection, onDeleteSelectedItems, onChange, onOpenRowMenu, onOpenQuantityLink, onReplaceBaseItem, readOnly, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onItemPointerDown, onNotify }: {
   title: string;
   category: QuotationItem["category"];
   activeSpace?: string;
@@ -13661,6 +13925,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
   baseAmount: number;
   materialAmount: number;
   feeFormulaContext?: FeeFormulaContext;
+  formulaFinalFeeItemId?: string;
   isAllSpaceView?: boolean;
   searchValue: string;
   onSearchChange: (value: string) => void;
@@ -13688,6 +13953,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
   recentlyMovedItemKey: string | null;
   activeFindReplaceHighlight?: FindReplaceActiveHighlight | null;
   onItemPointerDown: (event: ReactPointerEvent<HTMLButtonElement>, index: number) => void;
+  onNotify?: (title: string, message: string, tone?: QuoteSystemDialogState["tone"]) => void;
 }) {
   const isBase = isBaseCategory(category);
   const isOther = isOtherCategory(category);
@@ -13889,6 +14155,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           baseAmount={baseAmount}
           materialAmount={materialAmount}
           feeFormulaContext={feeFormulaContext}
+          formulaFinalFeeItemId={formulaFinalFeeItemId}
           emptyText={emptyText}
           draggingItemIndex={draggingItemIndex}
           dragOverItem={dragOverItem}
@@ -13902,6 +14169,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           onToggleAllItemSelection={onToggleAllItemSelection}
           readOnly={readOnly}
           onItemPointerDown={onItemPointerDown}
+          onNotify={onNotify}
         />
       )}
       </div>
@@ -15283,9 +15551,9 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
 }
 
 const feeScopeModeOptions: Array<{ value: FeeScopeMode; label: string }> = [
-  { value: "all", label: "全部" },
-  { value: "exclude", label: "排除" },
-  { value: "include", label: "仅含" },
+  { value: "all", label: "全部空间和类别都统计" },
+  { value: "exclude", label: "排除选中的空间和类别" },
+  { value: "include", label: "仅统计选中的空间和类别" },
 ];
 
 function FeeScopeSelector({
@@ -15310,8 +15578,8 @@ function FeeScopeSelector({
   const [popoverPosition, setPopoverPosition] = useState({ left: 0, top: 0 });
   const selectedSet = new Set(selectedNames);
   const selectedText = selectedNames.length > 0 ? selectedNames.join("、") : "请选择范围";
-  const modeLabel = mode === "exclude" ? "排除" : mode === "include" ? "仅含" : "";
-  const summary = mode === "all" ? "全部计入" : `${modeLabel}：${selectedText}`;
+  const modeLabel = mode === "exclude" ? "排除" : mode === "include" ? "仅统计" : "";
+  const summary = mode === "all" ? "全部统计" : `${modeLabel}：${selectedText}`;
   const updatePopoverPosition = useCallback(() => {
     const trigger = triggerRef.current;
     if (!trigger) return;
@@ -15319,7 +15587,7 @@ function FeeScopeSelector({
     const width = 286;
     const viewportPadding = 12;
     const currentHeight = popoverRef.current?.offsetHeight;
-    const estimatedHeight = currentHeight || (mode === "all" ? 132 : Math.min(286, 114 + Math.min(Math.max(options.length, 1), 5) * 32));
+    const estimatedHeight = currentHeight || (mode === "all" ? 202 : Math.min(356, 184 + Math.min(Math.max(options.length, 1), 5) * 32));
     const left = Math.min(Math.max(rect.left + rect.width / 2 - width / 2, viewportPadding), window.innerWidth - width - viewportPadding);
     const hasRoomAbove = rect.top >= estimatedHeight + viewportPadding;
     const top = hasRoomAbove ? rect.top - estimatedHeight - 6 : Math.min(rect.bottom + 6, window.innerHeight - estimatedHeight - viewportPadding);
@@ -15356,7 +15624,11 @@ function FeeScopeSelector({
         className="quote-fee-scope-popover"
         style={{ left: popoverPosition.left, top: popoverPosition.top }}
       >
-        <div className="quote-fee-scope-popover-segment" role="group" aria-label="计费范围">
+        <div className="quote-fee-scope-popover-copy">
+          <strong>公式里没有指定空间或类别的费用，按这里统计</strong>
+          <span>例如“直接费”会按这里统计；“拆除项目”等已指定范围的费用不受影响。</span>
+        </div>
+        <div className="quote-fee-scope-popover-segment" role="group" aria-label="默认统计范围">
           {feeScopeModeOptions.map((option) => (
             <button
               key={option.value}
@@ -15367,7 +15639,7 @@ function FeeScopeSelector({
                 if (option.value === "all") setOpen(false);
               }}
             >
-              <span>{option.value === "all" ? "全部空间/类别都计入" : option.value === "exclude" ? "不计入选中的空间/类别" : "只计入选中的空间/类别"}</span>
+              <span>{option.label}</span>
               <span className="quote-fee-scope-mode-dot" />
             </button>
           ))}
@@ -15428,7 +15700,7 @@ function FeeScopeSelector({
   );
 }
 
-function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, spaceOptions, feeScopeOptions: feeScopeOptionsInput, isOtherFees, baseAmount, materialAmount, feeFormulaContext, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onOpenQuantityLink, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
+function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, spaceOptions, feeScopeOptions: feeScopeOptionsInput, isOtherFees, baseAmount, materialAmount, feeFormulaContext, formulaFinalFeeItemId, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onOpenQuantityLink, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown, onNotify }: {
   items: { item: QuotationItem; index: number }[];
   otherFeeRows: { item: QuotationItem; index: number }[];
   showSpace?: boolean;
@@ -15439,6 +15711,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
   baseAmount: number;
   materialAmount: number;
   feeFormulaContext?: FeeFormulaContext;
+  formulaFinalFeeItemId?: string;
   emptyText: string;
   draggingItemIndex: number | null;
   dragOverItem: DragOverItemState;
@@ -15452,9 +15725,45 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
   onToggleAllItemSelection: (keys: string[]) => void;
   readOnly?: boolean;
   onItemPointerDown: (event: ReactPointerEvent<HTMLButtonElement>, index: number) => void;
+  onNotify?: (title: string, message: string, tone?: QuoteSystemDialogState["tone"]) => void;
 }) {
   const [feeFormulaDrafts, setFeeFormulaDrafts] = useState<Record<string, string>>({});
+  const [feeSuggestion, setFeeSuggestion] = useState<{ itemKey: string; left: number; top: number; width: number } | null>(null);
+  const [feeSuggestionActiveIndex, setFeeSuggestionActiveIndex] = useState(0);
+  const feeSuggestionInputRef = useRef<HTMLInputElement | null>(null);
+  const feeSuggestionMenuRef = useRef<HTMLDivElement | null>(null);
   const otherFeeItems = useMemo(() => otherFeeRows.map(({ item }) => item), [otherFeeRows]);
+  const hasFormulaTableRows = useMemo(
+    () => otherFeeItems.some((item) => Boolean(getQuotationFeeValueSource(item))),
+    [otherFeeItems],
+  );
+  const feeSuggestionOptions = useMemo(() => {
+    const options: Array<{ key: string; group: string; label: string; value: string }> = [];
+    otherFeeRows.forEach(({ item, index }, rowIndex) => {
+      const itemKey = getQuotationItemKey(item, index);
+      const sequence = formatAlphaSequence(rowIndex);
+      options.push({
+        key: `fee:${itemKey}`,
+        group: "费用行",
+        label: `${sequence} · ${item.name || "未命名费用"}`,
+        value: sequence,
+      });
+    });
+    ["直接费", "人工费", "材料费"].forEach((label) => {
+      options.push({ key: `builtin:${label}`, group: "内置取值", label, value: label });
+    });
+    (feeFormulaContext?.scopeReferences || []).forEach((reference) => {
+      const label = String(reference.label || "").trim();
+      if (!label) return;
+      options.push({ key: `scope:${reference.key}`, group: "空间/类别", label, value: label });
+    });
+    return options;
+  }, [feeFormulaContext?.scopeReferences, otherFeeRows]);
+  const visibleFeeSuggestionOptions = useMemo(() => (
+    feeSuggestion
+      ? feeSuggestionOptions.filter((option) => option.key !== `fee:${feeSuggestion.itemKey}`)
+      : []
+  ), [feeSuggestion, feeSuggestionOptions]);
   const validationOtherFeeItems = useMemo(() => otherFeeRows.map(({ item, index }) => {
     const itemKey = getQuotationItemKey(item, index);
     return feeFormulaDrafts[itemKey] !== undefined ? { ...item, fee_calc_base: feeFormulaDrafts[itemKey] } : item;
@@ -15502,14 +15811,141 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
   const commitFeeFormulaDraft = (key: string, index: number) => {
     setFeeFormulaDrafts((current) => {
       if (!(key in current)) return current;
-      onChange(index, { fee_calc_base: bindStableFeeFormula(current[key], otherFeeItems) as FeeCalcBase });
+      const item = otherFeeRows.find((row) => row.index === index)?.item;
+      onChange(index, {
+        ...(hasFormulaTableRows && item && !getQuotationFeeValueSource(item) ? {
+          cost_source: "fee_source:formula" as const,
+          fee_calc_method: "formula" as const,
+          unit_price: 0,
+          quantity: 1,
+        } : {}),
+        fee_calc_base: bindStableFeeFormula(
+          current[key],
+          otherFeeItems,
+          0,
+          feeFormulaContext?.scopeReferences || [],
+        ) as FeeCalcBase,
+      });
       const next = { ...current };
       delete next[key];
       return next;
     });
   };
+  const openFeeSuggestion = (itemKey: string, input: HTMLInputElement) => {
+    const rect = input.getBoundingClientRect();
+    feeSuggestionInputRef.current = input;
+    setFeeSuggestion({
+      itemKey,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 340)),
+      top: Math.min(rect.bottom + 6, window.innerHeight - 340),
+      width: Math.max(300, rect.width),
+    });
+    setFeeSuggestionActiveIndex(0);
+  };
+  const insertFeeSuggestion = (value: string) => {
+    const input = feeSuggestionInputRef.current;
+    const itemKey = feeSuggestion?.itemKey || "";
+    if (!input || !itemKey) return;
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? start;
+    const nextValue = `${input.value.slice(0, start)}${value}${input.value.slice(end)}`;
+    changeFeeFormulaDraft(itemKey, nextValue);
+    setFeeSuggestion(null);
+    window.requestAnimationFrame(() => {
+      input.focus();
+      const nextCursor = start + value.length;
+      input.setSelectionRange(nextCursor, nextCursor);
+    });
+  };
+
+  useEffect(() => {
+    if (!feeSuggestion) return;
+    const closeSuggestion = () => setFeeSuggestion(null);
+    const handleScroll = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Node && feeSuggestionMenuRef.current?.contains(target)) return;
+      closeSuggestion();
+    };
+    document.addEventListener("pointerdown", closeSuggestion);
+    window.addEventListener("resize", closeSuggestion);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeSuggestion);
+      window.removeEventListener("resize", closeSuggestion);
+      window.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [feeSuggestion]);
+
+  useEffect(() => {
+    const handleOtherDropdownOpen = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      if (detail?.id && detail.id !== QUOTE_FEE_SUGGESTION_DROPDOWN_ID) setFeeSuggestion(null);
+    };
+    window.addEventListener(EXCLUSIVE_DROPDOWN_OPEN_EVENT, handleOtherDropdownOpen);
+    return () => window.removeEventListener(EXCLUSIVE_DROPDOWN_OPEN_EVENT, handleOtherDropdownOpen);
+  }, []);
+
+  useEffect(() => {
+    if (feeSuggestion) notifyExclusiveDropdownOpen(QUOTE_FEE_SUGGESTION_DROPDOWN_ID);
+  }, [feeSuggestion]);
+  const changeFeeValueSource = (
+    index: number,
+    item: QuotationItem,
+    itemKey: string,
+    valueSource: "formula" | "manual" | "fixed" | "direct" | "discount",
+  ) => {
+    if (readOnly) return;
+    const currentSource = getQuotationFeeValueSource(item) || "formula";
+    if (getQuotationFeeValueSource(item) && currentSource === valueSource) return;
+    if (formulaFinalFeeItemId && String(item.id) === formulaFinalFeeItemId && valueSource !== "formula") {
+      onNotify?.("无法修改", "报价总额行必须保留为公式方式，请先指定其他行作为报价总额。", "danger");
+      return;
+    }
+
+    const patch = getQuotationFeeValueSourcePatch(valueSource, item);
+    const nextOtherFeeItems = validationOtherFeeItems.map((row) => (
+      String(row.id) === String(item.id) ? { ...row, ...patch } : row
+    ));
+    const beforeDetails = calculateOtherFeeDetails(validationOtherFeeItems, baseAmount, materialAmount, feeFormulaContext);
+    const afterDetails = calculateOtherFeeDetails(nextOtherFeeItems, baseAmount, materialAmount, feeFormulaContext);
+    const blockingErrorIndex = afterDetails.findIndex((detail, detailIndex) => {
+      if (!detail.error || detail.error === "请填写基础公式") return false;
+      return detail.error !== (beforeDetails[detailIndex]?.error || "");
+    });
+    if (blockingErrorIndex >= 0) {
+      onNotify?.(
+        "无法修改取值方式",
+        afterDetails[blockingErrorIndex]?.error || "修改后会产生无效公式，请先调整相关公式。",
+        "danger",
+      );
+      return;
+    }
+
+    const dependentNames = otherFeeRows
+      .filter(({ item: row }) => (
+        String(row.id) !== String(item.id)
+        && getStableFeeReferenceIds(row.fee_calc_base).includes(String(item.id))
+      ))
+      .map(({ item: row }) => String(row.name || "未命名费用").trim())
+      .filter(Boolean);
+    const sourceLabel = quotationFeeValueSourceOptions.find((option) => option.value === valueSource)?.label || valueSource;
+    const impactText = dependentNames.length
+      ? `会重新计算并可能影响：${Array.from(new Set(dependentNames)).join("、")}`
+      : "当前没有其他公式引用本行。";
+    if (!window.confirm(`将取值方式改为「${sourceLabel}」？\n\n${impactText}\n\n修改后系统会重新计算相关费用。`)) {
+      return;
+    }
+
+    setFeeFormulaDrafts((current) => {
+      const next = { ...current };
+      delete next[itemKey];
+      return next;
+    });
+    onChange(index, patch);
+  };
 
   return (
+    <>
     <ThinScrollArea className="quote-table-shell" scrollClassName={`quote-table-freeze-scroll ${isOtherFees ? "pb-2" : ""}`}>
       <table className={`w-full table-fixed border-collapse text-sm ${isOtherFees ? "quote-other-fees-table min-w-[1400px]" : showSpace ? "min-w-[1430px]" : "min-w-[1310px]"}`}>
         <thead className="bg-surface-50 text-center text-xs font-semibold text-surface-600">
@@ -15525,16 +15961,20 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
             )}
             {isOtherFees ? (
               <>
-                <th className="h-11 w-28 border border-surface-200 py-0 text-center">计算方式</th>
+                <th className="h-11 w-28 border border-surface-200 py-0 text-center">取值方式</th>
                 <th className="h-11 w-36 border border-surface-200 py-0 text-center">
                   <span className="inline-flex items-center justify-center gap-1">
                     基础公式
                     <FeeFormulaHelp />
                   </span>
                 </th>
-                <th className="h-11 w-32 border border-surface-200 py-0 text-center">金额/比例</th>
-                <th className="h-11 w-44 border border-surface-200 py-0 text-center">计费范围</th>
-                <th className="h-11 w-44 border border-surface-200 py-0 text-center">公式</th>
+                {!hasFormulaTableRows && (
+                  <th className="h-11 w-32 border border-surface-200 py-0 text-center">金额/比例</th>
+                )}
+                <th className="h-11 w-44 border border-surface-200 py-0 text-center">默认统计范围</th>
+                {!hasFormulaTableRows && (
+                  <th className="h-11 w-44 border border-surface-200 py-0 text-center">公式</th>
+                )}
               </>
             ) : (
               <>
@@ -15560,11 +16000,20 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
             const manualPriceEditFlags = getManualPriceEditFlags(item.price_manually_edited);
             const cellStyle = rowColor.background ? { backgroundColor: rowColor.background } : undefined;
             const feeMethod = normalizeFeeCalcMethod(item.fee_calc_method);
+            const feeValueSource = getQuotationFeeValueSource(item);
+            const effectiveFeeValueSource = feeValueSource || (hasFormulaTableRows ? "formula" : undefined);
+            const effectiveFeeMethod = hasFormulaTableRows && !feeValueSource ? "formula" : feeMethod;
+            const isFormulaTableRow = Boolean(effectiveFeeValueSource);
+            const canSuggestFeeFormula = isOtherFees
+              && !readOnly
+              && (effectiveFeeValueSource === undefined || effectiveFeeValueSource === "formula")
+              && effectiveFeeMethod !== "fixed"
+              && effectiveFeeMethod !== "area_unit";
             const feeMeta = otherFeeRowMeta.get(index);
             const feeTotal = isOtherFees ? feeMeta?.total || 0 : getItemTotal(item, baseAmount, materialAmount, feeFormulaContext);
             const feeBaseError = isOtherFees ? feeMeta?.error || "" : "";
             const displayItem = feeFormulaDrafts[itemKey] !== undefined ? { ...item, fee_calc_base: feeFormulaDrafts[itemKey] } : item;
-            const otherFeeRuleText = isOtherFees ? getOtherFeeRuleDisplay(item, feeTotal, feeFormulaContext) : "";
+            const otherFeeRuleText = isOtherFees ? getOtherFeeRuleDisplay(item, feeTotal, feeFormulaContext, otherFeeItems) : "";
             return (
               <tr
                 key={itemKey}
@@ -15613,49 +16062,162 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                 {isOtherFees ? (
                   <>
 	                    <td className="border border-surface-200 py-0" style={cellStyle}>
-	                      <SystemSelect
-	                        value={feeMethod}
-                          disabled={readOnly}
-	                        onChange={(event) => onChange(index, getFeeCalcMethodPatch(event.target.value as FeeCalcMethod, item))}
-	                        onKeyDown={handleQuoteCellKeyDown}
-	                        className="quote-cell-editable quote-cell-input quote-cell-select quote-fee-method-select"
-                          menuClassName="quote-system-select-menu"
-                          optionClassName="quote-system-select-option"
-	                      >
-                        {Object.entries(feeCalcMethodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                      </SystemSelect>
+	                      {isFormulaTableRow ? (
+	                        readOnly ? (
+	                          <div className="quote-cell-editable quote-cell-input flex items-center justify-center text-xs font-medium text-surface-500">
+	                            {quotationFeeValueSourceOptions.find((option) => option.value === (effectiveFeeValueSource || "formula"))?.label || "自定义公式"}
+	                          </div>
+	                        ) : (
+	                          <SystemSelect
+	                            value={effectiveFeeValueSource || "formula"}
+	                            onChange={(event) => changeFeeValueSource(
+	                              index,
+	                              item,
+	                              itemKey,
+	                              event.target.value as "formula" | "manual" | "fixed" | "direct" | "discount",
+	                            )}
+	                            onKeyDown={handleQuoteCellKeyDown}
+	                            className="quote-cell-editable quote-cell-input quote-cell-select quote-fee-method-select"
+	                            menuClassName="quote-system-select-menu"
+	                            optionClassName="quote-system-select-option"
+	                          >
+	                            {quotationFeeValueSourceOptions.map((option) => (
+	                              <option key={option.value} value={option.value}>{option.label}</option>
+	                            ))}
+	                          </SystemSelect>
+	                        )
+	                      ) : (
+	                        <SystemSelect
+	                          value={feeMethod}
+	                          disabled={readOnly}
+	                          onChange={(event) => {
+	                            const nextMethod = event.target.value as FeeCalcMethod;
+	                            if (nextMethod === "formula") {
+	                              setFeeFormulaDrafts((current) => {
+	                                const next = { ...current };
+	                                delete next[itemKey];
+	                                return next;
+	                              });
+	                            }
+	                            onChange(index, getFeeCalcMethodPatch(nextMethod, item));
+	                          }}
+	                          onKeyDown={handleQuoteCellKeyDown}
+	                          className="quote-cell-editable quote-cell-input quote-cell-select quote-fee-method-select"
+	                          menuClassName="quote-system-select-menu"
+	                          optionClassName="quote-system-select-option"
+	                        >
+	                          {Object.entries(feeCalcMethodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+	                        </SystemSelect>
+	                      )}
                     </td>
 	                    <td className="border border-surface-200 py-0" style={cellStyle}>
 	                      <div className="flex min-h-[34px] items-center">
-	                        <input
-	                          value={feeMethod === "fixed" ? "" : feeMethod === "area_unit" ? "房屋面积" : feeFormulaDrafts[itemKey] ?? formatStableFeeFormula(item.fee_calc_base, otherFeeItems)}
-	                          onFocus={() => startEditingFeeFormula(itemKey, formatStableFeeFormula(item.fee_calc_base, otherFeeItems))}
-	                          onChange={(event) => changeFeeFormulaDraft(itemKey, event.target.value)}
-	                          onBlur={() => commitFeeFormulaDraft(itemKey, index)}
-	                          disabled={readOnly || feeMethod === "fixed" || feeMethod === "area_unit"}
-	                          onKeyDown={handleQuoteCellKeyDown}
-	                          aria-invalid={!!feeBaseError}
-	                          className={`quote-cell-editable quote-cell-input min-w-0 flex-1 text-center disabled:text-surface-300 ${feeBaseError ? "bg-red-50 text-red-700 ring-1 ring-inset ring-red-400" : ""}`}
-	                          placeholder={feeMethod === "fixed" ? "" : feeMethod === "area_unit" ? "房屋面积" : "如 直接费 或 A+B"}
-	                          title={feeBaseError || (feeMethod === "fixed" ? "" : feeMethod === "area_unit" ? "按当前报价房屋面积计算" : "可输入 直接费、基装、产品、A+B、(直接费+A) 等")}
-	                        />
+	                        <div className="relative min-w-0 flex-1">
+	                          <input
+	                            value={
+	                              effectiveFeeValueSource === "manual"
+	                                ? "报价时填写"
+	                                : effectiveFeeValueSource === "direct"
+	                                  ? "工程直接费"
+	                                  : effectiveFeeValueSource === "discount"
+	                                    ? "报价优惠"
+	                                    : effectiveFeeMethod === "fixed"
+	                                      ? ""
+	                                      : effectiveFeeMethod === "area_unit"
+	                                        ? "房屋面积"
+	                                        : feeFormulaDrafts[itemKey] ?? formatStableFeeFormula(item.fee_calc_base, otherFeeItems)
+	                            }
+	                            onFocus={(event) => {
+	                              startEditingFeeFormula(itemKey, formatStableFeeFormula(item.fee_calc_base, otherFeeItems));
+	                              if (canSuggestFeeFormula) openFeeSuggestion(itemKey, event.currentTarget);
+	                            }}
+	                            onClick={(event) => {
+	                              if (canSuggestFeeFormula) openFeeSuggestion(itemKey, event.currentTarget);
+	                            }}
+	                            onChange={(event) => changeFeeFormulaDraft(itemKey, event.target.value)}
+	                            onBlur={() => commitFeeFormulaDraft(itemKey, index)}
+	                            disabled={
+	                              readOnly
+	                              || effectiveFeeValueSource === "manual"
+	                              || effectiveFeeValueSource === "direct"
+	                              || effectiveFeeValueSource === "discount"
+	                              || (effectiveFeeMethod === "fixed" && effectiveFeeValueSource !== "fixed")
+	                              || effectiveFeeMethod === "area_unit"
+	                            }
+	                            onKeyDown={(event) => {
+	                              if (feeSuggestion?.itemKey === itemKey && visibleFeeSuggestionOptions.length > 0) {
+	                                if (event.key === "ArrowDown") {
+	                                  event.preventDefault();
+	                                  setFeeSuggestionActiveIndex((current) => (current + 1) % visibleFeeSuggestionOptions.length);
+	                                  return;
+	                                }
+	                                if (event.key === "ArrowUp") {
+	                                  event.preventDefault();
+	                                  setFeeSuggestionActiveIndex((current) => (current - 1 + visibleFeeSuggestionOptions.length) % visibleFeeSuggestionOptions.length);
+	                                  return;
+	                                }
+	                                if (event.key === "Enter") {
+	                                  event.preventDefault();
+	                                  insertFeeSuggestion(visibleFeeSuggestionOptions[feeSuggestionActiveIndex]?.value || "");
+	                                  return;
+	                                }
+	                                if (event.key === "Escape") {
+	                                  event.preventDefault();
+	                                  setFeeSuggestion(null);
+	                                  return;
+	                                }
+	                              }
+	                              handleQuoteCellKeyDown(event);
+	                            }}
+	                            aria-invalid={!!feeBaseError}
+	                            className={`quote-cell-editable quote-cell-input min-w-0 w-full pr-8 text-center disabled:text-surface-300 ${feeBaseError ? "bg-red-50 text-red-700 ring-1 ring-inset ring-red-400" : ""}`}
+	                            placeholder={effectiveFeeValueSource === "fixed" ? "填写固定金额，如 500" : effectiveFeeMethod === "fixed" ? "" : effectiveFeeMethod === "area_unit" ? "房屋面积" : effectiveFeeMethod === "formula" ? "如 (直接费+打拆)*3%+A" : "如 直接费、打拆 或 A+B"}
+	                            title={feeBaseError || (effectiveFeeValueSource === "fixed" ? "填写固定金额" : effectiveFeeMethod === "fixed" ? "" : effectiveFeeMethod === "area_unit" ? "按当前报价房屋面积计算" : "可输入 直接费、空间/类别名称、A+B、(直接费+打拆)*3%+A 等")}
+	                          />
+	                          {canSuggestFeeFormula && (
+	                            <button
+	                              type="button"
+	                              tabIndex={-1}
+	                              onMouseDown={(event) => {
+	                                event.preventDefault();
+	                                const input = event.currentTarget.parentElement?.querySelector("input");
+	                                if (!input) return;
+	                                if (feeSuggestion?.itemKey === itemKey) {
+	                                  setFeeSuggestion(null);
+	                                  return;
+	                                }
+	                                openFeeSuggestion(itemKey, input);
+	                              }}
+	                              className="absolute right-1 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-surface-400 transition hover:bg-primary-50 hover:text-primary-600"
+	                              aria-label="选择公式名称"
+	                              title="插入费用行、内置取值或空间/类别"
+	                            >
+	                              <ChevronDown className="h-3.5 w-3.5" />
+	                            </button>
+	                          )}
+	                        </div>
+	                        {effectiveFeeValueSource === "fixed" && (
+	                          <span className="ml-0.5 mr-3 inline-flex h-7 shrink-0 items-center text-sm font-semibold text-[#475467]">元</span>
+	                        )}
 	                      </div>
                         {feeBaseError && <div className="px-3 pb-1 text-xs font-medium text-red-600">{feeBaseError}</div>}
 	                    </td>
-                    <td className="border border-surface-200 py-0" style={cellStyle}>
-                      <div className="flex min-h-[34px] items-center justify-center gap-1">
-                        <QuoteNumberInput
-                          value={feeMethod === "percent" ? item.fee_rate || 0 : item.unit_price}
-                          onChange={(value) => {
-                            onChange(index, feeMethod === "percent" ? { fee_rate: value, quantity: 1 } : { unit_price: value, quantity: 1 });
-                          }}
-                          disabled={readOnly || feeMethod === "reference"}
-                          emptyWhenDisabled={feeMethod === "reference"}
-                          className="w-20 text-center font-semibold text-red-600"
-                        />
-                        <span className="min-w-10 whitespace-nowrap text-left text-xs font-medium text-surface-500">{feeMethod === "percent" ? "%" : feeMethod === "fixed" ? "元" : feeMethod === "area_unit" ? "元/㎡" : ""}</span>
-                      </div>
-                    </td>
+                    {!hasFormulaTableRows && (
+                      <td className="border border-surface-200 py-0" style={cellStyle}>
+                        <div className="flex min-h-[34px] items-center justify-center gap-1">
+                          <QuoteNumberInput
+                            value={feeMethod === "percent" ? item.fee_rate || 0 : item.unit_price}
+                            onChange={(value) => {
+                              onChange(index, feeMethod === "percent" ? { fee_rate: value, quantity: 1 } : { unit_price: value, quantity: 1 });
+                            }}
+                            disabled={readOnly || feeMethod === "reference" || feeMethod === "formula"}
+                            emptyWhenDisabled={feeMethod === "reference" || feeMethod === "formula"}
+                            className="w-20 text-center font-semibold text-red-600"
+                          />
+                          <span className="min-w-10 whitespace-nowrap text-left text-xs font-medium text-surface-500">{feeMethod === "percent" ? "%" : feeMethod === "fixed" ? "元" : feeMethod === "area_unit" ? "元/㎡" : ""}</span>
+                        </div>
+                      </td>
+                    )}
 	                    <td className="border border-surface-200 px-2 py-1" style={cellStyle}>
 	                      <FeeScopeSelector
 	                        mode={normalizeFeeScopeMode(item.fee_scope_mode)}
@@ -15669,7 +16231,9 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
 	                        onToggleName={(name) => toggleFeeScopeName(index, item, name)}
 	                      />
 	                    </td>
-                    <td className={`border border-surface-200 py-1 text-center text-xs font-medium ${feeBaseError ? "text-red-600" : "text-surface-500"}`} style={cellStyle}>{feeBaseError ? "无法计算" : getFeeFormulaText(displayItem, otherFeeItems)}</td>
+                    {!hasFormulaTableRows && (
+                      <td className={`border border-surface-200 py-1 text-center text-xs font-medium ${feeBaseError ? "text-red-600" : "text-surface-500"}`} style={cellStyle}>{feeBaseError ? "无法计算" : getFeeFormulaText(displayItem, otherFeeItems)}</td>
+                    )}
                   </>
                 ) : (
                   <>
@@ -15700,7 +16264,27 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                     </td>
                   </>
                 )}
-                <td className="border border-surface-200 py-1 text-center font-semibold text-red-600" style={cellStyle}>{feeBaseError ? "-" : formatQuoteAmount(feeTotal)}</td>
+                <td
+                  className={`border border-surface-200 py-1 text-center text-red-600 ${isOtherFees ? "quote-other-fee-subtotal-cell font-semibold" : "font-semibold"}`}
+                  style={isOtherFees ? { ...cellStyle, fontWeight: 600 } : cellStyle}
+                >
+                  {feeBaseError ? (
+                    "-"
+                  ) : isOtherFees && effectiveFeeValueSource === "manual" && !readOnly ? (
+                    <div className="flex items-center justify-center gap-1">
+	                      <QuoteNumberInput
+	                        value={item.unit_price}
+	                        onChange={(value) => onChange(index, { unit_price: value, quantity: 1 })}
+	                        placeholder="填写金额"
+	                        emptyWhenZero
+	                        className="w-24 text-center font-semibold text-red-600"
+	                      />
+	                      <span className="ml-0.5 mr-3 inline-flex h-7 shrink-0 items-center text-sm font-semibold text-[#475467]">元</span>
+                    </div>
+                  ) : (
+                    formatQuoteAmount(feeTotal)
+                  )}
+                </td>
                 {!isOtherFees && (
                   <td className="border border-surface-200 p-0 align-middle" style={cellStyle}>
                     <QuoteDescriptionCell
@@ -15731,7 +16315,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
           })}
           {items.length === 0 && (
             <tr className="quote-empty-row">
-              <td colSpan={isOtherFees ? 9 : showSpace ? 10 : 9} className="quote-empty-cell border border-surface-200 px-4 py-0 text-center">
+              <td colSpan={isOtherFees ? (hasFormulaTableRows ? 7 : 9) : showSpace ? 10 : 9} className="quote-empty-cell border border-surface-200 px-4 py-0 text-center">
                 <div className="quote-empty-state">
                   <p className="text-sm font-semibold text-[#34445a]">{emptyText}</p>
                   <p className="mt-1 text-xs leading-5 text-[#7c8aa0]">添加项目后，将在这里显示单价、数量、小计和备注。</p>
@@ -15749,5 +16333,58 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
         </tbody>
       </table>
     </ThinScrollArea>
+    {feeSuggestion && typeof document !== "undefined" && createPortal(
+      <div
+        ref={feeSuggestionMenuRef}
+        className="fixed z-[10020] flex max-h-[340px] flex-col overflow-hidden rounded-[10px] border border-[#dce8f8] bg-white p-1.5 shadow-[0_18px_44px_rgba(27,51,88,0.14),0_4px_14px_rgba(27,51,88,0.06)]"
+        style={{
+          left: feeSuggestion.left,
+          top: feeSuggestion.top,
+          width: feeSuggestion.width,
+        }}
+        onPointerDown={(event) => event.stopPropagation()}
+        role="listbox"
+        aria-label="基础公式建议"
+      >
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+          {visibleFeeSuggestionOptions.length === 0 ? (
+            <div className="flex h-16 items-center justify-center px-3 text-xs font-semibold text-[#98a2b3]">暂无可选项目</div>
+          ) : ["费用行", "内置取值", "空间/类别"].map((group) => {
+            const groupOptions = visibleFeeSuggestionOptions.filter((option) => option.group === group);
+            if (groupOptions.length === 0) return null;
+            return (
+              <div key={group} className="mb-1 last:mb-0">
+                <div className="px-2 py-1 text-[11px] font-semibold text-[#98a2b3]">{group}</div>
+                {groupOptions.map((option) => {
+                  const optionIndex = visibleFeeSuggestionOptions.findIndex((candidate) => candidate.key === option.key);
+                  const active = optionIndex === Math.min(feeSuggestionActiveIndex, visibleFeeSuggestionOptions.length - 1);
+                  return (
+                    <button
+                      key={option.key}
+                      type="button"
+                      onMouseDown={(event) => event.preventDefault()}
+                      onMouseEnter={() => setFeeSuggestionActiveIndex(optionIndex)}
+                      onClick={() => insertFeeSuggestion(option.value)}
+                      className={`flex min-h-9 w-full items-center justify-between gap-2 rounded-[8px] px-3 py-2 text-left text-sm font-semibold transition-colors ${
+                        active
+                          ? "bg-[#407AFF] text-white"
+                          : "text-[#34445a] hover:bg-[#f4f8ff] hover:text-[#162033]"
+                      }`}
+                      role="option"
+                      aria-selected={active}
+                    >
+                      <span className="min-w-0 truncate">{option.label}</span>
+                      {active && <Check className="h-4 w-4 shrink-0" />}
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+      </div>,
+      document.body,
+    )}
+    </>
   );
 }

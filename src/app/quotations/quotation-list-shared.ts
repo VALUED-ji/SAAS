@@ -6,6 +6,7 @@ export const QUOTA_TEMPLATE_STORAGE_KEY = "zxgj_quota_templates";
 import { toPricingAmount, type PackageQuoteConfigInput } from "@/lib/quotaTemplatePricing";
 import { normalizeQuotaTemplateAutoScope, type QuotaTemplateAutoScope } from "@/lib/quotaTemplateScope";
 import { bindStableFeeFormula, normalizeFeeScopeMode, parseFeeScopeValues, type FeeScopeMode } from "@/lib/quotationFeeFormulas";
+import { convertComprehensiveFeesToFormulaMode } from "@/app/quota/templates/quota-templates-shared";
 
 export type QuotaTemplateSpaceQuota = {
   id: string;
@@ -34,6 +35,8 @@ export type QuotaTemplateSpace = {
 export type QuotaTemplateComprehensiveFee = {
   id: string;
   name: string;
+  isFinalTotal?: boolean;
+  valueSource?: "formula" | "manual" | "fixed" | "direct" | "discount";
   fee_calc_method: string;
   fee_calc_base: string;
   fee_rate: number;
@@ -64,6 +67,7 @@ export type QuotaTemplateOption = {
   };
   quoteConfig?: QuotaTemplateQuoteConfig;
   projectGroups?: Array<{ id: string; name: string }>;
+  comprehensiveFeeMode?: "standard" | "formula";
   spaces: QuotaTemplateSpace[];
   comprehensiveFees: QuotaTemplateComprehensiveFee[];
   appendixNote?: string;
@@ -83,11 +87,39 @@ export function getRecordAmount(record: any) {
   return Number(record?.final_amount ?? record?.total_amount ?? 0);
 }
 
+export function getRecordFinalFeeLabel(record: any) {
+  return String(record?.formula_final_fee_name || "").trim() || "综合费用";
+}
+
+function parseRecordSettings(record: any) {
+  const settings = record?.settings;
+  if (!settings) return {};
+  if (typeof settings === "object") return settings as Record<string, any>;
+  try {
+    const parsed = JSON.parse(String(settings));
+    return parsed && typeof parsed === "object" ? parsed as Record<string, any> : {};
+  } catch {
+    return {};
+  }
+}
+
+export function isFormulaFeeRecord(record: any) {
+  if (record?.is_formula_fee_record === true || record?.is_formula_fee_record === 1 || record?.is_formula_fee_record === "1") return true;
+  const settings = parseRecordSettings(record);
+  return settings.comprehensiveFeeMode === "formula" && Boolean(String(settings.formulaFinalFeeItemId || record?.formula_final_fee_item_id || "").trim());
+}
+
+export function getRecordFinalFeeAmount(record: any) {
+  return isFormulaFeeRecord(record) ? getRecordAmount(record) : Number(record?.other_amount || 0);
+}
+
 export function getRecordCostSummary(record: any) {
   const items = [
     { label: "基装", amount: Number(record?.base_amount || 0) },
     { label: "产品", amount: Number(record?.main_material_amount || 0) + Number(record?.custom_direct_amount || 0) },
-    { label: "综合费用", amount: Number(record?.other_amount || 0), alwaysShow: true },
+    ...(!isFormulaFeeRecord(record)
+      ? [{ label: getRecordFinalFeeLabel(record), amount: getRecordFinalFeeAmount(record), alwaysShow: true }]
+      : []),
   ].filter((item) => Number.isFinite(item.amount) && (item.alwaysShow || Math.abs(item.amount) >= 0.01));
 
   return items.map((item) => `${item.label}${formatRecordAmount(item.amount)}`).join("、");
@@ -212,6 +244,10 @@ export function normalizeQuotaTemplate(value: any): QuotaTemplateOption | null {
     ? value.comprehensiveFees.map((fee: any, feeIndex: number): QuotaTemplateComprehensiveFee => ({
       id: String(fee?.id || `fee-${feeIndex}`),
       name: String(fee?.name || "").trim(),
+      isFinalTotal: fee?.isFinalTotal === true,
+      valueSource: fee?.valueSource === "manual" || fee?.valueSource === "fixed" || fee?.valueSource === "direct" || fee?.valueSource === "discount"
+        ? fee.valueSource
+        : "formula",
       fee_calc_method: String(fee?.fee_calc_method || "fixed"),
       fee_calc_base: String(fee?.fee_calc_base || ""),
       fee_rate: toTemplateAmount(fee?.fee_rate),
@@ -222,12 +258,14 @@ export function normalizeQuotaTemplate(value: any): QuotaTemplateOption | null {
       fee_scope_space_names: parseFeeScopeValues(fee?.fee_scope_space_names),
     })).filter((fee: QuotaTemplateComprehensiveFee) => fee.name)
     : [];
-  const comprehensiveFees = normalizedComprehensiveFees.map((fee: QuotaTemplateComprehensiveFee) => ({
-    ...fee,
-    fee_calc_base: fee.fee_calc_method === "fixed"
-      ? ""
-      : bindStableFeeFormula(fee.fee_calc_base, normalizedComprehensiveFees),
-  }));
+  const comprehensiveFees = value.comprehensiveFeeMode === "formula"
+    ? normalizedComprehensiveFees.map((fee: QuotaTemplateComprehensiveFee) => ({
+      ...fee,
+      fee_calc_base: fee.fee_calc_method === "fixed"
+        ? ""
+        : bindStableFeeFormula(fee.fee_calc_base, normalizedComprehensiveFees),
+    }))
+    : convertComprehensiveFeesToFormulaMode(normalizedComprehensiveFees as any) as QuotaTemplateComprehensiveFee[];
   const projectGroups = Array.isArray(value.projectGroups)
     ? value.projectGroups
       .map((group: any) => ({
@@ -281,6 +319,7 @@ export function normalizeQuotaTemplate(value: any): QuotaTemplateOption | null {
       }
       : undefined,
     quoteConfig,
+    comprehensiveFeeMode: "formula",
     projectGroups,
     spaces,
     comprehensiveFees,

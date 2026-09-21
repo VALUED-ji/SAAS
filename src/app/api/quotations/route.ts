@@ -7,11 +7,14 @@ import { getRequestIp, recordCustomerOperation } from "@/lib/operationLog";
 import {
   calculateChargeableOtherFeeTotals,
   calculateOtherFeeTotals,
+  calculateFormulaTableTotal,
+  buildDirectFeeScopeReferences,
   normalizeFeeCalcBase,
   normalizeFeeCalcMethod,
   normalizeFeeScopeMode,
   parseFeeScopeValues,
   remapStableFeeFormulaIds,
+  remapStableScopeReferenceKeys,
   toMoney,
   type FeeFormulaContext,
 } from "@/lib/quotationFeeFormulas";
@@ -36,6 +39,23 @@ import {
   getStoreOrgByName,
   getUserQuotationAccessibleOrgIds,
 } from "@/lib/quotationOrgAccess";
+
+type DiscountRule = {
+  id: string;
+  type: "fee" | "space" | "work_type";
+  mode: "amount" | "rate";
+  scope?: string;
+  space?: string;
+  workType?: string;
+  discount?: number;
+  rate?: number;
+};
+
+type DiscountScopeOption = {
+  value: string;
+  label: string;
+  amount: number;
+};
 
 function ensureQuotationColumns(db: any) {
   ensureQuotationSchema(db);
@@ -309,6 +329,10 @@ function getFeeScopeCategoryLabel(category: unknown) {
   return key;
 }
 
+function inferItemSpace(item: any) {
+  return String(item?.space || "").trim();
+}
+
 function buildFeeFormulaContext(items: any[], categories: string[] = [], houseArea = 0): FeeFormulaContext {
   const orderedCategories = orderQuoteCategories([...categories, ...items.map((item) => String(item.category || "").trim())]);
   const mainMaterialAmount = items
@@ -331,6 +355,16 @@ function buildFeeFormulaContext(items: any[], categories: string[] = [], houseAr
   });
 
   const customCategoryAmount = Object.values(categoryAmounts).reduce((sum, amount) => sum + Number(amount || 0), 0);
+  const directItems = items
+    .filter((item) => isDirectItemCategory(item.category))
+    .map((item) => ({
+      category: getFeeScopeCategoryKey(item.category),
+      categoryLabel: getFeeScopeCategoryLabel(item.category),
+      space: String(item.space || "").trim(),
+      total: getBaseOrMaterialItemTotal(item),
+      laborAmount: getBaseLaborSubtotal(item),
+      materialCostAmount: getBaseMaterialSubtotal(item),
+    }));
   return {
     houseArea: safeNonNegativeNumber(houseArea),
     mainMaterialAmount,
@@ -338,17 +372,165 @@ function buildFeeFormulaContext(items: any[], categories: string[] = [], houseAr
     laborAmount,
     materialCostAmount,
     categoryAmounts,
-    directItems: items
-      .filter((item) => isDirectItemCategory(item.category))
-      .map((item) => ({
-        category: getFeeScopeCategoryKey(item.category),
-        categoryLabel: getFeeScopeCategoryLabel(item.category),
-        space: String(item.space || "").trim(),
-        total: getBaseOrMaterialItemTotal(item),
-        laborAmount: getBaseLaborSubtotal(item),
-        materialCostAmount: getBaseMaterialSubtotal(item),
-      })),
+    scopeReferences: buildDirectFeeScopeReferences(directItems),
+    directItems,
   };
+}
+
+function roundMoney(value: number) {
+  return toMoney(value);
+}
+
+function isSpecialQuoteItem(item?: { row_color?: unknown } | null) {
+  return String(item?.row_color || "") === "special";
+}
+
+function isLaborOnlyQuoteItem(item: any) {
+  if (!isBaseCategory(item.category)) return false;
+  return getBaseMaterialSubtotal(item) <= 0 && getBaseLaborSubtotal(item) > 0;
+}
+
+function isExcludedFromDiscount(item: any, settings: any) {
+  if (settings?.excludeSpecialDiscountItems && isSpecialQuoteItem(item)) return true;
+  if (settings?.excludeLaborOnlyDiscountItems && isLaborOnlyQuoteItem(item)) return true;
+  return false;
+}
+
+function getDiscountableItems(items: any[], settings: any) {
+  return items.filter((item) => !isExcludedFromDiscount(item, settings));
+}
+
+function getDiscountScopeOptions(items: any[], settings: any, totals: { otherAmount: number }, houseArea = 0): DiscountScopeOption[] {
+  const discountableItems = getDiscountableItems(items, settings);
+  const feeContext = buildFeeFormulaContext(discountableItems, settings?.quoteCategories, houseArea);
+  const customCategoryOptions = Object.entries(feeContext.categoryAmounts || {}).map(([label, amount]) => ({
+    value: `category:${label}`,
+    label,
+    amount: toMoney(Number(amount || 0)),
+  }));
+  const customCabinetAmount = discountableItems
+    .filter((item) => isCustomCabinetCategory(item.category))
+    .reduce((sum, item) => toMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
+  const discountableBaseAmount = discountableItems.filter((item) => isBaseCategory(item.category)).reduce((sum, item) => toMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
+  const discountableProductAmount = discountableItems.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => toMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
+  const discountableCustomCategoryAmount = discountableItems
+    .filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category))
+    .reduce((sum, item) => toMoney(sum + getBaseOrMaterialItemTotal(item)), 0);
+  const discountableDirectAmount = discountableBaseAmount + discountableProductAmount + discountableCustomCategoryAmount;
+  const totalDiscountAmount =
+    settings?.comprehensiveFeeMode === "formula" && String(settings?.formulaFinalFeeItemId || "").trim()
+      ? totals.otherAmount
+      : discountableDirectAmount + totals.otherAmount;
+  const fixedOptions: DiscountScopeOption[] = [
+    { value: "base", label: "基装直接费", amount: discountableBaseAmount },
+    { value: "base_labor", label: "基装直接费（人工）", amount: discountableItems.reduce((sum, item) => toMoney(sum + getBaseLaborSubtotal(item)), 0) },
+    { value: "base_material", label: "基装直接费（材料）", amount: discountableItems.reduce((sum, item) => toMoney(sum + getBaseMaterialSubtotal(item)), 0) },
+    { value: "product", label: "产品费用", amount: discountableProductAmount },
+    { value: "custom_cabinet", label: "定制柜费用", amount: customCabinetAmount },
+    { value: "direct", label: "工程直接费", amount: discountableDirectAmount },
+    { value: "total", label: "总价", amount: totalDiscountAmount },
+  ];
+  const fixedLabels = new Set(fixedOptions.map((option) => option.label));
+  const dynamicOptions = customCategoryOptions.filter((option) => !fixedLabels.has(option.label) && !/组合包|套餐|一口价|package|定制柜/i.test(option.label));
+  return [...fixedOptions, ...dynamicOptions];
+}
+
+function getDiscountSpaceOptions(items: any[], settings: any): DiscountScopeOption[] {
+  const discountableItems = getDiscountableItems(items, settings);
+  const spaces = uniqueValues([
+    ...(Array.isArray(settings?.quoteSpaces) ? settings.quoteSpaces : []),
+    ...items.filter((item) => !isOtherCategory(item.category)).map((item) => inferItemSpace(item)),
+  ]);
+  return spaces.map((space) => ({
+    value: `space:${space}`,
+    label: space,
+    amount: discountableItems
+      .filter((item) => !isOtherCategory(item.category) && inferItemSpace(item) === space)
+      .reduce((sum, item) => toMoney(sum + getBaseOrMaterialItemTotal(item)), 0),
+  }));
+}
+
+function getDiscountWorkTypeOptions(items: any[], settings: any): DiscountScopeOption[] {
+  const discountableItems = getDiscountableItems(items, settings);
+  const workTypes = uniqueValues(items.filter((item) => !isOtherCategory(item.category)).map((item) => String(item.work_type_name || "").trim()));
+  return workTypes.map((workType) => ({
+    value: `work_type:${workType}`,
+    label: workType,
+    amount: discountableItems
+      .filter((item) => !isOtherCategory(item.category) && String(item.work_type_name || "").trim() === workType)
+      .reduce((sum, item) => toMoney(sum + getBaseOrMaterialItemTotal(item)), 0),
+  }));
+}
+
+function getLegacyDiscountRule(settings: any): DiscountRule | null {
+  const discount = safeNonNegativeNumber(settings?.discount);
+  if (discount <= 0) return null;
+  const type = settings?.discountType === "space" || settings?.discountType === "work_type" ? settings.discountType : "fee";
+  return {
+    id: "legacy",
+    type,
+    mode: settings?.discountMode === "rate" ? "rate" : "amount",
+    scope: settings?.discountScope || "total",
+    space: settings?.discountSpace || "",
+    workType: settings?.discountWorkType || "",
+    discount,
+    rate: Math.min(1, Math.max(0, Number(settings?.discountRate || 1))),
+  };
+}
+
+function normalizeDiscountRules(settings: any): DiscountRule[] {
+  const hasRuleList = Array.isArray(settings?.discountRules);
+  const rawRules = hasRuleList ? settings.discountRules || [] : [];
+  const rules = rawRules
+    .map((rule: any, index: number) => ({
+      id: String(rule?.id || `rule_${index}`),
+      type: rule?.type === "space" || rule?.type === "work_type" ? rule.type : "fee",
+      mode: rule?.mode === "rate" ? "rate" : "amount",
+      scope: String(rule?.scope || "total"),
+      space: String(rule?.space || ""),
+      workType: String(rule?.workType || ""),
+      discount: safeNonNegativeNumber(rule?.discount),
+      rate: Math.min(1, Math.max(0, Number(rule?.rate || 1))),
+    }))
+    .filter((rule: DiscountRule) => rule.mode === "rate" ? Number(rule.rate || 1) < 1 : Number(rule.discount || 0) > 0);
+  if (hasRuleList) return rules;
+  const legacyRule = getLegacyDiscountRule(settings);
+  return legacyRule ? [legacyRule] : [];
+}
+
+function getDiscountRuleValue(rule: DiscountRule) {
+  if (rule.type === "space") return rule.space ? `space:${rule.space}` : "";
+  if (rule.type === "work_type") return rule.workType ? `work_type:${rule.workType}` : "";
+  return rule.scope || "total";
+}
+
+function isRemovedOtherFeeDiscountScope(value: string) {
+  return value.startsWith("fee:");
+}
+
+function getDiscountRuleScope(rule: DiscountRule, items: any[], settings: any, totals: { otherAmount: number }, houseArea = 0) {
+  const options = rule.type === "space"
+    ? getDiscountSpaceOptions(items, settings)
+    : rule.type === "work_type"
+      ? getDiscountWorkTypeOptions(items, settings)
+      : getDiscountScopeOptions(items, settings, totals, houseArea);
+  const value = getDiscountRuleValue(rule);
+  if (rule.type === "fee" && isRemovedOtherFeeDiscountScope(value)) {
+    return options.find((option) => option.value === value);
+  }
+  return options.find((option) => option.value === value)
+    || options.find((option) => option.value === "total")
+    || options[0];
+}
+
+function getDiscountRuleAmount(rule: DiscountRule, items: any[], settings: any, totals: { otherAmount: number }, houseArea = 0) {
+  const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
+  const scopeAmount = Math.max(0, Number(scope?.amount || 0));
+  const excludedAmount = Math.min(scopeAmount, safeNonNegativeNumber(settings?.excludeSpecificDiscountAmount));
+  const baseAmount = Math.max(0, scopeAmount - excludedAmount);
+  if (baseAmount <= 0) return 0;
+  if (rule.mode === "rate") return roundMoney(baseAmount * (1 - Math.min(1, Math.max(0, Number(rule.rate || 1)))));
+  return roundMoney(Math.min(safeNonNegativeNumber(rule.discount), baseAmount));
 }
 
 function calculate(items: any[], settings: any, houseArea = 0) {
@@ -357,11 +539,59 @@ function calculate(items: any[], settings: any, houseArea = 0) {
   const customCategoryAmount = items.filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const directBaseAmount = materialAmount + customCategoryAmount;
   const otherItems = items.filter((item) => isOtherCategory(item.category));
-  const feeFormulaContext = buildFeeFormulaContext(items, settings.quoteCategories, houseArea);
+  if (settings?.comprehensiveFeeMode === "formula" && String(settings.formulaFinalFeeItemId || "").trim()) {
+    const undiscountedFeeFormulaContext = {
+      ...buildFeeFormulaContext(items, settings.quoteCategories, houseArea),
+      discountAmount: 0,
+    };
+    const undiscountedFormulaTable = calculateFormulaTableTotal(
+      otherItems,
+      baseAmount,
+      directBaseAmount,
+      String(settings.formulaFinalFeeItemId || "").trim(),
+      undiscountedFeeFormulaContext,
+    );
+    const discountRules = normalizeDiscountRules(settings);
+    const ruleDiscount = discountRules.reduce(
+      (sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, { otherAmount: undiscountedFormulaTable.finalAmount }, houseArea)),
+      0,
+    );
+    const discount = Math.min(undiscountedFormulaTable.finalAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : Number(settings.discount || 0)));
+    const feeFormulaContext = {
+      ...buildFeeFormulaContext(items, settings.quoteCategories, houseArea),
+      discountAmount: discount,
+    };
+    const formulaTable = calculateFormulaTableTotal(
+      otherItems,
+      baseAmount,
+      directBaseAmount,
+      String(settings.formulaFinalFeeItemId || "").trim(),
+      feeFormulaContext,
+    );
+    return {
+      baseAmount,
+      materialAmount: directBaseAmount,
+      mainMaterialAmount: materialAmount,
+      customCategoryAmount,
+      otherAmount: formulaTable.finalAmount,
+      directAmount: formulaTable.finalAmount,
+      managementFee: 0,
+      taxAmount: 0,
+      discount,
+      finalAmount: formulaTable.finalAmount,
+    };
+  }
+  const feeFormulaContext = {
+    ...buildFeeFormulaContext(items, settings.quoteCategories, houseArea),
+    discountAmount: Number(settings.discount || 0),
+  };
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, directBaseAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
   const directAmount = baseAmount + directBaseAmount + otherAmount;
   const taxRate = Number(settings.taxRate || 0);
-  const discount = Number(settings.discount || 0);
+  const rawTotals = { otherAmount };
+  const discountRules = normalizeDiscountRules(settings);
+  const ruleDiscount = discountRules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, rawTotals, houseArea)), 0);
+  const discount = Math.min(directAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : Number(settings.discount || 0)));
   const taxableAmount = Math.max(0, directAmount - discount);
   const taxAmount = Math.round(taxableAmount * taxRate) / 100;
   const finalAmount = Math.max(0, Math.round((taxableAmount + taxAmount) * 100) / 100);
@@ -389,20 +619,83 @@ function calculateQuotationRecordCostSummary(items: any[], settingsValue: unknow
   const customDirectAmount = items.filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const directBaseAmount = mainMaterialAmount + customDirectAmount;
   const otherItems = items.filter((item) => isOtherCategory(item.category));
-  const feeFormulaContext = buildFeeFormulaContext(items, quoteCategories, houseArea);
-  const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, directBaseAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
+  const formulaTableMode = settings.comprehensiveFeeMode === "formula" && String(settings.formulaFinalFeeItemId || "").trim();
+  let otherAmount = 0;
+  let discountAmount = Number(settings.discount || 0);
+  if (formulaTableMode) {
+    const undiscountedFeeFormulaContext = {
+      ...buildFeeFormulaContext(items, quoteCategories, houseArea),
+      discountAmount: 0,
+    };
+    const undiscountedFormulaTable = calculateFormulaTableTotal(
+      otherItems,
+      baseAmount,
+      directBaseAmount,
+      String(settings.formulaFinalFeeItemId || "").trim(),
+      undiscountedFeeFormulaContext,
+    );
+    const discountRules = normalizeDiscountRules(settings);
+    const ruleDiscount = discountRules.reduce(
+      (sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, { otherAmount: undiscountedFormulaTable.finalAmount }, houseArea)),
+      0,
+    );
+    discountAmount = Math.min(undiscountedFormulaTable.finalAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : discountAmount));
+    const feeFormulaContext = {
+      ...buildFeeFormulaContext(items, quoteCategories, houseArea),
+      discountAmount,
+    };
+    otherAmount = calculateFormulaTableTotal(
+      otherItems,
+      baseAmount,
+      directBaseAmount,
+      String(settings.formulaFinalFeeItemId || "").trim(),
+      feeFormulaContext,
+    ).finalAmount;
+  } else {
+    const feeFormulaContext = {
+      ...buildFeeFormulaContext(items, quoteCategories, houseArea),
+      discountAmount,
+    };
+    otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, directBaseAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
+  }
   return {
     base_amount: toMoney(baseAmount),
     main_material_amount: toMoney(mainMaterialAmount),
     custom_direct_amount: toMoney(customDirectAmount),
     other_amount: toMoney(otherAmount),
-    direct_amount: toMoney(baseAmount + directBaseAmount),
+    discount: toMoney(discountAmount),
+    direct_amount: toMoney(formulaTableMode ? otherAmount : baseAmount + directBaseAmount),
+    is_formula_fee_record: formulaTableMode ? 1 : 0,
+    final_fee_amount: toMoney(formulaTableMode ? otherAmount : otherAmount),
   };
 }
 
 function getTemplateSpaceNames(template: any) {
   if (!template || typeof template !== "object" || !Array.isArray(template.spaces)) return [] as string[];
   return uniqueValues(template.spaces.map((space: any, index: number) => String(space?.name || `空间${index + 1}`).trim()));
+}
+
+function buildTemplateScopeKeyMap(template: any) {
+  const projectGroupMap = getTemplateProjectGroupMap(template);
+  const scopeKeyMap = new Map<string, string>();
+  if (Array.isArray(template?.spaces)) {
+    template.spaces.forEach((space: any, index: number) => {
+      const id = String(space?.id || "").trim();
+      const name = String(space?.name || `空间${index + 1}`).trim();
+      if (id && name) scopeKeyMap.set(`space:${id}`, `space:${name}`);
+    });
+  }
+  if (Array.isArray(template?.projectGroups)) {
+    template.projectGroups.forEach((group: any, index: number) => {
+      const id = String(group?.id || "").trim();
+      const name = String(group?.name || id || `类别${index + 1}`).trim();
+      if (!id) return;
+      const category = getTemplateQuoteCategory(id, projectGroupMap);
+      scopeKeyMap.set(`category:${id}`, `category:${getFeeScopeCategoryKey(category)}`);
+      if (name && name !== id) scopeKeyMap.set(`category:${name}`, `category:${getFeeScopeCategoryKey(category)}`);
+    });
+  }
+  return scopeKeyMap;
 }
 
 function buildTemplateQuotationItems(template: any) {
@@ -479,8 +772,8 @@ function buildTemplateQuotationItems(template: any) {
         remark: String(fee?.remark || "").trim(),
         unit: "项",
         quantity: 1,
-        unit_price: method === "percent" || method === "reference" ? 0 : fixedAmount,
-        total_price: method === "percent" || method === "reference" || method === "area_unit" ? 0 : fixedAmount,
+        unit_price: method === "percent" || method === "reference" || method === "formula" ? 0 : fixedAmount,
+        total_price: method === "percent" || method === "reference" || method === "formula" || method === "area_unit" ? 0 : fixedAmount,
         material_cost: 0,
         labor_cost: 0,
         profit_margin: 0,
@@ -491,6 +784,9 @@ function buildTemplateQuotationItems(template: any) {
         fee_scope_mode: normalizeFeeScopeMode(fee?.fee_scope_mode),
         fee_scope_space_ids: parseFeeScopeValues(fee?.fee_scope_space_ids),
         fee_scope_space_names: parseFeeScopeValues(fee?.fee_scope_space_names),
+        cost_source: fee?.valueSource === "manual" || fee?.valueSource === "fixed" || fee?.valueSource === "direct" || fee?.valueSource === "discount"
+          ? `fee_source:${fee.valueSource}`
+          : "fee_source:formula",
         sort_order: sortOrder++,
       });
     });
@@ -553,14 +849,17 @@ function applyOtherFeeTotals(items: any[], settings: any, houseArea = 0) {
   const materialAmount = items.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const customCategoryAmount = items.filter((item) => isDirectItemCategory(item.category) && !isBaseCategory(item.category) && !isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const directBaseAmount = materialAmount + customCategoryAmount;
-  const feeFormulaContext = buildFeeFormulaContext(items, settings.quoteCategories, houseArea);
+  const feeFormulaContext = {
+    ...buildFeeFormulaContext(items, settings.quoteCategories, houseArea),
+    discountAmount: Number(settings.discount || 0),
+  };
   const otherTotals = calculateOtherFeeTotals(items.filter((item) => isOtherCategory(item.category)), baseAmount, directBaseAmount, feeFormulaContext);
   let otherIndex = 0;
   return items.map((item) => {
     if (!isOtherCategory(item.category)) return item;
     const feeTotal = otherTotals[otherIndex++] || 0;
     const method = normalizeFeeCalcMethod(item.fee_calc_method);
-    const isFormulaBased = method === "percent" || method === "reference";
+    const isFormulaBased = method === "percent" || method === "reference" || method === "formula";
     return {
       ...item,
       quantity: isFormulaBased ? 1 : item.quantity,
@@ -654,7 +953,7 @@ export async function GET(req: NextRequest) {
 
   const placeholders = quotationIds.map(() => "?").join(",");
 	  const quotationItems = db.prepare(`
-    SELECT id, quotation_id, category, space, quantity, unit_price, total_price, material_cost, labor_cost, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names
+    SELECT id, quotation_id, name, category, space, work_type_name, quantity, unit_price, total_price, material_cost, labor_cost, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names
     FROM quotation_items
     WHERE quotation_id IN (${placeholders})
     ORDER BY quotation_id, sort_order ASC, created_at ASC
@@ -799,6 +1098,10 @@ export async function GET(req: NextRequest) {
     const currentItems = itemsByQuotation.get(String(quotation.id || "")) || [];
     const quotaTemplateId = String(settings.quotaTemplateId || "").trim();
     const quotaTemplateName = String(settings.quotaTemplateName || templateNameById.get(quotaTemplateId) || "").trim();
+    const formulaFinalFeeItemId = String(settings.formulaFinalFeeItemId || "").trim();
+    const formulaFinalFeeName = formulaFinalFeeItemId
+      ? String(currentItems.find((item) => String(item.id || "") === formulaFinalFeeItemId)?.name || "").trim()
+      : "";
     const quoteSpaces = uniqueValues([
       ...(Array.isArray(settings.quoteSpaces) ? settings.quoteSpaces : []),
       ...currentItems.filter((item) => !isOtherCategory(item.category)).map((item) => String(item.space || "").trim()),
@@ -823,6 +1126,7 @@ export async function GET(req: NextRequest) {
       active_editor_count: editorPresenceByQuotation.get(String(quotation.id || ""))?.length || 0,
       active_editors: editorPresenceByQuotation.get(String(quotation.id || "")) || [],
       item_count: currentItems.length,
+      formula_final_fee_name: formulaFinalFeeName,
       ...calculateQuotationRecordCostSummary(currentItems, quotation.settings, quotation.customer_area_size ?? quotation.project_area),
     };
   });
@@ -952,6 +1256,7 @@ export async function POST(req: NextRequest) {
       : templateItems;
     const templateFeeIdToQuotationItemId = new Map<string, string>();
     const templateItemIdToQuotationItemId = new Map<string, string>();
+    const templateScopeKeyMap = buildTemplateScopeKeyMap(body.template);
     const identifiedTemplateItems = pricedTemplateItems.map((item) => {
       const id = makeId("QITEM");
       const templateFeeId = String((item as any).template_fee_id || "").trim();
@@ -962,7 +1267,10 @@ export async function POST(req: NextRequest) {
     });
     identifiedTemplateItems.forEach((item) => {
       if (isOtherCategory(item.category) && item.fee_calc_base) {
-        item.fee_calc_base = remapStableFeeFormulaIds(item.fee_calc_base, templateFeeIdToQuotationItemId);
+        item.fee_calc_base = remapStableScopeReferenceKeys(
+          remapStableFeeFormulaIds(item.fee_calc_base, templateFeeIdToQuotationItemId),
+          templateScopeKeyMap,
+        );
       }
       if (item.quantity_formula) {
         item.quantity_formula = remapQuotationQuantityFormulaIds(
@@ -989,6 +1297,10 @@ export async function POST(req: NextRequest) {
         || "",
     ).trim();
     const customerVisibleNote = String(body.customer_visible_note || "").trim();
+    const comprehensiveFeeMode = body.template?.comprehensiveFeeMode === "formula" ? "formula" as const : "standard" as const;
+    const finalTemplateFeeId = comprehensiveFeeMode === "formula"
+      ? String((body.template?.comprehensiveFees || []).find((fee: any) => fee?.isFinalTotal === true)?.id || "").trim()
+      : "";
     const settings = {
 	      managementFeeRate: 0,
 	      taxRate: Number(body.taxRate ?? 0),
@@ -1003,8 +1315,12 @@ export async function POST(req: NextRequest) {
 	      excludeSpecialDiscountItems: false,
 	      excludeLaborOnlyDiscountItems: false,
 	      warrantyMonths: Number(body.warrantyMonths ?? 24),
-	      quotaTemplateId: String(body.template?.id || "").trim(),
-	      quotaTemplateName: String(body.template?.name || "").trim(),
+      quotaTemplateId: String(body.template?.id || "").trim(),
+      quotaTemplateName: String(body.template?.name || "").trim(),
+      comprehensiveFeeMode,
+      formulaFinalFeeItemId: finalTemplateFeeId
+        ? String(templateFeeIdToQuotationItemId.get(finalTemplateFeeId) || "")
+        : "",
 	      quotationType,
 	      quotationDecorationType,
       appendixNote: templateAppendixNote,

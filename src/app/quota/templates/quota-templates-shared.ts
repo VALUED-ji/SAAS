@@ -15,6 +15,7 @@ import {
   type FeeCalcBase,
   type FeeCalcMethod,
   type FeeFormulaContext,
+  type FeeFormulaScopeReference,
   type FeeScopeMode,
   type FormulaFeeItem,
 } from "@/lib/quotationFeeFormulas";
@@ -108,6 +109,8 @@ export type CombinedAreaPricingTier = {
 export type TemplateComprehensiveFee = {
   id: string;
   name: string;
+  isFinalTotal?: boolean;
+  valueSource?: "formula" | "manual" | "fixed" | "direct" | "discount";
   fee_calc_method: FeeCalcMethod;
   fee_calc_base: FeeCalcBase;
   fee_rate: number;
@@ -204,6 +207,7 @@ export type QuotaTemplate = {
   constructionTemplateConfig: ConstructionTemplateConfig;
   quoteConfig: QuoteConfig;
   projectGroups: TemplateProjectGroup[];
+  comprehensiveFeeMode?: "standard" | "formula";
   comprehensiveFees: TemplateComprehensiveFee[];
   appendixNote: string;
   budgetCompilationHtml: string;
@@ -287,6 +291,8 @@ export function makeComprehensiveFeeItem(partial?: Partial<TemplateComprehensive
   return {
     id: `fee-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     name: "",
+    isFinalTotal: false,
+    valueSource: "formula",
     fee_calc_method: "fixed",
     fee_calc_base: "",
     fee_rate: 0,
@@ -310,6 +316,109 @@ export function makeDefaultComprehensiveFees() {
   ];
 }
 
+export function makeDefaultFormulaComprehensiveFees() {
+  const directFee = makeComprehensiveFeeItem({
+    name: "工程直接费",
+    fee_calc_method: "formula",
+    fee_calc_base: "直接费",
+    valueSource: "direct",
+  });
+  const discountFee = makeComprehensiveFeeItem({
+    name: "优惠",
+    fee_calc_method: "formula",
+    fee_calc_base: "0",
+    valueSource: "discount",
+  });
+  const totalFee = makeComprehensiveFeeItem({
+    name: "工程总造价",
+    fee_calc_method: "formula",
+    fee_calc_base: "",
+    valueSource: "formula",
+  });
+  const taxFee = makeComprehensiveFeeItem({
+    name: "税金",
+    fee_calc_method: "formula",
+    fee_calc_base: "",
+    valueSource: "formula",
+  });
+  const finalFee = makeComprehensiveFeeItem({
+    name: "最终报价",
+    fee_calc_method: "formula",
+    fee_calc_base: "",
+    valueSource: "formula",
+    isFinalTotal: true,
+  });
+  const fees = [directFee, discountFee, totalFee, taxFee, finalFee];
+  const sequence = (index: number) => formatAlphaSequence(index);
+  totalFee.fee_calc_base = bindStableFeeFormula(`${sequence(0)}+${sequence(1)}`, fees, 0);
+  taxFee.fee_calc_base = bindStableFeeFormula(`${sequence(2)}*1%`, fees, 0);
+  finalFee.fee_calc_base = bindStableFeeFormula(`${sequence(2)}+${sequence(3)}`, fees, 0);
+  return fees;
+}
+
+export function convertComprehensiveFeesToFormulaMode(fees: TemplateComprehensiveFee[]) {
+  const convertedFees = fees.map((fee) => {
+    const method = normalizeFeeCalcMethod(fee.fee_calc_method);
+    const base = normalizeFeeCalcBase(fee.fee_calc_base);
+    const formula = method === "formula"
+      ? base
+      : method === "fixed"
+        ? String(toAmount(fee.unit_price) || 0)
+        : method === "area_unit"
+          ? `房屋面积*${toAmount(fee.unit_price) || 0}`
+          : method === "reference"
+            ? base || "直接费"
+            : `(${base || "直接费"})*${toAmount(fee.fee_rate) || 0}%`;
+    return {
+      ...fee,
+      isFinalTotal: false,
+      valueSource: "formula" as const,
+      fee_calc_method: "formula" as const,
+      fee_calc_base: formula,
+      fee_rate: 0,
+      unit_price: 0,
+    };
+  });
+  const directFee = makeComprehensiveFeeItem({
+    name: "工程直接费",
+    valueSource: "direct",
+    fee_calc_method: "reference",
+    fee_calc_base: "直接费",
+  });
+  const discountFee = makeComprehensiveFeeItem({
+    name: "优惠",
+    valueSource: "discount",
+    fee_calc_method: "reference",
+    fee_calc_base: "",
+  });
+  const totalFee = makeComprehensiveFeeItem({
+    name: "工程总造价",
+    valueSource: "formula",
+    fee_calc_method: "formula",
+    fee_calc_base: "",
+  });
+  const finalFee = makeComprehensiveFeeItem({
+    name: "最终报价",
+    valueSource: "formula",
+    fee_calc_method: "formula",
+    fee_calc_base: "",
+    isFinalTotal: true,
+  });
+  const nextFees = [directFee, ...convertedFees, discountFee, totalFee, finalFee];
+  const totalIndex = nextFees.findIndex((fee) => fee.id === totalFee.id);
+  const includedIndexes = [
+    0,
+    ...convertedFees.map((_fee, index) => index + 1),
+    totalIndex - 1,
+  ];
+  totalFee.fee_calc_base = bindStableFeeFormula(
+    includedIndexes.map((index) => formatAlphaSequence(index)).join("+"),
+    nextFees,
+  );
+  finalFee.fee_calc_base = bindStableFeeFormula(formatAlphaSequence(totalIndex), nextFees);
+  return nextFees;
+}
+
 export function isDefaultComprehensiveFeesOnly(value: TemplateComprehensiveFee[]) {
   if (value.length !== 1) return false;
   const fee = value[0];
@@ -326,15 +435,32 @@ export function isDefaultComprehensiveFeesOnly(value: TemplateComprehensiveFee[]
 export function normalizeComprehensiveFees(value: any, useDefault = false): TemplateComprehensiveFee[] {
   if (Array.isArray(value)) {
     const normalized = value.map((item, index) => {
-      const method = normalizeFeeCalcMethod(item?.fee_calc_method);
+      const rawValueSource = item?.valueSource;
+      const legacyFixedValueSource = rawValueSource === "fixed";
+      const valueSource = rawValueSource === "manual" || rawValueSource === "fixed" || rawValueSource === "direct" || rawValueSource === "discount"
+        ? rawValueSource
+        : "formula";
+      const method = legacyFixedValueSource ? "formula" : normalizeFeeCalcMethod(item?.fee_calc_method);
       const hasFeeCalcBase = Object.prototype.hasOwnProperty.call(item || {}, "fee_calc_base");
       return makeComprehensiveFeeItem({
         id: String(item?.id || `fee-${Date.now()}-${index}`),
         name: String(item?.name || ""),
+        isFinalTotal: item?.isFinalTotal === true,
+        valueSource,
         fee_calc_method: method,
-        fee_calc_base: method === "fixed" ? "" : method === "area_unit" ? "房屋面积" : hasFeeCalcBase ? normalizeFeeCalcBase(item?.fee_calc_base) : "直接费",
+        fee_calc_base: legacyFixedValueSource
+          ? String(toAmount(item?.unit_price))
+          : item?.valueSource === "direct"
+            ? "直接费"
+            : method === "fixed" || item?.valueSource === "discount"
+              ? ""
+              : method === "area_unit"
+                ? "房屋面积"
+                : hasFeeCalcBase
+                  ? normalizeFeeCalcBase(item?.fee_calc_base)
+                  : "直接费",
         fee_rate: method === "percent" ? toAmount(item?.fee_rate) : 0,
-        unit_price: method === "fixed" || method === "area_unit" ? toAmount(item?.unit_price) : 0,
+        unit_price: valueSource === "manual" ? 0 : method === "fixed" || method === "area_unit" ? toAmount(item?.unit_price) : 0,
         remark: String(item?.remark || ""),
         fee_scope_mode: normalizeFeeScopeMode(item?.fee_scope_mode ?? item?.feeScopeMode),
         fee_scope_space_names: Array.isArray(item?.fee_scope_space_names)
@@ -361,6 +487,9 @@ export function getComprehensiveFeeMethodPatch(method: FeeCalcMethod, item: Temp
     return { fee_calc_method: "area_unit", fee_calc_base: "房屋面积", fee_rate: 0, unit_price: toNumber(item.unit_price) };
   }
   const feeCalcBase = normalizeFeeCalcBase(item.fee_calc_base) || "直接费";
+  if (method === "formula") {
+    return { fee_calc_method: "formula", fee_calc_base: "", fee_rate: 0, unit_price: 0 };
+  }
   if (method === "reference") {
     return { fee_calc_method: "reference", fee_calc_base: feeCalcBase, fee_rate: 0, unit_price: 0 };
   }
@@ -416,12 +545,26 @@ export function formatFeeFormulaPreview(calcBase: string) {
 }
 
 export function getTemplateFeeRulePreview(item: TemplateComprehensiveFee, fees?: TemplateComprehensiveFee[]) {
+  if (item.valueSource === "direct") return "自动读取：工程直接费";
+  if (item.valueSource === "discount") return "自动读取：报价优惠";
+  if (item.valueSource === "manual") {
+    return item.unit_price > 0 ? `报价时填写，默认 ${formatAmount(item.unit_price)} 元` : "报价时填写";
+  }
+  if (item.valueSource === "fixed") {
+    const fixedBase = normalizeFeeCalcBase(item.fee_calc_base);
+    const fixedAmount = fixedBase.trim() && Number.isFinite(Number(fixedBase)) ? Number(fixedBase) : item.unit_price;
+    return `固定金额 ${formatAmount(fixedAmount)} 元`;
+  }
   const method = normalizeFeeCalcMethod(item.fee_calc_method);
   if (method === "fixed") return `固定金额 ${formatAmount(item.unit_price)} 元`;
   const calcBase = normalizeFeeCalcBase(fees ? formatStableFeeFormula(item.fee_calc_base, fees) : item.fee_calc_base);
+  if (method === "formula" && /^-?\d+(?:\.\d+)?$/.test(calcBase.trim())) {
+    return `固定金额 ${formatAmount(Number(calcBase))} 元`;
+  }
   if (method === "area_unit") return `房屋面积 × ${formatAmount(item.unit_price)}元/㎡`;
   if (!calcBase) return "待填写基础公式";
   const formulaText = formatFeeFormulaPreview(calcBase);
+  if (method === "formula") return `自定义公式：${calcBase}`;
   if (method === "reference") return `引用 ${formulaText} 金额`;
   return `${formulaText} × ${formatAmount(item.fee_rate)}%`;
 }
@@ -636,7 +779,7 @@ export function getProjectGroupEmptyText(groups: TemplateProjectGroup[], scope: 
   return `该空间暂无${name}`;
 }
 
-export function getTemplateFeeFormulaExamples(groups: TemplateProjectGroup[]) {
+export function getTemplateFeeFormulaExamples(groups: TemplateProjectGroup[], spaces: TemplateSpace[] = []) {
   const examples: string[] = [];
   const addExample = (value: unknown) => {
     const text = normalizeProjectGroupName(value);
@@ -651,18 +794,41 @@ export function getTemplateFeeFormulaExamples(groups: TemplateProjectGroup[]) {
     if (!name) return;
     addExample(name);
   });
+  spaces.forEach((space) => addExample(space.name));
   return examples.slice(0, 7);
 }
 
-export function getTemplateFeeFormulaPlaceholder(groups: TemplateProjectGroup[]) {
+export function getTemplateFeeFormulaPlaceholder(groups: TemplateProjectGroup[], spaces: TemplateSpace[] = []) {
   const customGroup = groups.find((group) => {
     const name = normalizeProjectGroupName(group.name);
     return name && !isBuiltinProjectGroup(group.id);
   });
-  return `如 材料费、人工费、${customGroup?.name || "直接费"} 或 A+B`;
+  const customSpace = spaces.find((space) => String(space.name || "").trim());
+  return `如 ${customGroup?.name || customSpace?.name || "打拆"}、(直接费+${customGroup?.name || customSpace?.name || "打拆"})*3%+A 或 A+B`;
 }
 
-export function buildTemplateFeeFormulaContext(groups: TemplateProjectGroup[]): FeeFormulaContext {
+export function buildTemplateFeeScopeReferences(
+  groups: TemplateProjectGroup[],
+  spaces: TemplateSpace[] = [],
+): FeeFormulaScopeReference[] {
+  return [
+    ...groups.map((group) => ({
+      key: `category:${group.id}`,
+      label: normalizeProjectGroupName(group.name) || group.id,
+      amount: 0,
+    })),
+    ...spaces.map((space) => ({
+      key: `space:${space.id}`,
+      label: String(space.name || "").trim() || space.id,
+      amount: 0,
+    })),
+  ];
+}
+
+export function buildTemplateFeeFormulaContext(
+  groups: TemplateProjectGroup[],
+  spaces: TemplateSpace[] = [],
+): FeeFormulaContext {
   const categoryAmounts: Record<string, number> = {};
   groups.forEach((group) => {
     const name = normalizeProjectGroupName(group.name);
@@ -674,6 +840,7 @@ export function buildTemplateFeeFormulaContext(groups: TemplateProjectGroup[]): 
     laborAmount: 0,
     materialCostAmount: 0,
     categoryAmounts,
+    scopeReferences: buildTemplateFeeScopeReferences(groups, spaces),
   };
 }
 
@@ -687,6 +854,9 @@ export function buildTemplateFormulaFeeItems(fees: TemplateComprehensiveFee[]): 
     total_price: fee.unit_price,
     fee_calc_method: fee.fee_calc_method,
     fee_calc_base: fee.fee_calc_base,
+    fee_value_source: fee.valueSource === "manual" || fee.valueSource === "fixed" || fee.valueSource === "direct" || fee.valueSource === "discount"
+      ? fee.valueSource
+      : "formula",
     fee_rate: fee.fee_rate,
     fee_scope_mode: fee.fee_scope_mode,
     fee_scope_space_names: fee.fee_scope_space_names,
@@ -1111,7 +1281,8 @@ export function makeEmptyTemplate(): QuotaTemplate {
     constructionTemplateConfig: makeDefaultConstructionTemplateConfig(),
     quoteConfig: makeDefaultQuoteConfig(),
     projectGroups: [],
-    comprehensiveFees: makeDefaultComprehensiveFees(),
+    comprehensiveFeeMode: "formula",
+    comprehensiveFees: makeDefaultFormulaComprehensiveFees(),
     appendixNote: "",
     budgetCompilationHtml: "",
     spaces: [],
@@ -1126,6 +1297,10 @@ export function normalizeTemplate(value: any, index: number): QuotaTemplate | nu
   const legacyRemark = value.remark || value.description || value.pricingRule || "";
   const hasComprehensiveFees = Object.prototype.hasOwnProperty.call(value, "comprehensiveFees");
   const spaces = Array.isArray(value.spaces) ? value.spaces.map(normalizeSpace) : [];
+  const normalizedComprehensiveFees = normalizeComprehensiveFees(value.comprehensiveFees, !hasComprehensiveFees);
+  const comprehensiveFees = value.comprehensiveFeeMode === "formula"
+    ? normalizedComprehensiveFees
+    : convertComprehensiveFeesToFormulaMode(normalizedComprehensiveFees);
   return {
     id: String(value.id || `tpl-${Date.now()}-${index}`),
     name: String(value.name || "未命名模板"),
@@ -1137,7 +1312,8 @@ export function normalizeTemplate(value: any, index: number): QuotaTemplate | nu
     constructionTemplateConfig: makeDefaultConstructionTemplateConfig(value.constructionTemplateConfig),
     quoteConfig: makeDefaultQuoteConfig(value.quoteConfig),
     projectGroups: normalizeTemplateProjectGroups(value.projectGroups, spaces),
-    comprehensiveFees: normalizeComprehensiveFees(value.comprehensiveFees, !hasComprehensiveFees),
+    comprehensiveFeeMode: "formula",
+    comprehensiveFees,
     appendixNote: String(value.appendixNote || value.quotationNote || "").trim(),
     budgetCompilationHtml: String(value.budgetCompilationHtml || value.budgetCompilation || "").trim(),
     spaces,
