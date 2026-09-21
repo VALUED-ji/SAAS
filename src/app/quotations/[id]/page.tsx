@@ -12394,6 +12394,13 @@ export default function QuotationDetailPage() {
           padding-top: 10px !important;
           padding-bottom: 10px !important;
         }
+        .quotation-detail-ui.quote-workbench-shell .quote-section.quote-section-fullscreen .quote-section-table-frame {
+          display: flex !important;
+          min-height: 0 !important;
+          flex: 1 1 auto !important;
+          flex-direction: column !important;
+          overflow: hidden !important;
+        }
         .quotation-detail-ui.quote-workbench-shell .quote-section.quote-section-fullscreen .quote-table-shell {
           min-height: 0 !important;
           flex: 1 1 auto !important;
@@ -12462,6 +12469,41 @@ export default function QuotationDetailPage() {
           max-height: calc(100vh - var(--quote-command-height) - 205px) !important;
           flex: 0 0 auto !important;
           overflow-y: auto !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section.quote-section-fullscreen.quote-section-no-footer {
+          display: flex !important;
+          height: 100dvh !important;
+          min-height: 0 !important;
+          flex: 1 1 auto !important;
+          overflow: hidden !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section.quote-section-fullscreen.quote-section-no-footer .quote-table-shell {
+          min-height: 0 !important;
+          height: auto !important;
+          max-height: none !important;
+          flex: 1 1 auto !important;
+          overflow: hidden !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section.quote-section-fullscreen.quote-section-no-footer .quote-section-table-frame {
+          display: flex !important;
+          min-height: 0 !important;
+          height: auto !important;
+          flex: 1 1 auto !important;
+          flex-direction: column !important;
+          overflow: hidden !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section.quote-section-fullscreen.quote-section-no-footer .quote-table-shell > .thin-scroll-area.quote-table-freeze-scroll {
+          min-height: 0 !important;
+          height: 100% !important;
+          max-height: none !important;
+          flex: 1 1 auto !important;
+          overflow: auto !important;
+          overscroll-behavior: contain !important;
+          scrollbar-gutter: stable both-edges !important;
+        }
+        .quotation-detail-ui.quote-workbench-shell .quote-section.quote-section-fullscreen.quote-section-no-footer:fullscreen {
+          height: 100vh !important;
+          overflow: hidden !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section-empty {
           max-height: none !important;
@@ -14077,18 +14119,21 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
 
   useEffect(() => {
     const handleFullscreenChange = () => {
-      setFullscreen(document.fullscreenElement === document.documentElement);
+      const fullscreenElement = document.fullscreenElement;
+      const section = sectionRef.current;
+      setFullscreen(Boolean(fullscreenElement && section && fullscreenElement === section));
     };
     document.addEventListener("fullscreenchange", handleFullscreenChange);
     return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
   }, []);
 
   const toggleFullscreen = useCallback(() => {
-    const target = document.documentElement;
+    const target = sectionRef.current;
     if (document.fullscreenElement) {
       void document.exitFullscreen();
       return;
     }
+    if (!target) return;
     setFullscreen(true);
     if (target.requestFullscreen) {
       void target.requestFullscreen().catch(() => setFullscreen(true));
@@ -14175,7 +14220,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
       </div>
       {quantityLinkPanel}
       <div
-        className={quantityLinkPickMode ? "quote-quantity-link-pick-surface" : undefined}
+        className={`quote-section-table-frame ${quantityLinkPickMode ? "quote-quantity-link-pick-surface" : ""}`}
         onMouseDownCapture={(event) => {
           if (!quantityLinkPickMode || !onQuantityLinkPick) return;
           const target = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-quantity-link-row]") : null;

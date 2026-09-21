@@ -108,6 +108,7 @@ export default function SystemSelect({
   const [activeIndex, setActiveIndex] = useState(0);
   const [searchText, setSearchText] = useState("");
   const [mounted, setMounted] = useState(false);
+  const [portalRoot, setPortalRoot] = useState<HTMLElement | null>(null);
   const [menuStyle, setMenuStyle] = useState<MenuStyle>({ left: 0, top: 0, width: 180, maxHeight: 300 });
   const rootRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -144,6 +145,17 @@ export default function SystemSelect({
 
   useEffect(() => {
     setMounted(true);
+    setPortalRoot(document.body);
+  }, []);
+
+  useEffect(() => {
+    const updatePortalRoot = () => {
+      const fullscreenElement = document.fullscreenElement;
+      setPortalRoot(fullscreenElement instanceof HTMLElement ? fullscreenElement : document.body);
+    };
+    updatePortalRoot();
+    document.addEventListener("fullscreenchange", updatePortalRoot);
+    return () => document.removeEventListener("fullscreenchange", updatePortalRoot);
   }, []);
 
   useEffect(() => {
@@ -227,7 +239,7 @@ export default function SystemSelect({
     }
   };
 
-  const menu = open && mounted ? createPortal(
+  const menu = open && mounted && portalRoot ? createPortal(
     <div
       id={menuId}
       ref={menuRef}
@@ -288,7 +300,7 @@ export default function SystemSelect({
         })}
       </div>
     </div>,
-    document.body
+    portalRoot
   ) : null;
 
   return (
