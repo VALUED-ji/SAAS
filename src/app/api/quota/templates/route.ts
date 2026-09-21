@@ -186,10 +186,29 @@ export async function GET(req: NextRequest) {
 
   const db = getDb();
   ensureQuotaTemplatesTable(db);
+  const templateId = cleanText(req.nextUrl.searchParams.get("templateId"));
   const { orgOptions, branchOptions } = getManageableBranchOptions(db, auth);
   backfillBranchTemplateScopes(db, auth.companyId, orgOptions, branchOptions);
   const branchIds = branchOptions.map((option) => option.id);
   const branchPlaceholders = branchIds.map(() => "?").join(",");
+
+  if (templateId) {
+    if (branchIds.length === 0) return NextResponse.json({ message: "预算模板不存在" }, { status: 404 });
+    const row = db.prepare(`
+      SELECT payload
+      FROM quota_templates
+      WHERE company_id = ?
+        AND template_id = ?
+        AND deleted_at IS NULL
+        AND scope_type = 'branch'
+        AND scope_org_unit_id IN (${branchPlaceholders})
+      LIMIT 1
+    `).get(auth.companyId, templateId, ...branchIds) as { payload?: string | null } | undefined;
+    const template = safeJsonParse(row?.payload, null);
+    if (!template) return NextResponse.json({ message: "预算模板不存在" }, { status: 404 });
+    return NextResponse.json({ template });
+  }
+
   const rows = db.prepare(`
     SELECT payload
     FROM quota_templates
@@ -225,6 +244,23 @@ export async function POST(req: NextRequest) {
   ensureQuotaTemplatesTable(db);
   const { orgOptions, branchOptions } = getManageableBranchOptions(db, auth);
   backfillBranchTemplateScopes(db, auth.companyId, orgOptions, branchOptions);
+  const branchIds = branchOptions.map((option) => option.id);
+  const branchPlaceholders = branchIds.map(() => "?").join(",");
+  const managedScopeSql = branchIds.length > 0
+    ? `scope_type = 'branch' AND scope_org_unit_id IN (${branchPlaceholders})`
+    : "1 = 0";
+  const managedScopeParams = branchIds;
+  if (body?.action === "delete") {
+    const templateId = cleanText(body?.templateId);
+    if (!templateId) return NextResponse.json({ message: "缺少预算模板 ID" }, { status: 400 });
+    db.prepare(`
+      UPDATE quota_templates
+      SET deleted_at = datetime('now'), updated_at = datetime('now')
+      WHERE company_id = ? AND template_id = ? AND deleted_at IS NULL AND ${managedScopeSql}
+    `).run(auth.companyId, templateId, ...managedScopeParams);
+    return NextResponse.json({ deleted: true, templateId });
+  }
+
   const templates = (Array.isArray(body?.templates) ? body.templates : [])
     .map((template: any) => normalizeTemplatePayload(template, orgOptions, branchOptions))
     .filter(Boolean) as Array<NonNullable<ReturnType<typeof normalizeTemplatePayload>>>;
@@ -233,26 +269,22 @@ export async function POST(req: NextRequest) {
   }
 
   const tx = (db as any).transaction(() => {
-    const activeIds = templates.map((template) => String(template.payload.id));
-	    const branchIds = branchOptions.map((option) => option.id);
-	    const branchPlaceholders = branchIds.map(() => "?").join(",");
-	    const managedScopeSql = branchIds.length > 0
-	      ? `scope_type = 'branch' AND scope_org_unit_id IN (${branchPlaceholders})`
-	      : "1 = 0";
-	    const managedScopeParams = branchIds;
-    if (activeIds.length > 0) {
-      const placeholders = activeIds.map(() => "?").join(",");
-      db.prepare(`
-        UPDATE quota_templates
-        SET deleted_at = datetime('now'), updated_at = datetime('now')
-        WHERE company_id = ? AND template_id NOT IN (${placeholders}) AND deleted_at IS NULL AND ${managedScopeSql}
-      `).run(auth.companyId, ...activeIds, ...managedScopeParams);
-    } else {
-      db.prepare(`
-        UPDATE quota_templates
-        SET deleted_at = datetime('now'), updated_at = datetime('now')
-        WHERE company_id = ? AND deleted_at IS NULL AND ${managedScopeSql}
-      `).run(auth.companyId, ...managedScopeParams);
+    if (body?.action === "replace") {
+      const activeIds = templates.map((template) => String(template.payload.id));
+      if (activeIds.length > 0) {
+        const placeholders = activeIds.map(() => "?").join(",");
+        db.prepare(`
+          UPDATE quota_templates
+          SET deleted_at = datetime('now'), updated_at = datetime('now')
+          WHERE company_id = ? AND template_id NOT IN (${placeholders}) AND deleted_at IS NULL AND ${managedScopeSql}
+        `).run(auth.companyId, ...activeIds, ...managedScopeParams);
+      } else {
+        db.prepare(`
+          UPDATE quota_templates
+          SET deleted_at = datetime('now'), updated_at = datetime('now')
+          WHERE company_id = ? AND deleted_at IS NULL AND ${managedScopeSql}
+        `).run(auth.companyId, ...managedScopeParams);
+      }
     }
 
     const upsert = db.prepare(`
