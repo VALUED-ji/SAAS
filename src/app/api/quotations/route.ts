@@ -172,6 +172,7 @@ function normalizeTemporaryCustomer(body: any) {
   const input = body?.temp_customer && typeof body.temp_customer === "object" ? body.temp_customer : body;
   return {
     name: String(input?.name || input?.temp_customer_name || "").trim(),
+    designerName: String(input?.designer_name || input?.temp_customer_designer_name || "").trim(),
     phone: String(input?.phone || input?.temp_customer_phone || "").trim(),
     weixin: String(input?.weixin || input?.temp_customer_weixin || "").trim(),
     address: String(input?.address || input?.temp_customer_address || "").trim(),
@@ -1122,7 +1123,8 @@ export async function GET(req: NextRequest) {
 	      quota_template_name: quotaTemplateName,
 	      quote_spaces: quoteSpaces,
       quotation_type: getQuotationType(quotation, settings),
-      designer_name: designerByCustomer.get(String(quotation.customer_id || "")) || "",
+      designer_name: designerByCustomer.get(String(quotation.customer_id || ""))
+        || String(quotation.temp_customer_designer_name || "").trim(),
       advisor_name: advisorByCustomer.get(String(quotation.customer_id || "")) || "",
       customer_created_from_quotation: quotationCreatedCustomerIds.has(String(quotation.customer_id || "")) ? 1 : 0,
       signed_contract_count: signedByCustomer.get(String(quotation.customer_id || ""))?.count || 0,
@@ -1366,10 +1368,10 @@ export async function POST(req: NextRequest) {
 	        INSERT INTO quotations (
 	          id, project_id, company_id, title, quotation_type, version, total_amount, discount, final_amount, status, notes, customer_visible_note, terms, settings,
 	          quotation_org_unit_id, quotation_org_unit_name,
-	          temp_customer_name, temp_customer_phone, temp_customer_weixin, temp_customer_address, temp_customer_area, temp_customer_decoration_type,
+	          temp_customer_name, temp_customer_designer_name, temp_customer_phone, temp_customer_weixin, temp_customer_address, temp_customer_area, temp_customer_decoration_type,
 	          created_by_id, created_at, updated_at
 	        )
-	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
 	      `).run(
 	        quotationId,
 	        project?.id || null,
@@ -1387,6 +1389,7 @@ export async function POST(req: NextRequest) {
         quotationOrg.id,
         quotationOrg.name,
         isTemporaryQuotation ? temporaryCustomer.name : null,
+        isTemporaryQuotation ? temporaryCustomer.designerName || null : null,
         isTemporaryQuotation ? temporaryCustomer.phone || null : null,
         isTemporaryQuotation ? temporaryCustomer.weixin || null : null,
         isTemporaryQuotation ? temporaryCustomer.address || null : null,

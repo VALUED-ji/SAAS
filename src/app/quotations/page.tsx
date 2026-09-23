@@ -600,7 +600,7 @@ export default function QuotationsPage() {
   const [selectedCustomer, setSelectedCustomer] = useState<any | null>(null);
   const [createCustomerSnapshot, setCreateCustomerSnapshot] = useState<CreateCustomerSnapshot>(emptyCreateCustomerSnapshot);
   const [quickCustomer, setQuickCustomer] = useState<QuickCustomerDraft>(emptyQuickCustomerDraft);
-  const [temporaryCustomer, setTemporaryCustomer] = useState({ name: "", phone: "", weixin: "", address: "", area: "", decoration_type: "" });
+  const [temporaryCustomer, setTemporaryCustomer] = useState({ name: "", designer_name: "", phone: "", weixin: "", address: "", area: "", decoration_type: "" });
   const [createMapPickerOpen, setCreateMapPickerOpen] = useState(false);
   const [title, setTitle] = useState("装修报价单");
   const [quotationType, setQuotationType] = useState("");
@@ -1301,6 +1301,7 @@ export default function QuotationsPage() {
       const temporaryCustomerDraft: QuickCustomerDraft = {
         ...emptyQuickCustomerDraft,
         name: String(record?.customer_name || "").trim(),
+        designer_name: String(record?.designer_name || "").trim(),
         phone: String(record?.customer_phone || "").trim(),
         weixin: String(record?.customer_weixin || "").trim(),
         address: String(record?.customer_address || record?.customer_house_address || "").trim(),
@@ -1322,7 +1323,7 @@ export default function QuotationsPage() {
       setCreateMode("new_customer");
       setQuickCustomer(temporaryCustomerDraft);
       setCreateLockedTemporaryCustomer(temporaryCustomerDraft);
-      setTemporaryCustomer({ name: "", phone: "", weixin: "", address: "", area: "", decoration_type: "" });
+      setTemporaryCustomer({ name: "", designer_name: "", phone: "", weixin: "", address: "", area: "", decoration_type: "" });
       setCreateCustomerSearch("");
       setCreateCustomerOptions([]);
       setCreateCustomerTotal(0);
@@ -1355,7 +1356,7 @@ export default function QuotationsPage() {
     setCreateCustomerSnapshot(snapshot);
     setCreateMode("customer");
     setQuickCustomer(emptyQuickCustomerDraft);
-    setTemporaryCustomer({ name: "", phone: "", weixin: "", address: "", area: "", decoration_type: "" });
+    setTemporaryCustomer({ name: "", designer_name: "", phone: "", weixin: "", address: "", area: "", decoration_type: "" });
     setCreateCustomerSearch("");
     setCreateCustomerOptions([]);
     setCreateCustomerTotal(0);
@@ -1651,6 +1652,7 @@ export default function QuotationsPage() {
         customer_snapshot: createAsTemporaryCustomer ? undefined : quotationCustomerSnapshot,
         temp_customer: createAsTemporaryCustomer ? {
           name: isNewCustomerMode ? quickCustomer.name : temporaryCustomer.name,
+          designer_name: isNewCustomerMode ? quickCustomer.designer_name : temporaryCustomer.designer_name,
           phone: isNewCustomerMode ? quickCustomer.phone : temporaryCustomer.phone,
           weixin: isNewCustomerMode ? quickCustomer.weixin : temporaryCustomer.weixin,
           address: isNewCustomerMode ? quickCustomer.address : temporaryCustomer.address,
@@ -2202,7 +2204,7 @@ export default function QuotationsPage() {
 	                setSelectedCustomer(null);
                 setCreateCustomerSnapshot(emptyCreateCustomerSnapshot);
                 setQuickCustomer(emptyQuickCustomerDraft);
-                setTemporaryCustomer({ name: "", phone: "", weixin: "", address: "", area: "", decoration_type: "" });
+                setTemporaryCustomer({ name: "", designer_name: "", phone: "", weixin: "", address: "", area: "", decoration_type: "" });
                 setCreateCustomerSearch("");
                 setCreateCustomerOptions([]);
                 setCreateCustomerTotal(0);
@@ -3393,6 +3395,15 @@ export default function QuotationsPage() {
                           }}
                           className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
                           placeholder="如：张先生、李女士"
+                        />
+                      </label>
+                      <label className="block text-sm">
+                        <span className="mb-1.5 block text-xs font-bold text-[#475467]">设计师</span>
+                        <input
+                          value={temporaryCustomer.designer_name}
+                          onChange={(event) => setTemporaryCustomer((prev) => ({ ...prev, designer_name: event.target.value }))}
+                          className="h-10 w-full rounded-[10px] border border-[#cfd7e3] bg-white px-3 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:ring-[3px] focus:ring-[#407aff]/12"
+                          placeholder="手动填写设计师姓名"
                         />
                       </label>
                       <div className="space-y-3">

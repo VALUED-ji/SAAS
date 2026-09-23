@@ -1862,6 +1862,11 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
       const customer = db.prepare("SELECT * FROM customers WHERE id = ? AND company_id = ? AND deleted_at IS NULL").get(customerId, auth.companyId) as any;
       if (!customer) return NextResponse.json({ message: "客户不存在" }, { status: 404 });
       const primaryQuotation = boundQuotations.find((quotation) => String(quotation.id) === params.id) || boundQuotations[0];
+      const temporaryDesignerName = String(
+        primaryQuotation.temp_customer_designer_name
+        || boundQuotations.find((quotation) => String(quotation.temp_customer_designer_name || "").trim())?.temp_customer_designer_name
+        || "",
+      ).trim();
       const customerStoreName = String(customer.service_store || "").trim();
       const quotationOrg = customerStoreName
         ? getStoreOrgByName(db, customerStoreName, auth.companyId)
@@ -1877,6 +1882,10 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
         LIMIT 1
       `).get(customer.id, auth.companyId) as any;
       const tx = (db as any).transaction(() => {
+        if (temporaryDesignerName && !String(customer.designer_name_manual || "").trim()) {
+          db.prepare("UPDATE customers SET designer_name_manual = ?, updated_at = datetime('now') WHERE id = ? AND company_id = ?")
+            .run(temporaryDesignerName, customer.id, auth.companyId);
+        }
         if (!project) {
           const manager = db.prepare("SELECT user_id FROM customer_team WHERE customer_id = ? AND role = 'designer' ORDER BY assigned_at DESC LIMIT 1").get(customer.id) as any;
           const projectId = makeId("PROJ");
