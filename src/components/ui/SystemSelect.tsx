@@ -41,6 +41,7 @@ type SystemSelectProps = Omit<HTMLAttributes<HTMLDivElement>, "onChange" | "onKe
   value?: string | number;
   defaultValue?: string | number;
   onChange?: (event: SelectChangeEvent) => void;
+  onDisabledOptionClick?: (option: ParsedOption) => void;
   onKeyDown?: (event: any) => void;
   menuPlacement?: "auto" | "top" | "bottom";
   menuMinWidth?: number;
@@ -82,6 +83,7 @@ export default function SystemSelect({
   value,
   defaultValue,
   onChange,
+  onDisabledOptionClick,
   disabled,
   name,
   required,
@@ -233,7 +235,11 @@ export default function SystemSelect({
         return;
       }
       const option = visibleOptions[activeIndex];
-      if (option && !option.disabled) commitValue(option.value);
+      if (option?.disabled) {
+        onDisabledOptionClick?.(option);
+      } else if (option) {
+        commitValue(option.value);
+      }
     } else if (event.key === "Escape") {
       setOpen(false);
     }
@@ -275,13 +281,19 @@ export default function SystemSelect({
             <button
               key={`${option.value}-${index}`}
               type="button"
-              disabled={option.disabled}
               role="option"
+              aria-disabled={option.disabled || undefined}
               aria-selected={selectedOption}
               data-active={active ? "true" : undefined}
               title={option.label}
               onMouseEnter={() => setActiveIndex(index)}
-              onClick={() => !option.disabled && commitValue(option.value)}
+              onClick={() => {
+                if (option.disabled) {
+                  onDisabledOptionClick?.(option);
+                  return;
+                }
+                commitValue(option.value);
+              }}
               className={cn(
                 "flex min-h-9 w-full items-center justify-between gap-2 rounded-[8px] px-3 py-2 text-left text-sm font-semibold transition-colors",
                 selectedOption

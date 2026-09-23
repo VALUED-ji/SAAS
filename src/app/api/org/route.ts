@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { formatOrgManagerNames, getOrgManagerMap, normalizeOrgManagerIds, setOrgManagers } from "@/lib/orgManagers";
+import { normalizeOrgUnitDisplayName, normalizeOrgUnitNameKey } from "@/lib/orgUnitDuplicates";
 import { canManageOrganization, getAuthContext } from "@/lib/security/authorization";
 
 function ensureOrgColumns(db: ReturnType<typeof getDb>) {
@@ -23,6 +24,18 @@ function getManagerIdsFromBody(body: any) {
   if (Array.isArray(body?.manager_ids)) return normalizeOrgManagerIds(body.manager_ids);
   if (body?.manager_id !== undefined) return normalizeOrgManagerIds(body.manager_id);
   return undefined;
+}
+
+function getOrgTypeLabel(type: unknown) {
+  const labels: Record<string, string> = {
+    group: "集团",
+    region: "大区",
+    company: "公司",
+    store: "门店",
+    dept: "部门",
+    team: "小组",
+  };
+  return labels[String(type || "").trim()] || "组织";
 }
 
 function getDescendantOrgIds(db: ReturnType<typeof getDb>, id: string, companyId: string): string[] {
@@ -88,6 +101,27 @@ function managersBelongToCompany(db: ReturnType<typeof getDb>, managerIds: strin
   return Number(row?.total || 0) === managerIds.length;
 }
 
+function findDuplicateOrgUnit(
+  db: ReturnType<typeof getDb>,
+  companyId: string,
+  name: string,
+  type: string,
+  parentId: string | null | undefined,
+  excludeId?: string,
+) {
+  const rows = db.prepare(`
+    SELECT id, name
+    FROM org_units
+    WHERE company_id = ?
+      AND type = ?
+      AND COALESCE(parent_id, '') = COALESCE(?, '')
+      AND deleted_at IS NULL
+      AND (? IS NULL OR id <> ?)
+  `).all(companyId, type, parentId || null, excludeId || null, excludeId || null) as { id: string; name: string }[];
+  const normalizedName = normalizeOrgUnitNameKey(name);
+  return rows.find((row) => normalizeOrgUnitNameKey(row.name) === normalizedName) || null;
+}
+
 export async function GET(req: NextRequest) {
   const auth = getAuthContext(req);
   if (!auth) return NextResponse.json({ message: "请先登录" }, { status: 401 });
@@ -108,7 +142,23 @@ export async function GET(req: NextRequest) {
       o.id
   `).all(auth.companyId) as any[];
   const managerMap = getOrgManagerMap(db, units.map((unit) => unit.id));
-  return NextResponse.json(units.map((unit) => ({
+  const duplicateGroupSizes = new Map<string, number>();
+  units.forEach((unit) => {
+    const key = [
+      String(unit.parent_id || ""),
+      String(unit.type || "").toLowerCase(),
+      normalizeOrgUnitNameKey(unit.name),
+    ].join("::");
+    duplicateGroupSizes.set(key, (duplicateGroupSizes.get(key) || 0) + 1);
+  });
+  return NextResponse.json(units.map((unit) => {
+    const duplicateKey = [
+      String(unit.parent_id || ""),
+      String(unit.type || "").toLowerCase(),
+      normalizeOrgUnitNameKey(unit.name),
+    ].join("::");
+    const duplicateGroupSize = duplicateGroupSizes.get(duplicateKey) || 1;
+    return {
     ...unit,
     managers: managerMap.get(unit.id) || [],
     manager_ids: (managerMap.get(unit.id) || []).map((manager) => manager.id),
@@ -116,7 +166,10 @@ export async function GET(req: NextRequest) {
     manager_user_name: formatOrgManagerNames(managerMap.get(unit.id) || []) || unit.manager_user_name,
     is_active: Number(unit.is_active ?? 1),
     customer_count: customerCountMap.get(String(unit.name || "").trim()) || 0,
-  })));
+    duplicate_group_size: duplicateGroupSize,
+    is_duplicate: duplicateGroupSize > 1,
+    };
+  }));
 }
 
 export async function POST(req: NextRequest) {
@@ -125,7 +178,8 @@ export async function POST(req: NextRequest) {
   if (!canManageOrganization(auth)) return NextResponse.json({ message: "没有组织管理权限" }, { status: 403 });
   try {
     const body = await req.json();
-    const { name, type, parent_id } = body;
+    const { type, parent_id } = body;
+    const name = normalizeOrgUnitDisplayName(body.name);
     const managerIds = getManagerIdsFromBody(body) || [];
     if (!name || !type) return NextResponse.json({ message: "名称和类型不能为空" }, { status: 400 });
     const db = getDb();
@@ -138,6 +192,13 @@ export async function POST(req: NextRequest) {
         .get(parent_id, auth.companyId) as any;
       if (!parent) return NextResponse.json({ message: "上级组织不存在" }, { status: 400 });
       if (Number(parent.is_active ?? 1) !== 1) return NextResponse.json({ message: "停用组织下不能新增下级组织" }, { status: 400 });
+    }
+    const duplicate = findDuplicateOrgUnit(db, auth.companyId, name, String(type), parent_id);
+    if (duplicate) {
+      return NextResponse.json({
+        code: "ORG_DUPLICATE_NAME",
+        message: `同一上级下已存在${getOrgTypeLabel(type)}「${name}」，不能重复创建`,
+      }, { status: 409 });
     }
     const id = `OG${Date.now()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
     const sortOrderRow = parent_id
@@ -173,17 +234,29 @@ export async function PUT(req: NextRequest) {
   try {
     const id = req.nextUrl.searchParams.get("id");
     const body = await req.json();
-    const { name, type, credit_code, manager_name, address, is_active } = body;
+    const { type, credit_code, manager_name, address, is_active } = body;
+    const name = body.name === undefined ? undefined : normalizeOrgUnitDisplayName(body.name);
     const managerIds = getManagerIdsFromBody(body);
     if (!id) return NextResponse.json({ message: "id is required" }, { status: 400 });
     const db = getDb();
     ensureOrgColumns(db);
-    const target = db.prepare("SELECT id FROM org_units WHERE id = ? AND company_id = ? AND deleted_at IS NULL").get(id, auth.companyId);
+    const target = db.prepare("SELECT id, name, type, parent_id FROM org_units WHERE id = ? AND company_id = ? AND deleted_at IS NULL")
+      .get(id, auth.companyId) as { id: string; name: string; type: string; parent_id: string | null } | undefined;
     if (!target) return NextResponse.json({ message: "组织不存在或已删除" }, { status: 404 });
     if (managerIds !== undefined && !managersBelongToCompany(db, managerIds, auth.companyId)) {
       return NextResponse.json({ message: "管理人员不存在、已停用或不属于当前公司" }, { status: 400 });
     }
-    if (name) db.prepare("UPDATE org_units SET name = ?, updated_at = datetime('now') WHERE id = ? AND company_id = ?").run(name, id, auth.companyId);
+    const nextName = name === undefined ? target.name : name;
+    const nextType = type === undefined ? target.type : String(type);
+    if (!nextName.trim()) return NextResponse.json({ message: "组织名称不能为空" }, { status: 400 });
+    const duplicate = findDuplicateOrgUnit(db, auth.companyId, nextName, nextType, target.parent_id, id);
+    if (duplicate) {
+      return NextResponse.json({
+        code: "ORG_DUPLICATE_NAME",
+        message: `同一上级下已存在同名组织「${nextName}」，不能保存重复名称`,
+      }, { status: 409 });
+    }
+    if (name !== undefined) db.prepare("UPDATE org_units SET name = ?, updated_at = datetime('now') WHERE id = ? AND company_id = ?").run(nextName, id, auth.companyId);
     if (type) db.prepare("UPDATE org_units SET type = ?, updated_at = datetime('now') WHERE id = ? AND company_id = ?").run(type, id, auth.companyId);
     if (credit_code !== undefined) db.prepare("UPDATE org_units SET credit_code = ? WHERE id = ? AND company_id = ?").run(credit_code, id, auth.companyId);
     if (managerIds !== undefined) {

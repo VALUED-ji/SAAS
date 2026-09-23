@@ -380,10 +380,11 @@ export function convertComprehensiveFeesToFormulaMode(fees: TemplateComprehensiv
   const includedIndexes = [
     0,
     ...convertedFees.map((_fee, index) => index + 1),
-    totalIndex - 1,
   ];
+  const includedFormula = includedIndexes.map((index) => formatAlphaSequence(index)).join("+");
+  const discountFormula = formatAlphaSequence(totalIndex - 1);
   totalFee.fee_calc_base = bindStableFeeFormula(
-    includedIndexes.map((index) => formatAlphaSequence(index)).join("+"),
+    `${includedFormula}-${discountFormula}`,
     nextFees,
   );
   finalFee.fee_calc_base = bindStableFeeFormula(formatAlphaSequence(totalIndex), nextFees);
@@ -408,11 +409,12 @@ export function normalizeComprehensiveFees(value: any, useDefault = false): Temp
     const normalized = value.map((item, index) => {
       const rawValueSource = item?.valueSource;
       const legacyFixedValueSource = rawValueSource === "fixed";
-      const valueSource = rawValueSource === "manual" || rawValueSource === "fixed" || rawValueSource === "direct" || rawValueSource === "discount"
+      const valueSource = rawValueSource === "manual" || rawValueSource === "direct" || rawValueSource === "discount"
         ? rawValueSource
         : "formula";
       const method = legacyFixedValueSource ? "formula" : normalizeFeeCalcMethod(item?.fee_calc_method);
       const hasFeeCalcBase = Object.prototype.hasOwnProperty.call(item || {}, "fee_calc_base");
+      const legacyFixedBase = normalizeFeeCalcBase(item?.fee_calc_base);
       return makeComprehensiveFeeItem({
         id: String(item?.id || `fee-${Date.now()}-${index}`),
         name: String(item?.name || ""),
@@ -420,7 +422,7 @@ export function normalizeComprehensiveFees(value: any, useDefault = false): Temp
         valueSource,
         fee_calc_method: method,
         fee_calc_base: legacyFixedValueSource
-          ? String(toAmount(item?.unit_price))
+          ? legacyFixedBase && /^-?\d+(?:\.\d+)?$/.test(legacyFixedBase) ? legacyFixedBase : String(toAmount(item?.unit_price))
           : item?.valueSource === "direct"
             ? "直接费"
             : method === "fixed" || item?.valueSource === "discount"
@@ -448,6 +450,16 @@ export function normalizeComprehensiveFees(value: any, useDefault = false): Temp
     });
   }
   return useDefault ? makeDefaultComprehensiveFees() : [];
+}
+
+export function findDuplicateDiscountFee(fees: TemplateComprehensiveFee[]) {
+  let hasDiscountFee = false;
+  for (const fee of fees) {
+    if ((fee.valueSource || "formula") !== "discount") continue;
+    if (hasDiscountFee) return fee;
+    hasDiscountFee = true;
+  }
+  return null;
 }
 
 export function getComprehensiveFeeMethodPatch(method: FeeCalcMethod, item: TemplateComprehensiveFee): Partial<TemplateComprehensiveFee> {
@@ -825,7 +837,7 @@ export function buildTemplateFormulaFeeItems(fees: TemplateComprehensiveFee[]): 
     total_price: fee.unit_price,
     fee_calc_method: fee.fee_calc_method,
     fee_calc_base: fee.fee_calc_base,
-    fee_value_source: fee.valueSource === "manual" || fee.valueSource === "fixed" || fee.valueSource === "direct" || fee.valueSource === "discount"
+    fee_value_source: fee.valueSource === "manual" || fee.valueSource === "direct" || fee.valueSource === "discount"
       ? fee.valueSource
       : "formula",
     fee_rate: fee.fee_rate,

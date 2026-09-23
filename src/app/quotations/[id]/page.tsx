@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { AlertTriangle, BookmarkPlus, Calculator, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Eraser, Eye, FileText, GripVertical, History, Home, LayoutGrid, Link2, List, Loader2, MapPin, Maximize2, Minimize2, Palette, Pencil, Phone, Plus, RefreshCw, Replace, Ruler, Search, Tags, Trash2, Unlink2, X } from "lucide-react";
+import { AlertTriangle, BookmarkPlus, Calculator, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Eraser, Eye, FileText, GripVertical, History, Home, LayoutGrid, Link2, List, Loader2, MapPin, Maximize2, Minimize2, Palette, Pencil, Phone, Plus, RefreshCw, Replace, Ruler, Search, Star, Tags, Trash2, Unlink2, X } from "lucide-react";
 import {
   bindStableFeeFormula,
   buildDirectFeeScopeReferences,
@@ -15,6 +15,7 @@ import {
   feeCalcMethodLabels,
   formatStableFeeFormula,
   getFeeFormulaText,
+  getFeeScopeText,
   getFeeRuleText,
   getStableFeeReferenceIds,
   getLegacyManagementFeeRate,
@@ -31,6 +32,13 @@ import {
   type FeeFormulaContext,
   type FeeScopeMode,
 } from "@/lib/quotationFeeFormulas";
+import {
+  applyQuoteDiscountToFormulaTotal,
+  calculateDiscountRuleAmounts,
+  calculateDiscountRulesTotal,
+  formatDiscountRuleDetailText,
+  getDiscountRuleValue,
+} from "@/lib/quotationDiscountRules";
 import { getQuotationRowColor, quotationRowColors } from "@/lib/quotationRowColors";
 import { formatAlphaSequence } from "@/lib/quotationSequence";
 import { calculatePackageQuotePrice, type PackageQuoteConfigInput, type PackagePriceResult } from "@/lib/quotaTemplatePricing";
@@ -598,7 +606,6 @@ const quoteCategoryCreateOptions = [
 const quotationFeeValueSourceOptions = [
   { value: "formula", label: "自定义公式" },
   { value: "direct", label: "工程直接费" },
-  { value: "fixed", label: "固定金额" },
   { value: "manual", label: "报价时填写" },
   { value: "discount", label: "报价优惠" },
 ] as const;
@@ -1894,11 +1901,11 @@ function getFeeCalcMethodPatch(method: FeeCalcMethod, item: QuotationItem): Part
 
 function getQuotationFeeValueSource(item: Partial<QuotationItem>) {
   const match = String(item.cost_source || "").match(/^fee_source:(formula|manual|fixed|direct|discount)$/);
-  return match?.[1] as "formula" | "manual" | "fixed" | "direct" | "discount" | undefined;
+  return (match?.[1] === "fixed" ? "formula" : match?.[1]) as "formula" | "manual" | "direct" | "discount" | undefined;
 }
 
 function getQuotationFeeValueSourcePatch(
-  valueSource: "formula" | "manual" | "fixed" | "direct" | "discount",
+  valueSource: "formula" | "manual" | "direct" | "discount",
   item: QuotationItem,
 ): Partial<QuotationItem> {
   if (valueSource === "formula") {
@@ -1941,18 +1948,7 @@ function getQuotationFeeValueSourcePatch(
       quantity: 1,
     };
   }
-  const currentBase = normalizeFeeCalcBase(item.fee_calc_base);
-  const fixedBase = /^-?\d+(?:\.\d+)?$/.test(currentBase)
-    ? currentBase
-    : String(toNumber(item.unit_price) || 0);
-  return {
-    cost_source: "fee_source:fixed",
-    fee_calc_method: "formula",
-    fee_calc_base: fixedBase,
-    fee_rate: 0,
-    unit_price: 0,
-    quantity: 1,
-  };
+  return {};
 }
 
 function inferItemSpace(item: Partial<QuotationItem>) {
@@ -2195,20 +2191,27 @@ function calculate(items: QuotationItem[], settings: QuotationDetail["settings"]
   if (initialRawTotals.formulaTableMode) {
     const undiscountedRawTotals = calculateRawTotals(items, { ...settings, discount: 0 }, houseArea);
     const discountRules = getDiscountRules(settings);
-    const ruleDiscount = discountRules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, undiscountedRawTotals, houseArea)), 0);
+    const ruleDiscount = getDiscountRulesAmount(discountRules, items, settings, undiscountedRawTotals, houseArea);
     const discount = Math.min(undiscountedRawTotals.directAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : toNumber(settings?.discount)));
-    const rawTotals = calculateRawTotals(items, { ...settings, discount }, houseArea);
+    const discountedRawTotals = calculateRawTotals(items, { ...settings, discount }, houseArea);
+    const finalAmount = applyQuoteDiscountToFormulaTotal(
+      undiscountedRawTotals.directAmount,
+      discountedRawTotals.directAmount,
+      discount,
+    );
     return {
-      ...rawTotals,
+      ...discountedRawTotals,
+      otherAmount: finalAmount,
+      directAmount: finalAmount,
       taxAmount: 0,
       discount,
-      finalAmount: rawTotals.directAmount,
+      finalAmount,
     };
   }
   const rawTotals = initialRawTotals;
   const chargeableAmount = rawTotals.directAmount;
   const discountRules = getDiscountRules(settings);
-  const ruleDiscount = discountRules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, rawTotals, houseArea)), 0);
+  const ruleDiscount = getDiscountRulesAmount(discountRules, items, settings, rawTotals, houseArea);
   const discount = Math.min(chargeableAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : toNumber(settings?.discount)));
   const taxAmount = Math.max(0, chargeableAmount - discount) * toNumber(settings?.taxRate) / 100;
   const finalAmount = Math.max(0, chargeableAmount + taxAmount - discount);
@@ -2245,6 +2248,7 @@ type DiscountScopeOption = {
 
 type DiscountRule = {
   id: string;
+  name?: string;
   type: "fee" | "space" | "work_type";
   mode: "amount" | "rate";
   scope?: string;
@@ -2362,6 +2366,7 @@ function getLegacyDiscountRule(settings: QuotationDetail["settings"]): DiscountR
   const type = settings?.discountType === "space" || settings?.discountType === "work_type" ? settings.discountType : "fee";
   return {
     id: "legacy",
+    name: "优惠",
     type,
     mode: settings?.discountMode === "rate" ? "rate" : "amount",
     scope: settings?.discountScope || "total",
@@ -2378,6 +2383,7 @@ function getDiscountRules(settings: QuotationDetail["settings"]): DiscountRule[]
   const rules = rawRules
     .map((rule, index): DiscountRule => ({
       id: String(rule?.id || `rule_${index}`),
+      name: String(rule?.name || "").trim(),
       type: rule?.type === "space" || rule?.type === "work_type" ? rule.type : "fee",
       mode: rule?.mode === "rate" ? "rate" : "amount",
       scope: String(rule?.scope || "total"),
@@ -2390,12 +2396,6 @@ function getDiscountRules(settings: QuotationDetail["settings"]): DiscountRule[]
   if (hasRuleList) return rules;
   const legacyRule = getLegacyDiscountRule(settings);
   return legacyRule ? [legacyRule] : [];
-}
-
-function getDiscountRuleValue(rule: DiscountRule) {
-  if (rule.type === "space") return rule.space ? `space:${rule.space}` : "";
-  if (rule.type === "work_type") return rule.workType ? `work_type:${rule.workType}` : "";
-  return rule.scope || "total";
 }
 
 function isRemovedOtherFeeDiscountScope(value: string) {
@@ -2417,14 +2417,24 @@ function getDiscountRuleScope(rule: DiscountRule, items: QuotationItem[], settin
     || options[0];
 }
 
-function getDiscountRuleAmount(rule: DiscountRule, items: QuotationItem[], settings: QuotationDetail["settings"], totals: ReturnType<typeof calculateRawTotals>, houseArea = 0) {
-  const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
-  const scopeAmount = Math.max(0, toNumber(scope?.amount));
-  const excludedAmount = Math.min(scopeAmount, Math.max(0, toNumber(settings?.excludeSpecificDiscountAmount)));
-  const baseAmount = Math.max(0, scopeAmount - excludedAmount);
-  if (baseAmount <= 0) return 0;
-  if (rule.mode === "rate") return roundMoney(baseAmount * (1 - Math.min(1, Math.max(0, toNumber(rule.rate || 1)))));
-  return roundMoney(Math.min(Math.max(0, toNumber(rule.discount)), baseAmount));
+function getDiscountRuleAmounts(rules: DiscountRule[], items: QuotationItem[], settings: QuotationDetail["settings"], totals: ReturnType<typeof calculateRawTotals>, houseArea = 0) {
+  return calculateDiscountRuleAmounts(rules, (rule) => {
+    const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
+    return Math.max(0, toNumber(scope?.amount));
+  }, {
+    excludedAmount: settings?.excludeSpecificDiscountAmount,
+    totalCap: totals.directAmount,
+  });
+}
+
+function getDiscountRulesAmount(rules: DiscountRule[], items: QuotationItem[], settings: QuotationDetail["settings"], totals: ReturnType<typeof calculateRawTotals>, houseArea = 0) {
+  return calculateDiscountRulesTotal(rules, (rule) => {
+    const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
+    return Math.max(0, toNumber(scope?.amount));
+  }, {
+    excludedAmount: settings?.excludeSpecificDiscountAmount,
+    totalCap: totals.directAmount,
+  });
 }
 
 function calculateRawTotals(items: QuotationItem[], settings: QuotationDetail["settings"], houseArea = 0) {
@@ -2527,7 +2537,9 @@ export default function QuotationDetailPage() {
   const [discountPanelOpen, setDiscountPanelOpen] = useState(false);
   const [quotationTotalBreakdownOpen, setQuotationTotalBreakdownOpen] = useState(false);
   const [discountDraftSettings, setDiscountDraftSettings] = useState<QuotationDetail["settings"] | null>(null);
+  const [activeDiscountRuleId, setActiveDiscountRuleId] = useState<string | null>(null);
 	  const [discountRateText, setDiscountRateText] = useState("1");
+	  const [discountNameText, setDiscountNameText] = useState("");
   const [quantityLinkDialog, setQuantityLinkDialog] = useState<{
     index: number;
     text: string;
@@ -3087,9 +3099,37 @@ export default function QuotationDetailPage() {
     || activeDiscountOptions.find((option) => option.value === "total")
     || activeDiscountOptions[0];
   const discountRules = useMemo(() => getDiscountRules(discountSettings), [discountSettings]);
-  const activeDiscountRuleValue = selectedDiscountScope?.value || discountSelectionValue;
-  const activeDiscountRule = discountRules.find((rule) => rule.type === discountType && getDiscountRuleValue(rule) === activeDiscountRuleValue) || null;
-  const discountMode = activeDiscountRule?.mode || (discountSettings?.discountMode === "rate" ? "rate" : "amount");
+  const discountRuleAmounts = useMemo(() => getDiscountRuleAmounts(discountRules, items, discountSettings, undiscountedTotals, quotationHouseArea), [discountRules, discountSettings, items, quotationHouseArea, undiscountedTotals]);
+  const discountAmountByGroup = useMemo(() => {
+    const amountByGroup = new Map<string, number>();
+    discountRules.forEach((rule) => {
+      const groupKey = `${rule.type}:${getDiscountRuleValue(rule) || "total"}`;
+      amountByGroup.set(groupKey, toMoney((amountByGroup.get(groupKey) || 0) + toNumber(discountRuleAmounts.get(rule.id))));
+    });
+    return amountByGroup;
+  }, [discountRuleAmounts, discountRules]);
+  const discountDetailText = useMemo(() => {
+    const detailRules = discountRules.map((rule, index) => {
+      const scope = getDiscountRuleScope(rule, items, discountSettings, undiscountedTotals, quotationHouseArea);
+      const scopeLabel = scope?.label || "优惠范围";
+      const amount = toNumber(discountRuleAmounts.get(rule.id));
+      const name = rule.name || `优惠${index + 1}`;
+      return {
+        name,
+        scopeLabel,
+        mode: rule.mode,
+        rate: rule.rate,
+        discount: rule.discount,
+        amount,
+      };
+    });
+    return formatDiscountRuleDetailText(detailRules, discountPreviewTotals.discount || 0);
+  }, [discountPreviewTotals.discount, discountRuleAmounts, discountRules, discountSettings, items, quotationHouseArea, undiscountedTotals]);
+  const discountMode = discountSettings?.discountMode === "rate" ? "rate" : "amount";
+  const activeDiscountRule = activeDiscountRuleId
+    ? discountRules.find((rule) => rule.id === activeDiscountRuleId) || null
+    : null;
+  const activeDiscountRuleIndex = activeDiscountRule ? discountRules.findIndex((rule) => rule.id === activeDiscountRule.id) : -1;
   const discountRate = Math.min(1, Math.max(0, toNumber(activeDiscountRule?.rate ?? discountSettings?.discountRate ?? 1)));
   const currentRuleDiscountAmount = toNumber(activeDiscountRule?.discount ?? (discountRules.length === 0 ? discountSettings?.discount : 0));
   const discountBaseLabel = selectedDiscountScope?.label || "总价";
@@ -3097,7 +3137,7 @@ export default function QuotationDetailPage() {
   const excludeSpecificDiscountAmount = Math.min(discountScopeBaseAmount, Math.max(0, toNumber(discountSettings?.excludeSpecificDiscountAmount)));
   const discountBaseAmount = Math.max(0, discountScopeBaseAmount - excludeSpecificDiscountAmount);
   const currentRuleCalculatedDiscount = activeDiscountRule
-    ? getDiscountRuleAmount(activeDiscountRule, items, discountSettings, undiscountedTotals, quotationHouseArea)
+    ? toNumber(discountRuleAmounts.get(activeDiscountRule.id))
     : discountMode === "rate"
       ? roundMoney(discountBaseAmount * (1 - discountRate))
       : Math.min(currentRuleDiscountAmount, discountBaseAmount);
@@ -3111,19 +3151,23 @@ export default function QuotationDetailPage() {
       laborOnlyCount: laborOnlyItems.length,
     };
   }, [items]);
+  const activeDiscountExcludeCount = Number(!!discountSettings?.excludeSpecialDiscountItems)
+    + Number(!!discountSettings?.excludeLaborOnlyDiscountItems)
+    + Number(toNumber(discountSettings?.excludeSpecificDiscountAmount) > 0);
   const updateDiscountDraftSettings = useCallback((updater: (current: QuotationDetail["settings"]) => QuotationDetail["settings"]) => {
     setDiscountDraftSettings((current) => updater(current || settings || {}));
   }, [settings]);
   const recomputeDiscountSettings = useCallback((nextSettings: QuotationDetail["settings"]) => {
     const rawTotals = calculateRawTotals(items, { ...nextSettings, discount: 0 }, quotationHouseArea);
     const rules = getDiscountRules(nextSettings);
-    const nextDiscount = rules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, nextSettings, rawTotals, quotationHouseArea)), 0);
+    const nextDiscount = getDiscountRulesAmount(rules, items, nextSettings, rawTotals, quotationHouseArea);
     return {
       ...nextSettings,
       discount: Math.min(rawTotals.directAmount, Math.max(0, nextDiscount)),
     };
   }, [items, quotationHouseArea]);
   const upsertDiscountRule = useCallback((patch: Partial<DiscountRule>) => {
+    const targetRuleId = activeDiscountRule?.id || activeDiscountRuleId || `rule_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     updateDiscountDraftSettings((current) => {
       const currentSettings = current || {};
       const type = currentSettings.discountType === "space" || currentSettings.discountType === "work_type" ? currentSettings.discountType : "fee";
@@ -3138,22 +3182,21 @@ export default function QuotationDetailPage() {
           ? (currentSettings.discountWorkType ? `work_type:${currentSettings.discountWorkType}` : options[0]?.value || "")
           : currentSettings.discountScope || "total";
       const scope = options.find((option) => option.value === value) || options.find((option) => option.value === "total") || options[0];
-      const ruleId = `${type}:${scope?.value || value || "total"}`;
+      const ruleMode = patch.mode || (currentSettings.discountMode === "rate" ? "rate" : "amount");
       const rule: DiscountRule = {
-        id: ruleId,
+        id: targetRuleId,
+        name: String(patch.name ?? discountNameText).trim(),
         type,
-        mode: patch.mode || (currentSettings.discountMode === "rate" ? "rate" : "amount"),
+        mode: ruleMode,
         scope: type === "fee" ? scope?.value || "total" : undefined,
         space: type === "space" ? String(scope?.label || "").trim() : undefined,
         workType: type === "work_type" ? String(scope?.label || "").trim() : undefined,
-        discount: Math.max(0, toNumber(patch.discount ?? currentSettings.discount)),
-        rate: Math.min(1, Math.max(0, toNumber(patch.rate ?? currentSettings.discountRate ?? 1))),
+        discount: Math.max(0, toNumber(patch.discount ?? activeDiscountRule?.discount ?? 0)),
+        rate: Math.min(1, Math.max(0, toNumber(patch.rate ?? activeDiscountRule?.rate ?? 1))),
       };
       const shouldKeep = rule.mode === "rate" ? toNumber(rule.rate) < 1 : toNumber(rule.discount) > 0;
-      const currentRuleValue = value;
-      const nextRuleValue = getDiscountRuleValue(rule);
       const nextRules = getDiscountRules(currentSettings)
-        .filter((item) => !(item.type === rule.type && (getDiscountRuleValue(item) === nextRuleValue || getDiscountRuleValue(item) === currentRuleValue)));
+        .filter((item) => String(item.id || "") !== targetRuleId);
       if (shouldKeep) nextRules.push(rule);
       return recomputeDiscountSettings({
         ...currentSettings,
@@ -3163,18 +3206,20 @@ export default function QuotationDetailPage() {
         discount: rule.discount,
       });
     });
-  }, [items, quotationHouseArea, recomputeDiscountSettings, updateDiscountDraftSettings]);
+    setActiveDiscountRuleId(targetRuleId);
+  }, [activeDiscountRule?.discount, activeDiscountRule?.id, activeDiscountRule?.rate, activeDiscountRuleId, discountNameText, items, quotationHouseArea, recomputeDiscountSettings, updateDiscountDraftSettings]);
   const removeDiscountRule = useCallback((rule: DiscountRule) => {
     updateDiscountDraftSettings((current) => {
       const currentSettings = current || {};
       const nextRules = getDiscountRules(currentSettings)
-        .filter((item) => !(item.type === rule.type && getDiscountRuleValue(item) === getDiscountRuleValue(rule)));
+        .filter((item) => String(item.id || "") !== String(rule.id || ""));
       return recomputeDiscountSettings({
         ...currentSettings,
         discountRules: nextRules,
       });
     });
-  }, [recomputeDiscountSettings, updateDiscountDraftSettings]);
+    setActiveDiscountRuleId((currentId) => currentId === rule.id ? null : currentId);
+  }, [discountRules, recomputeDiscountSettings, updateDiscountDraftSettings]);
   const applyDiscountAmount = useCallback((value: number) => {
     const nextDiscount = roundMoney(Math.min(Math.max(0, value), discountBaseAmount));
     const nextRate = discountBaseAmount > 0 ? roundMoney(Math.max(0, 1 - nextDiscount / discountBaseAmount)) : 1;
@@ -3200,7 +3245,7 @@ export default function QuotationDetailPage() {
         excludeSpecificDiscountAmount: nextExcludedAmount,
       }),
     }));
-  }, [recomputeDiscountSettings, updateDiscountDraftSettings]);
+  }, [discountRules, recomputeDiscountSettings, updateDiscountDraftSettings]);
   const getDiscountOptionsForType = useCallback((type: "fee" | "space" | "work_type", nextSettings: QuotationDetail["settings"] = discountSettings) => {
     if (type === "space") return getDiscountSpaceOptions(items, nextSettings);
     if (type === "work_type") return getDiscountWorkTypeOptions(items, nextSettings);
@@ -3225,7 +3270,10 @@ export default function QuotationDetailPage() {
     const nextScope = nextOptions.find((option) => option.value === nextValue)
       || nextOptions.find((option) => option.value === "total")
       || nextOptions[0];
-    const existingRule = getDiscountRules(discountSettings).find((rule) => rule.type === type && getDiscountRuleValue(rule) === (nextScope?.value || nextValue));
+    const creatingRule = Boolean(activeDiscountRuleId && !activeDiscountRule);
+    const existingRule = creatingRule
+      ? null
+      : getDiscountRules(discountSettings).find((rule) => rule.type === type && getDiscountRuleValue(rule) === (nextScope?.value || nextValue) && rule.mode === discountMode);
     const nextMode = existingRule?.mode || discountMode;
     const nextRate = Math.min(1, Math.max(0, toNumber(existingRule?.rate ?? discountRate)));
     updateDiscountDraftSettings((current) => recomputeDiscountSettings({
@@ -3235,14 +3283,18 @@ export default function QuotationDetailPage() {
       discountMode: nextMode,
       discountRate: nextRate,
     }));
+    setActiveDiscountRuleId(creatingRule ? activeDiscountRuleId : existingRule?.id || null);
     setDiscountRateText(formatEditableNumber(nextRate));
-  }, [discountMode, discountRate, discountSettings, getDiscountOptionsForType, getDiscountSelectionPatch, getDiscountValueForType, recomputeDiscountSettings, updateDiscountDraftSettings]);
+  }, [activeDiscountRule, activeDiscountRuleId, discountMode, discountRate, discountSettings, getDiscountOptionsForType, getDiscountSelectionPatch, getDiscountValueForType, recomputeDiscountSettings, updateDiscountDraftSettings]);
 
   const changeDiscountScope = useCallback((value: string) => {
     const nextScope = activeDiscountOptions.find((option) => option.value === value)
       || activeDiscountOptions.find((option) => option.value === "total")
       || activeDiscountOptions[0];
-    const existingRule = getDiscountRules(discountSettings).find((rule) => rule.type === discountType && getDiscountRuleValue(rule) === (nextScope?.value || value));
+    const creatingRule = Boolean(activeDiscountRuleId && !activeDiscountRule);
+    const existingRule = creatingRule
+      ? null
+      : getDiscountRules(discountSettings).find((rule) => rule.type === discountType && getDiscountRuleValue(rule) === (nextScope?.value || value) && rule.mode === discountMode);
     const nextMode = existingRule?.mode || discountMode;
     const nextRate = Math.min(1, Math.max(0, toNumber(existingRule?.rate ?? discountRate)));
     updateDiscountDraftSettings((current) => recomputeDiscountSettings({
@@ -3251,8 +3303,9 @@ export default function QuotationDetailPage() {
       discountMode: nextMode,
       discountRate: nextRate,
     }));
+    setActiveDiscountRuleId(creatingRule ? activeDiscountRuleId : existingRule?.id || null);
     setDiscountRateText(formatEditableNumber(nextRate));
-  }, [activeDiscountOptions, discountMode, discountRate, discountType, discountSettings, getDiscountSelectionPatch, recomputeDiscountSettings, updateDiscountDraftSettings]);
+  }, [activeDiscountOptions, activeDiscountRule, activeDiscountRuleId, discountMode, discountRate, discountType, discountSettings, getDiscountSelectionPatch, recomputeDiscountSettings, updateDiscountDraftSettings]);
 
   const changeDiscountExcludeRule = useCallback((key: "excludeSpecialDiscountItems" | "excludeLaborOnlyDiscountItems", enabled: boolean) => {
     updateDiscountDraftSettings((current) => ({
@@ -3273,6 +3326,50 @@ export default function QuotationDetailPage() {
     setDiscountRateText(formatEditableNumber(nextRate));
     upsertDiscountRule({ mode: "rate", rate: nextRate, discount: roundMoney(discountBaseAmount * (1 - nextRate)) });
   }, [currentRuleCalculatedDiscount, discountBaseAmount, discountRate, upsertDiscountRule]);
+  const selectDiscountRule = useCallback((rule: DiscountRule) => {
+    const nextRate = Math.min(1, Math.max(0, toNumber(rule.rate || 1)));
+    updateDiscountDraftSettings((current) => recomputeDiscountSettings({
+      ...(current || {}),
+      discountType: rule.type,
+      discountMode: rule.mode,
+      discountScope: rule.type === "fee" ? rule.scope || "total" : current?.discountScope || "total",
+      discountSpace: rule.type === "space" ? rule.space || "" : current?.discountSpace || "",
+      discountWorkType: rule.type === "work_type" ? rule.workType || "" : current?.discountWorkType || "",
+      discountRate: nextRate,
+      discount: toNumber(rule.discount),
+    }));
+    setActiveDiscountRuleId(rule.id);
+    setDiscountRateText(formatEditableNumber(nextRate));
+    setDiscountNameText(rule.name ?? "");
+  }, [discountRules, recomputeDiscountSettings, updateDiscountDraftSettings]);
+  const startNewDiscountRule = useCallback(() => {
+    const nextRuleId = `rule_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    setActiveDiscountRuleId(nextRuleId);
+    updateDiscountDraftSettings((current) => recomputeDiscountSettings({
+      ...(current || {}),
+      discountMode,
+      discountRate: 1,
+      discount: 0,
+    }));
+    setDiscountRateText("1");
+    setDiscountNameText(`优惠${discountRules.length + 1}`);
+  }, [discountMode, discountRules.length, recomputeDiscountSettings, updateDiscountDraftSettings]);
+  const saveCurrentDiscountRule = useCallback(() => {
+    const hasValue = discountMode === "amount" ? currentRuleDiscountAmount > 0 : discountRate < 1;
+    if (!hasValue) {
+      window.alert(discountMode === "amount" ? "请填写优惠金额" : "请填写折扣系数");
+      return;
+    }
+    setActiveDiscountRuleId(null);
+    setDiscountRateText("1");
+    setDiscountNameText(`优惠${discountRules.length + 1}`);
+    updateDiscountDraftSettings((current) => recomputeDiscountSettings({
+      ...(current || {}),
+      discountMode: "amount",
+      discountRate: 1,
+      discount: 0,
+    }));
+  }, [currentRuleDiscountAmount, discountMode, discountRate, discountRules.length, recomputeDiscountSettings, updateDiscountDraftSettings]);
   const handleDiscountRateTextChange = useCallback((rawValue: string) => {
     if (!isValidDecimalInput(rawValue)) return;
     setDiscountRateText(rawValue);
@@ -3295,16 +3392,23 @@ export default function QuotationDetailPage() {
     const nextDraft = recomputeDiscountSettings({
       ...settings,
       discountRules: materializedRules.length > 0 ? materializedRules : settings?.discountRules,
+      discountMode: "amount",
+      discountRate: 1,
+      discount: 0,
     });
     setDiscountDraftSettings(nextDraft);
-    setDiscountRateText(formatEditableNumber(Math.min(1, Math.max(0, toNumber(nextDraft.discountRate || 1)))));
+    setActiveDiscountRuleId(null);
+    setDiscountRateText("1");
+    setDiscountNameText(`优惠${materializedRules.length + 1}`);
     setDiscountPanelOpen(true);
   }, [recomputeDiscountSettings, settings]);
   const closeDiscountPanel = useCallback(() => {
     setDiscountPanelOpen(false);
     setDiscountDraftSettings(null);
+    setActiveDiscountRuleId(null);
     discountRateEditingRef.current = false;
     setDiscountRateText(formatEditableNumber(Math.min(1, Math.max(0, toNumber(settings?.discountRate || 1)))));
+    setDiscountNameText("");
   }, [settings?.discountRate]);
   const confirmDiscountPanel = useCallback(() => {
     if (isReadonly) {
@@ -3315,8 +3419,10 @@ export default function QuotationDetailPage() {
     setSettings(nextSettings);
     setDiscountPanelOpen(false);
     setDiscountDraftSettings(null);
+    setActiveDiscountRuleId(null);
     discountRateEditingRef.current = false;
     setDiscountRateText(formatEditableNumber(Math.min(1, Math.max(0, toNumber(nextSettings?.discountRate || 1)))));
+    setDiscountNameText("");
   }, [closeDiscountPanel, discountDraftSettings, isReadonly, recomputeDiscountSettings, settings]);
   const packagePricingSummary = useMemo(
     () => normalizePackagePricingSummary(settings?.templatePricing),
@@ -3340,6 +3446,11 @@ export default function QuotationDetailPage() {
     if (discountRateEditingRef.current) return;
     setDiscountRateText(formatEditableNumber(discountRate));
   }, [discountRate]);
+
+  useEffect(() => {
+    if (!discountPanelOpen || !activeDiscountRule) return;
+    setDiscountNameText(activeDiscountRule.name ?? "");
+  }, [activeDiscountRule, activeDiscountRuleIndex, discountPanelOpen]);
 
 	  useEffect(() => {
 	    if (loading || isReadonly) return;
@@ -6751,18 +6862,21 @@ export default function QuotationDetailPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="quote-discount-title"
-            className="quote-discount-modal flex max-h-[calc(100dvh-32px)] w-full max-w-[960px] flex-col overflow-hidden rounded-[18px] border border-[#dfe7f1] bg-white shadow-[0_28px_78px_rgba(15,23,42,0.24)]"
+            className="quote-discount-modal flex max-h-[calc(100dvh-32px)] w-full max-w-[1080px] flex-col overflow-hidden rounded-[12px] border border-[#dfe7f1] bg-white shadow-[0_24px_64px_rgba(15,23,42,0.20)]"
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
           >
             <div className="quote-discount-modal-header flex shrink-0 items-start justify-between gap-4 border-b border-[#e7edf5] bg-white px-5 py-4">
               <div className="flex min-w-0 items-start gap-3">
-                <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[11px] border border-[#bfe8d3] bg-[#f1fbf6] text-[#159863]">
+                <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#eaf8f1] text-[#159863]">
                   <Tags className="h-[18px] w-[18px]" />
                 </span>
                 <div className="min-w-0">
-                  <div id="quote-discount-title" className="text-[15px] font-bold leading-6 text-[#182230]">报价优惠</div>
-	                  <p className="mt-1 text-xs font-medium text-[#667085]">可分别给基装、产品、定制柜等对象设置不同优惠方式，系统自动汇总优惠金额。</p>
+                  <div className="flex items-center gap-2">
+                    <div id="quote-discount-title" className="text-[15px] font-bold leading-6 text-[#182230]">优惠方案</div>
+                    <span className="quote-discount-count-badge">{discountRules.length} 条优惠</span>
+                  </div>
+	                  <p className="mt-1 text-xs font-medium text-[#667085]">多条优惠按添加顺序依次生效，可设置折上折。</p>
                 </div>
               </div>
 	              <button
@@ -6775,13 +6889,15 @@ export default function QuotationDetailPage() {
               </button>
             </div>
             <div
-              className="quote-discount-modal-body min-h-0 flex-1 space-y-3 overflow-y-scroll overscroll-contain bg-white px-5 py-4"
+              className="quote-discount-modal-body min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[#f7f9fc] px-5 py-4"
               tabIndex={0}
               aria-label="报价优惠内容"
             >
-              <div className="quote-discount-step">
+              <div className="quote-discount-workspace">
+                <div className="quote-discount-editor">
+              <div className="quote-discount-step quote-discount-step-type">
                 <div className="quote-discount-step-title mb-2">
-                  <span className="quote-discount-step-badge"><Tags className="h-3.5 w-3.5" /></span>
+                  <span className="quote-discount-step-icon"><Tags className="h-3.5 w-3.5" /></span>
                   <span>选择优惠类型</span>
                 </div>
 	                <div className="quote-discount-type-grid grid grid-cols-3 gap-2 rounded-[12px] border border-[#dfe7f1] bg-white p-1">
@@ -6800,33 +6916,44 @@ export default function QuotationDetailPage() {
                     onClick={() => changeDiscountType("space")}
                     className={`quote-discount-type-button ${discountType === "space" ? "quote-discount-type-button-active" : ""}`}
                     disabled={isReadonly || discountSpaceOptions.length === 0}
+                    title={discountSpaceOptions.length === 0 ? "当前报价没有可选择的空间/类别" : "按空间或类别设置优惠"}
                   >
                     <span className="quote-discount-choice-icon"><Home className="h-4 w-4" /></span>
                     <span className="quote-discount-mode-title">按空间/类别</span>
                     <span className="quote-discount-mode-desc">只针对某个空间/类别内的项目优惠</span>
+                    {!isReadonly && discountSpaceOptions.length === 0 && (
+                      <span className="quote-discount-option-note">暂无可选</span>
+                    )}
                   </button>
 	                  <button
 	                    type="button"
-	                    onClick={() => changeDiscountType("work_type")}
+                    onClick={() => changeDiscountType("work_type")}
                     className={`quote-discount-type-button ${discountType === "work_type" ? "quote-discount-type-button-active" : ""}`}
                     disabled={isReadonly || discountWorkTypeOptions.length === 0}
+                    title={discountWorkTypeOptions.length === 0 ? "当前报价没有可选择的工种" : "按工种设置优惠"}
                   >
 	                    <span className="quote-discount-choice-icon"><Ruler className="h-4 w-4" /></span>
 	                    <span className="quote-discount-mode-title">按工种</span>
 	                    <span className="quote-discount-mode-desc">只针对某个工种归属内的项目优惠</span>
+                    {!isReadonly && discountWorkTypeOptions.length === 0 && (
+                      <span className="quote-discount-option-note">暂无可选</span>
+                    )}
 	                  </button>
 	                </div>
               </div>
-              <div className="quote-discount-step">
+              <div className="quote-discount-step quote-discount-step-scope">
                 <div className="quote-discount-step-title mb-2">
-                  <span className="quote-discount-step-badge"><LayoutGrid className="h-3.5 w-3.5" /></span>
+                  <span className="quote-discount-step-icon"><LayoutGrid className="h-3.5 w-3.5" /></span>
 	                  <span>{discountType === "space" ? "选择空间/类别" : discountType === "work_type" ? "选择工种" : "选择优惠范围"}</span>
-	                </div>
+                  <span className="quote-discount-basis-badge">优惠前金额</span>
+                </div>
 	                <div className="quote-discount-scope-panel rounded-[12px] border border-[#dfe7f1] bg-white p-2.5">
 	                  {activeDiscountOptions.length > 0 ? (
                     <div className="quote-discount-scope-grid">
                       {activeDiscountOptions.map((option) => {
                         const active = selectedDiscountScope?.value === option.value;
+                        const optionDiscountAmount = toNumber(discountAmountByGroup.get(`${discountType}:${option.value}`));
+                        const optionAfterAmount = Math.max(0, toMoney(option.amount - optionDiscountAmount));
                         return (
                           <button
                             key={option.value}
@@ -6834,10 +6961,14 @@ export default function QuotationDetailPage() {
                             onClick={() => changeDiscountScope(option.value)}
                             disabled={isReadonly}
                             className={`quote-discount-scope-card ${active ? "quote-discount-scope-card-active" : ""}`}
-                            title={`按${option.label}计算优惠，当前金额 ${formatQuoteAmount(option.amount)}`}
+                            title={`按${option.label}计算优惠，优惠前 ${formatQuoteAmount(option.amount)}，优惠后 ${formatQuoteAmount(optionAfterAmount)}`}
                           >
                             <span className="quote-discount-scope-name">{option.label}</span>
-                            <span className="quote-discount-scope-amount">{formatQuoteAmount(option.amount)}</span>
+                            <span className={`quote-discount-scope-after ${active ? "quote-discount-scope-after-active" : ""}`}>
+                              <em>优惠后</em>
+                              {formatQuoteAmount(optionAfterAmount)}
+                            </span>
+                            <span className="quote-discount-scope-amount"><em>优惠前</em>{formatQuoteAmount(option.amount)}</span>
                             {active && <Check className="quote-discount-scope-check h-3.5 w-3.5" />}
                           </button>
                         );
@@ -6850,24 +6981,27 @@ export default function QuotationDetailPage() {
                   )}
                 </div>
               </div>
-              <div className="quote-discount-step">
+              <div className="quote-discount-step quote-discount-step-rules">
                 <div className="quote-discount-step-title mb-2">
-                  <span className="quote-discount-step-badge"><Eraser className="h-3.5 w-3.5" /></span>
+                  <span className="quote-discount-step-icon"><Eraser className="h-3.5 w-3.5" /></span>
                   <span>设置排除规则</span>
+                  <span className="quote-discount-basis-badge">
+                    {activeDiscountExcludeCount > 0 ? `已启用 ${activeDiscountExcludeCount} 项` : "未启用"}
+                  </span>
                 </div>
                 <div className="quote-discount-rule-grid grid grid-cols-3 gap-2">
                   {[
                     {
                       key: "excludeSpecialDiscountItems" as const,
                       title: "排除特价项目",
-                      desc: `已标特价的项目不参与折扣，共 ${discountExcludeMeta.specialCount} 项`,
+                      desc: `特价项目不参与折扣（${discountExcludeMeta.specialCount} 项）`,
 	                      active: !!discountSettings?.excludeSpecialDiscountItems,
                       disabled: discountExcludeMeta.specialCount <= 0,
                     },
                     {
                       key: "excludeLaborOnlyDiscountItems" as const,
                       title: "排除纯人工项目",
-                      desc: `只有人工费、无材料费的基装项目不参与折扣，共 ${discountExcludeMeta.laborOnlyCount} 项`,
+                      desc: `纯人工项目不参与折扣（${discountExcludeMeta.laborOnlyCount} 项）`,
 	                      active: !!discountSettings?.excludeLaborOnlyDiscountItems,
                       disabled: discountExcludeMeta.laborOnlyCount <= 0,
                     },
@@ -6893,7 +7027,7 @@ export default function QuotationDetailPage() {
                     <span className="quote-discount-rule-icon"><FileText className="h-4 w-4" /></span>
                     <span className="quote-discount-rule-copy">
                       <span className="quote-discount-rule-title">排除特定费用</span>
-                      <span className="quote-discount-rule-desc">输入不参与本次优惠的固定金额</span>
+                      <span className="quote-discount-rule-desc">不参与折扣的固定金额</span>
                     </span>
                     <label className="quote-discount-rule-input">
                       <input
@@ -6914,9 +7048,9 @@ export default function QuotationDetailPage() {
                   </div>
                 </div>
               </div>
-              <div className="quote-discount-step">
+              <div className="quote-discount-step quote-discount-step-mode">
                 <div className="quote-discount-step-title mb-2">
-                  <span className="quote-discount-step-badge"><Palette className="h-3.5 w-3.5" /></span>
+                  <span className="quote-discount-step-icon"><Palette className="h-3.5 w-3.5" /></span>
                   <span>选择优惠方式</span>
                 </div>
                 <div className="quote-discount-mode-grid grid grid-cols-2 gap-2 rounded-[12px] border border-[#dfe7f1] bg-white p-1">
@@ -6942,12 +7076,41 @@ export default function QuotationDetailPage() {
                   </button>
                 </div>
               </div>
-              <div className="quote-discount-step">
+              <div className="quote-discount-step quote-discount-step-input">
                 <div className="quote-discount-step-title mb-2">
-                  <span className="quote-discount-step-badge"><Pencil className="h-3.5 w-3.5" /></span>
+                  <span className="quote-discount-step-icon"><Pencil className="h-3.5 w-3.5" /></span>
                   <span>{discountMode === "amount" ? "输入优惠金额" : "输入折扣系数"}</span>
+                  <span className="quote-discount-editing-badge">
+                    {activeDiscountRuleIndex >= 0 ? `编辑第 ${activeDiscountRuleIndex + 1} 条` : "新增优惠"}
+                  </span>
+                  {activeDiscountRuleIndex >= 0 && (
+                    <button
+                      type="button"
+                      className="quote-discount-cancel-edit"
+                      onClick={startNewDiscountRule}
+                      disabled={isReadonly}
+                    >
+                      取消编辑
+                    </button>
+                  )}
                 </div>
                 <div className="quote-discount-fields rounded-[12px] border border-[#dfe7f1] bg-white p-2.5">
+                  <label className="quote-discount-name-field mb-3 block text-sm">
+                    <span className="mb-1 block font-medium text-surface-700">优惠名称</span>
+                    <input
+                      type="text"
+                      value={discountNameText}
+                      readOnly={isReadonly}
+                      maxLength={20}
+                      onChange={(event) => {
+                        const nextName = event.target.value.slice(0, 20);
+                        setDiscountNameText(nextName);
+                        upsertDiscountRule({ name: nextName });
+                      }}
+                      className="input-field w-full read-only:cursor-default"
+                      placeholder="如：总经理优惠、人工优惠"
+                    />
+                  </label>
                   {discountMode === "amount" ? (
                     <div className="space-y-2">
 	                      <NumberField label="输入优惠金额" suffix="元" value={currentRuleDiscountAmount} onChange={applyDiscountAmount} readOnly={isReadonly} />
@@ -6975,57 +7138,108 @@ export default function QuotationDetailPage() {
                       </div>
                     </label>
                   )}
+                  <button
+                    type="button"
+                    className="quote-discount-add-next"
+                    onClick={saveCurrentDiscountRule}
+                    disabled={isReadonly}
+                  >
+                    <Check className="h-3.5 w-3.5" />
+                    保存
+                  </button>
                 </div>
               </div>
-              {discountMode === "rate" && (
-                <div className="quote-discount-rate-hint rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-700">
-		                  当前按{discountBaseLabel}的 {formatEditableNumber(discountRate)} 折扣系数计算，自动优惠 {formatQuoteAmount(currentRuleCalculatedDiscount)}
                 </div>
-              )}
-              {discountRules.length > 0 && (
-                <div className="quote-discount-step">
-                  <div className="quote-discount-step-title mb-2">
-                    <span className="quote-discount-step-badge"><List className="h-3.5 w-3.5" /></span>
-                    <span>已设置优惠</span>
+                <aside className="quote-discount-ledger">
+                  <div className="quote-discount-ledger-header">
+                    <div className="min-w-0">
+                      <div className="quote-discount-ledger-title">
+                        <List className="h-4 w-4" />
+                        <span>优惠记录</span>
+                      </div>
+                      <p className="quote-discount-ledger-subtitle">
+                        {discountRules.length > 0 ? `共 ${discountRules.length} 条，按顺序生效` : "按添加顺序依次计算"}
+                      </p>
+                    </div>
                   </div>
-                  <div className="quote-discount-rule-list">
-                    {discountRules.map((rule) => {
-                      const scope = getDiscountRuleScope(rule, items, discountSettings, undiscountedTotals);
-                      const amount = getDiscountRuleAmount(rule, items, discountSettings, undiscountedTotals, quotationHouseArea);
-                      return (
-                        <div key={rule.id} className="quote-discount-rule-row">
-                          <span className="quote-discount-rule-row-name">{scope?.label || "优惠对象"}</span>
-                          <span className="quote-discount-rule-row-mode">{rule.mode === "rate" ? `${formatEditableNumber(rule.rate || 1)} 折扣系数` : "优惠金额"}</span>
-                          <span className="quote-discount-rule-row-amount">-{formatQuoteAmount(amount)}</span>
-                          <button
-                            type="button"
-                            className="quote-discount-rule-row-remove"
-                            onClick={() => removeDiscountRule(rule)}
-                            disabled={isReadonly}
-                            aria-label={`删除${scope?.label || "该项"}优惠`}
-                            title="删除这条优惠"
+                  {discountRules.length > 0 ? (
+                    <div className="quote-discount-rule-list">
+                      {discountRules.map((rule, index) => {
+                        const scope = getDiscountRuleScope(rule, items, discountSettings, undiscountedTotals);
+                        const amount = toNumber(discountRuleAmounts.get(rule.id));
+                        const isActiveRule = activeDiscountRule?.id === rule.id;
+                        return (
+                          <div
+                            key={rule.id}
+                          className={`quote-discount-rule-row cursor-pointer ${isActiveRule ? "quote-discount-rule-row-active" : ""}`}
+                            onClick={() => {
+                              if (isActiveRule) startNewDiscountRule();
+                              else selectDiscountRule(rule);
+                            }}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                if (isActiveRule) startNewDiscountRule();
+                                else selectDiscountRule(rule);
+                              }
+                            }}
                           >
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      );
-                    })}
+                            <span className="quote-discount-rule-order">{String(index + 1).padStart(2, "0")}</span>
+                            <span className="quote-discount-rule-row-main">
+                              <span className="quote-discount-rule-row-name">{rule.name || scope?.label || `优惠${index + 1}`}</span>
+                              <span className="quote-discount-rule-row-mode">
+                                {scope?.label || "优惠对象"} · {rule.mode === "rate" ? `${formatEditableNumber(rule.rate || 1)} 折` : "减固定金额"}
+                              </span>
+                            </span>
+                            <span className="quote-discount-rule-row-amount">-{formatQuoteAmount(amount)}</span>
+                            <button
+                              type="button"
+                              className="quote-discount-rule-row-remove"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                removeDiscountRule(rule);
+                              }}
+                              disabled={isReadonly}
+                              aria-label={`删除${scope?.label || "该项"}优惠`}
+                              title="删除这条优惠"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="quote-discount-ledger-empty">
+                      <span className="quote-discount-ledger-empty-icon"><Tags className="h-4 w-4" /></span>
+                      <span>暂无优惠记录</span>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className="quote-discount-ledger-list-add"
+                    onClick={startNewDiscountRule}
+                    disabled={isReadonly}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    添加优惠
+                  </button>
+                  <div className="quote-discount-ledger-summary">
+                    <div className="quote-discount-result-row">
+                      <span>优惠前总价</span>
+                      <strong>{formatQuoteAmount(discountSummaryTotalAmount)}</strong>
+                    </div>
+                    <div className="quote-discount-result-row quote-discount-result-row-warn">
+                      <span>优惠金额</span>
+                      <strong>-{formatQuoteAmount(discountPreviewTotals.discount || 0)}</strong>
+                    </div>
+                    <div className="quote-discount-result-row quote-discount-result-row-danger">
+                      <span>优惠后总费用</span>
+                      <strong>{formatQuoteAmount(discountAfterAmount)}</strong>
+                    </div>
                   </div>
-                </div>
-              )}
-              <div className="quote-discount-result-grid grid grid-cols-3 gap-3">
-                <div className="quote-discount-result-card">
-                  <p className="text-[11px] font-semibold text-surface-500">总价金额</p>
-                  <p className="mt-1 text-sm font-semibold tabular-nums text-surface-900">{formatQuoteAmount(discountSummaryTotalAmount)}</p>
-                </div>
-                <div className="quote-discount-result-card quote-discount-result-card-warn">
-                  <p className="text-[11px] font-semibold text-orange-600">优惠金额</p>
-	                  <p className="mt-1 text-sm font-semibold tabular-nums text-orange-700">{formatQuoteAmount(discountPreviewTotals.discount || 0)}</p>
-                </div>
-                <div className="quote-discount-result-card quote-discount-result-card-danger">
-                  <p className="text-[11px] font-semibold text-red-500">优惠后总费用</p>
-                  <p className="mt-1 text-sm font-semibold tabular-nums text-red-600">{formatQuoteAmount(discountAfterAmount)}</p>
-                </div>
+                </aside>
               </div>
             </div>
             <div className="quote-discount-modal-footer flex shrink-0 items-center justify-end gap-2 border-t border-[#e7edf5] bg-white px-5 py-4">
@@ -8000,6 +8214,7 @@ export default function QuotationDetailPage() {
             materialAmount={totals.materialAmount}
             feeFormulaContext={feeFormulaContext}
             formulaFinalFeeItemId={String(settings?.formulaFinalFeeItemId || "")}
+            discountDetailText={discountDetailText}
             isAllSpaceView={isAllSpaceView}
             searchValue={itemSearch}
             onSearchChange={setItemSearch}
@@ -10116,6 +10331,9 @@ export default function QuotationDetailPage() {
         }
         .quotation-detail-ui .quote-description-placeholder {
           color: #98a2b3;
+        }
+        .quotation-detail-ui .quote-description-default {
+          color: #8c97a8;
         }
         .quote-description-modal {
           border-radius: 14px !important;
@@ -12397,13 +12615,15 @@ export default function QuotationDetailPage() {
         .quotation-detail-ui.quote-workbench-shell .quote-section.quote-section-fullscreen .quote-section-table-frame {
           display: flex !important;
           min-height: 0 !important;
-          flex: 1 1 auto !important;
+          height: 0 !important;
+          flex: 1 1 0 !important;
           flex-direction: column !important;
           overflow: hidden !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section.quote-section-fullscreen .quote-table-shell {
           min-height: 0 !important;
-          flex: 1 1 auto !important;
+          height: 0 !important;
+          flex: 1 1 0 !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section.quote-section-fullscreen .quote-table-shell > .thin-scroll-area.quote-table-freeze-scroll {
           height: 100% !important;
@@ -12479,16 +12699,16 @@ export default function QuotationDetailPage() {
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section.quote-section-fullscreen.quote-section-no-footer .quote-table-shell {
           min-height: 0 !important;
-          height: auto !important;
+          height: 0 !important;
           max-height: none !important;
-          flex: 1 1 auto !important;
+          flex: 1 1 0 !important;
           overflow: hidden !important;
         }
         .quotation-detail-ui.quote-workbench-shell .quote-section.quote-section-fullscreen.quote-section-no-footer .quote-section-table-frame {
           display: flex !important;
           min-height: 0 !important;
-          height: auto !important;
-          flex: 1 1 auto !important;
+          height: 0 !important;
+          flex: 1 1 0 !important;
           flex-direction: column !important;
           overflow: hidden !important;
         }
@@ -13555,6 +13775,932 @@ export default function QuotationDetailPage() {
           justify-content: center !important;
           overflow: hidden !important;
         }
+        .quotation-detail-ui .quote-discount-count-badge {
+          display: inline-flex;
+          align-items: center;
+          border-radius: 4px;
+          background: #dff4e8;
+          padding: 2px 7px;
+          color: #137a52;
+          font-size: 10px;
+          font-weight: 750;
+          line-height: 16px;
+        }
+        .quotation-detail-ui .quote-discount-modal {
+          height: min(980px, calc(100dvh - 24px));
+          min-height: min(700px, calc(100dvh - 24px));
+          border-radius: 12px !important;
+        }
+        .quotation-detail-ui .quote-discount-modal-header {
+          border-bottom: 1px solid #e7edf5 !important;
+          background: #ffffff !important;
+        }
+        .quotation-detail-ui .quote-discount-modal-footer {
+          border-top: 1px solid #e7edf5 !important;
+        }
+        .quotation-detail-ui .quote-discount-modal-body {
+          height: auto !important;
+          max-height: none !important;
+          flex: 1 1 auto;
+          overflow: hidden !important;
+          background: #f5f7fa !important;
+          padding: 16px !important;
+        }
+        .quotation-detail-ui .quote-discount-workspace {
+          display: grid;
+          height: 100%;
+          min-height: 100%;
+          grid-template-columns: minmax(0, 1fr) 318px;
+          overflow: hidden;
+          border: 1px solid #e4e7ec;
+          border-radius: 8px;
+          background: #ffffff;
+        }
+        .quotation-detail-ui .quote-discount-editor {
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+          height: 100%;
+          overflow: visible;
+          background: #ffffff;
+          padding: 0 18px 18px;
+        }
+        .quotation-detail-ui .quote-discount-step {
+          min-width: 0;
+          overflow: visible;
+          margin-bottom: 0;
+          border: 0;
+          border-bottom: 1px solid #edf1f5;
+          border-radius: 0;
+          background: #ffffff;
+          padding: 10px 0;
+          box-shadow: none;
+        }
+        .quotation-detail-ui .quote-discount-editor > .quote-discount-step:last-of-type {
+          border-bottom: 0;
+          margin-bottom: 0;
+        }
+        .quotation-detail-ui .quote-discount-step-title {
+          display: flex;
+          position: relative;
+          z-index: 1;
+          align-items: center;
+          gap: 8px;
+          color: #172033;
+          font-size: 12px;
+          font-weight: 750;
+        }
+        .quotation-detail-ui .quote-discount-step-icon {
+          display: inline-flex;
+          width: 22px;
+          height: 22px;
+          flex: 0 0 auto;
+          align-items: center;
+          justify-content: center;
+          border-radius: 6px;
+          background: #eef2f6;
+          color: #667085;
+        }
+        .quotation-detail-ui .quote-discount-step-type .quote-discount-step-icon {
+          background: #dff4e8;
+          color: #17875a;
+        }
+        .quotation-detail-ui .quote-discount-step-scope .quote-discount-step-icon {
+          background: #e3edfd;
+          color: #3f72c9;
+        }
+        .quotation-detail-ui .quote-discount-step-rules .quote-discount-step-icon {
+          background: #faeccf;
+          color: #a96e12;
+        }
+        .quotation-detail-ui .quote-discount-step-mode .quote-discount-step-icon {
+          background: #e9e5fa;
+          color: #6b5bc0;
+        }
+        .quotation-detail-ui .quote-discount-step-input .quote-discount-step-icon {
+          background: #d9f1ee;
+          color: #21877f;
+        }
+        .quotation-detail-ui .quote-discount-step-input {
+          margin-top: auto;
+        }
+        .quotation-detail-ui .quote-discount-basis-badge {
+          display: inline-flex;
+          align-items: center;
+          margin-left: auto;
+          border-radius: 4px;
+          background: #edf3fb;
+          padding: 2px 6px;
+          color: #4b6f9f;
+          font-size: 10px;
+          font-weight: 700;
+          line-height: 16px;
+        }
+        .quotation-detail-ui .quote-discount-scope-note {
+          margin-bottom: 8px;
+          color: #7b8798;
+          font-size: 10px;
+          font-weight: 550;
+          line-height: 1.4;
+        }
+        .quotation-detail-ui .quote-discount-editing-badge {
+          display: inline-flex;
+          margin-left: auto;
+          border-radius: 4px;
+          background: #edf4ff;
+          padding: 2px 6px;
+          color: #3568c7;
+          font-size: 10px;
+          font-weight: 750;
+          line-height: 16px;
+        }
+        .quotation-detail-ui .quote-discount-cancel-edit {
+          border: 0;
+          background: transparent;
+          padding: 0;
+          color: #667085;
+          font-size: 10px;
+          font-weight: 700;
+          line-height: 16px;
+        }
+        .quotation-detail-ui .quote-discount-cancel-edit:hover:not(:disabled) {
+          color: #b42318;
+        }
+        .quotation-detail-ui .quote-discount-cancel-edit:disabled {
+          cursor: not-allowed;
+          opacity: 0.5;
+        }
+        .quotation-detail-ui .quote-discount-type-grid,
+        .quotation-detail-ui .quote-discount-mode-grid {
+          gap: 8px !important;
+          border: 0 !important;
+          border-radius: 0 !important;
+          background: transparent !important;
+          padding: 0 !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui .quote-discount-type-button,
+        .quotation-detail-ui .quote-discount-mode-button {
+          display: flex;
+          min-height: 40px !important;
+          flex-direction: row;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          border: 1px solid #e4e7ec !important;
+          border-radius: 6px !important;
+          background: #ffffff !important;
+          padding: 8px 10px !important;
+          color: #667085 !important;
+          box-shadow: none !important;
+          font-size: 12px !important;
+          font-weight: 650 !important;
+          transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease !important;
+        }
+        .quotation-detail-ui .quote-discount-type-button:hover:not(:disabled),
+        .quotation-detail-ui .quote-discount-mode-button:hover:not(:disabled) {
+          border-color: #b7d9c6 !important;
+          background: #f8fcfa !important;
+          color: #137a52 !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui .quote-discount-type-button:disabled {
+          cursor: not-allowed !important;
+          border-style: dashed !important;
+          border-color: #d8dee8 !important;
+          background: #f8fafc !important;
+          color: #98a2b3 !important;
+        }
+        .quotation-detail-ui .quote-discount-type-button:disabled .quote-discount-choice-icon {
+          background: #eef1f5 !important;
+          color: #98a2b3 !important;
+        }
+        .quotation-detail-ui .quote-discount-option-note {
+          display: inline-flex;
+          align-items: center;
+          border-radius: 4px;
+          background: #eef1f5;
+          padding: 1px 5px;
+          color: #7b8798;
+          font-size: 9px;
+          font-weight: 700;
+          line-height: 15px;
+        }
+        .quotation-detail-ui .quote-discount-type-button-active,
+        .quotation-detail-ui .quote-discount-type-button-active:hover:not(:disabled),
+        .quotation-detail-ui .quote-discount-mode-button-active,
+        .quotation-detail-ui .quote-discount-mode-button-active:hover:not(:disabled) {
+          border-color: #8fd8b0 !important;
+          background: #f3fbf7 !important;
+          color: #173426 !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui .quote-discount-choice-icon {
+          display: inline-flex;
+          width: 24px;
+          height: 24px;
+          align-items: center;
+          justify-content: center;
+          border: 0;
+          border-radius: 6px;
+          background: #f1f5f9;
+          color: #667085;
+        }
+        .quotation-detail-ui .quote-discount-type-button:nth-child(1) .quote-discount-choice-icon {
+          background: #dff4e8;
+          color: #17875a;
+        }
+        .quotation-detail-ui .quote-discount-type-button:nth-child(2) .quote-discount-choice-icon {
+          background: #e3edfd;
+          color: #3f72c9;
+        }
+        .quotation-detail-ui .quote-discount-type-button:nth-child(3) .quote-discount-choice-icon {
+          background: #faeccf;
+          color: #a96e12;
+        }
+        .quotation-detail-ui .quote-discount-mode-button:nth-child(1) .quote-discount-choice-icon {
+          background: #fdebd9;
+          color: #b45f16;
+        }
+        .quotation-detail-ui .quote-discount-mode-button:nth-child(2) .quote-discount-choice-icon {
+          background: #e9e5fa;
+          color: #6b5bc0;
+        }
+        .quotation-detail-ui .quote-discount-type-button-active .quote-discount-choice-icon,
+        .quotation-detail-ui .quote-discount-mode-button-active .quote-discount-choice-icon {
+          border: 1px solid rgba(21, 152, 99, 0.18);
+          background: #ffffff;
+          color: #159863;
+        }
+        .quotation-detail-ui .quote-discount-mode-title {
+          font-size: 12px;
+          font-weight: 750;
+          line-height: 1.2;
+        }
+        .quotation-detail-ui .quote-discount-mode-desc {
+          display: none;
+        }
+        .quotation-detail-ui .quote-discount-scope-panel,
+        .quotation-detail-ui .quote-discount-fields {
+          border: 0 !important;
+          border-radius: 0 !important;
+          background: transparent !important;
+          padding: 0 !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui .quote-discount-scope-grid {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          grid-auto-rows: 1fr;
+          gap: 8px;
+          overflow: visible;
+          padding: 0;
+        }
+        .quotation-detail-ui .quote-discount-scope-picker {
+          display: grid;
+          gap: 8px;
+        }
+        .quotation-detail-ui .quote-discount-selected-scope {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto auto;
+          align-items: center;
+          gap: 14px;
+          border: 1px solid #dce7f5;
+          border-radius: 6px;
+          background: #f7faff;
+          padding: 8px 10px;
+        }
+        .quotation-detail-ui .quote-discount-selected-scope-name {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: #344054;
+          font-size: 11px;
+          font-weight: 750;
+        }
+        .quotation-detail-ui .quote-discount-selected-scope-amount {
+          color: #475467;
+          font-size: 11px;
+          font-weight: 750;
+          font-variant-numeric: tabular-nums;
+        }
+        .quotation-detail-ui .quote-discount-selected-scope-amount em {
+          margin-right: 4px;
+          color: #98a2b3;
+          font-size: 9px;
+          font-style: normal;
+          font-weight: 600;
+        }
+        .quotation-detail-ui .quote-discount-selected-scope-after {
+          color: #137a52;
+        }
+        .quotation-detail-ui .quote-discount-advanced-toggle {
+          display: flex;
+          width: 100%;
+          align-items: center;
+          gap: 8px;
+          border: 0;
+          background: transparent;
+          padding: 0;
+          color: #172033;
+          font-size: 12px;
+          font-weight: 750;
+          text-align: left;
+        }
+        .quotation-detail-ui .quote-discount-advanced-state {
+          margin-left: auto;
+          border-radius: 4px;
+          background: #f1f4f8;
+          padding: 2px 6px;
+          color: #667085;
+          font-size: 10px;
+          font-weight: 650;
+          line-height: 16px;
+        }
+        .quotation-detail-ui .quote-discount-scope-card {
+          position: relative;
+          display: flex;
+          min-height: 62px;
+          min-width: 0;
+          flex-direction: column;
+          justify-content: center;
+          gap: 3px;
+          border: 1px solid #e4e7ec;
+          border-radius: 6px;
+          background: #ffffff;
+          height: 100%;
+          padding: 8px 28px 8px 10px;
+          text-align: left;
+          box-shadow: none;
+          transition: border-color 140ms ease, background-color 140ms ease;
+        }
+        .quotation-detail-ui .quote-discount-scope-card:hover:not(:disabled) {
+          border-color: #b7d9c6;
+          background: #f8fcfa;
+          box-shadow: none;
+        }
+        .quotation-detail-ui .quote-discount-scope-card-active {
+          border-color: #8fd8b0 !important;
+          background: #f3fbf7 !important;
+          box-shadow: none !important;
+        }
+        .quotation-detail-ui .quote-discount-scope-card-total {
+          grid-column: 1 / -1;
+        }
+        .quotation-detail-ui .quote-discount-scope-name {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: #344054;
+          font-size: 11px;
+          font-weight: 700;
+          line-height: 1.25;
+        }
+        .quotation-detail-ui .quote-discount-scope-amount {
+          color: #98a2b3;
+          font-size: 10px;
+          font-weight: 550;
+          font-variant-numeric: tabular-nums;
+        }
+        .quotation-detail-ui .quote-discount-scope-amount em {
+          margin-right: 4px;
+          color: #98a2b3;
+          font-size: 9px;
+          font-style: normal;
+          font-weight: 600;
+        }
+        .quotation-detail-ui .quote-discount-scope-after {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          color: #344054;
+          font-size: 13px;
+          font-weight: 800;
+          font-variant-numeric: tabular-nums;
+        }
+        .quotation-detail-ui .quote-discount-scope-after em {
+          color: #98a2b3;
+          font-size: 9px;
+          font-style: normal;
+          font-weight: 650;
+        }
+        .quotation-detail-ui .quote-discount-scope-after-active {
+          color: #137a52;
+        }
+        .quotation-detail-ui .quote-discount-scope-after-active em {
+          color: #4d8068;
+        }
+        .quotation-detail-ui .quote-discount-scope-card-active .quote-discount-scope-name,
+        .quotation-detail-ui .quote-discount-scope-card-active .quote-discount-scope-amount,
+        .quotation-detail-ui .quote-discount-scope-check {
+          color: #137a52 !important;
+        }
+        .quotation-detail-ui .quote-discount-scope-check {
+          position: absolute;
+          right: 9px;
+          top: 50%;
+          transform: translateY(-50%);
+        }
+        .quotation-detail-ui .quote-discount-rule-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+          gap: 8px !important;
+        }
+        .quotation-detail-ui .quote-discount-rule-card {
+          display: grid;
+          min-height: 88px;
+          grid-template-columns: 24px minmax(0, 1fr);
+          grid-template-rows: auto auto;
+          align-items: start;
+          gap: 6px 8px;
+          border: 1px solid #e4e7ec;
+          border-radius: 6px;
+          background: #ffffff;
+          padding: 8px 12px;
+          text-align: left;
+          box-shadow: none;
+          transition: border-color 140ms ease, background-color 140ms ease;
+        }
+        .quotation-detail-ui .quote-discount-rule-card:hover:not(:disabled) {
+          border-color: #b7d9c6;
+          background: #f8fcfa;
+          box-shadow: none;
+        }
+        .quotation-detail-ui .quote-discount-rule-card:disabled {
+          cursor: not-allowed;
+          opacity: 0.58;
+        }
+        .quotation-detail-ui .quote-discount-rule-card-active {
+          border-color: #8fd8b0 !important;
+          background: #f3fbf7 !important;
+        }
+        .quotation-detail-ui .quote-discount-rule-icon {
+          display: inline-flex;
+          width: 22px;
+          height: 22px;
+          flex: 0 0 auto;
+          align-items: center;
+          justify-content: center;
+          border: 0;
+          border-radius: 5px;
+          background: #faeccf;
+          color: #a96e12;
+        }
+        .quotation-detail-ui .quote-discount-rule-card-active .quote-discount-rule-icon {
+          border: 0;
+          background: #dff4e8;
+          color: #159863;
+        }
+        .quotation-detail-ui .quote-discount-rule-copy {
+          display: flex;
+          min-width: 0;
+          flex: 1 1 auto;
+          flex-direction: column;
+          gap: 2px;
+        }
+        .quotation-detail-ui .quote-discount-rule-title {
+          color: #344054;
+          font-size: 11px;
+          font-weight: 750;
+          line-height: 1.25;
+        }
+        .quotation-detail-ui .quote-discount-rule-desc {
+          color: #98a2b3;
+          font-size: 10px;
+          font-weight: 500;
+          line-height: 1.35;
+        }
+        .quotation-detail-ui .quote-discount-rule-switch {
+          display: inline-flex;
+          width: 30px;
+          height: 16px;
+          flex: 0 0 auto;
+          align-items: center;
+          border-radius: 999px;
+          background: #d8e0ec;
+          padding: 2px;
+          transition: background 140ms ease;
+        }
+        .quotation-detail-ui .quote-discount-rule-card > .quote-discount-rule-switch {
+          grid-column: 1 / -1;
+          justify-self: end;
+        }
+        .quotation-detail-ui .quote-discount-rule-switch span {
+          display: block;
+          width: 12px;
+          height: 12px;
+          border-radius: 999px;
+          background: #ffffff;
+          box-shadow: none;
+          transition: transform 140ms ease;
+        }
+        .quotation-detail-ui .quote-discount-rule-card-active .quote-discount-rule-switch {
+          background: #159863;
+        }
+        .quotation-detail-ui .quote-discount-rule-card-active .quote-discount-rule-switch span {
+          transform: translateX(14px);
+        }
+        .quotation-detail-ui .quote-discount-rule-card-input {
+          display: grid;
+          grid-template-columns: 24px minmax(0, 1fr);
+          align-items: start;
+        }
+        .quotation-detail-ui .quote-discount-rule-card-input .quote-discount-rule-copy {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+        .quotation-detail-ui .quote-discount-rule-card-input .quote-discount-rule-title,
+        .quotation-detail-ui .quote-discount-rule-card-input .quote-discount-rule-desc {
+          white-space: normal;
+        }
+        .quotation-detail-ui .quote-discount-rule-input {
+          position: relative;
+          display: block;
+          grid-column: 1 / -1;
+          width: 100%;
+        }
+        .quotation-detail-ui .quote-discount-rule-input input {
+          width: 100%;
+          height: 30px;
+          border: 1px solid #dbe5f2;
+          border-radius: 4px;
+          background: #ffffff;
+          padding: 0 30px 0 9px;
+          color: #344054;
+          font-size: 12px;
+          font-weight: 650;
+          outline: none;
+        }
+        .quotation-detail-ui .quote-discount-rule-input input:focus {
+          border-color: #4f80d8;
+          box-shadow: 0 0 0 2px rgba(79, 128, 216, 0.12);
+        }
+        .quotation-detail-ui .quote-discount-rule-input span {
+          pointer-events: none;
+          position: absolute;
+          right: 9px;
+          top: 50%;
+          transform: translateY(-50%);
+          color: #98a2b3;
+          font-size: 11px;
+          font-weight: 600;
+        }
+        .quotation-detail-ui .quote-discount-empty {
+          display: flex;
+          min-height: 50px;
+          align-items: center;
+          justify-content: center;
+          border: 1px dashed #e4e7ec;
+          border-radius: 6px;
+          background: #fbfcfd;
+          color: #98a2b3;
+          font-size: 12px;
+          font-weight: 600;
+        }
+        .quotation-detail-ui .quote-discount-fields label {
+          color: #475467 !important;
+          font-size: 12px;
+        }
+        .quotation-detail-ui .quote-discount-fields {
+          display: grid !important;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-rows: 82px 36px;
+          min-height: 128px;
+          gap: 10px;
+          align-items: start;
+        }
+        .quotation-detail-ui .quote-discount-fields .quote-discount-name-field {
+          margin-bottom: 0 !important;
+        }
+        .quotation-detail-ui .quote-discount-add-next {
+          grid-column: 1 / -1;
+          align-self: end;
+          margin-top: 0;
+        }
+        .quotation-detail-ui .quote-discount-rate-hint {
+          margin-top: 10px;
+          border: 0 !important;
+          border-left: 3px solid #6d9ee8 !important;
+          border-radius: 0 4px 4px 0 !important;
+          background: #f3f7fd !important;
+          color: #3f5f91 !important;
+        }
+        .quotation-detail-ui .quote-discount-add-next {
+          display: inline-flex;
+          width: 100%;
+          height: 36px;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          margin-top: 0;
+          border: 1px solid #bfe8d3;
+          border-radius: 6px;
+          background: #f1fbf6;
+          color: #137a52;
+          font-size: 12px;
+          font-weight: 750;
+          transition: border-color 140ms ease, background-color 140ms ease;
+        }
+        .quotation-detail-ui .quote-discount-add-next:hover:not(:disabled) {
+          border-color: #8fd8b0;
+          background: #eaf8f1;
+        }
+        .quotation-detail-ui .quote-discount-add-next:disabled {
+          cursor: not-allowed;
+          opacity: 0.5;
+        }
+        .quotation-detail-ui .quote-discount-ledger {
+          display: flex;
+          min-width: 0;
+          height: 100%;
+          overflow-y: auto;
+          overscroll-behavior: contain;
+          flex-direction: column;
+          border-left: 1px solid #e4e7ec;
+          background: #fbfcfd;
+          padding: 14px 14px 28px;
+        }
+        .quotation-detail-ui .quote-discount-ledger-header {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 10px;
+          margin: -14px -14px 0;
+          border-bottom: 1px solid #e4e7ec;
+          background: #f8fafc;
+          padding: 14px;
+        }
+        .quotation-detail-ui .quote-discount-ledger-title {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          color: #1d2939;
+          font-size: 12px;
+          font-weight: 800;
+        }
+        .quotation-detail-ui .quote-discount-ledger-title svg {
+          color: #4a76c6;
+        }
+        .quotation-detail-ui .quote-discount-ledger-subtitle {
+          margin-top: 3px;
+          color: #98a2b3;
+          font-size: 10px;
+          font-weight: 600;
+        }
+        .quotation-detail-ui .quote-discount-ledger-add {
+          display: inline-flex;
+          height: 28px;
+          flex: 0 0 auto;
+          align-items: center;
+          justify-content: center;
+          gap: 4px;
+          border: 1px solid #bfe8d3;
+          border-radius: 5px;
+          background: #f1fbf6;
+          padding: 0 9px;
+          color: #137a52;
+          font-size: 11px;
+          font-weight: 750;
+        }
+        .quotation-detail-ui .quote-discount-ledger-add:hover:not(:disabled) {
+          border-color: #8fd8b0;
+          background: #eaf8f1;
+        }
+        .quotation-detail-ui .quote-discount-ledger-add:disabled {
+          cursor: not-allowed;
+          opacity: 0.5;
+        }
+        .quotation-detail-ui .quote-discount-ledger-list-add {
+          display: inline-flex;
+          width: 100%;
+          min-height: 38px;
+          align-items: center;
+          justify-content: center;
+          gap: 5px;
+          margin-top: 8px;
+          border: 1px dashed #bfe8d3;
+          border-radius: 6px;
+          background: #f7fcf9;
+          color: #137a52;
+          font-size: 11px;
+          font-weight: 750;
+        }
+        .quotation-detail-ui .quote-discount-ledger-list-add:hover:not(:disabled) {
+          border-color: #8fd8b0;
+          background: #eefaf3;
+        }
+        .quotation-detail-ui .quote-discount-ledger-list-add:disabled {
+          cursor: not-allowed;
+          opacity: 0.5;
+        }
+        .quotation-detail-ui .quote-discount-rule-list {
+          display: grid;
+          gap: 6px;
+          margin-top: 12px;
+          border: 0;
+          border-radius: 0;
+          background: transparent;
+          padding: 0;
+        }
+        .quotation-detail-ui .quote-discount-rule-row {
+          display: grid;
+          min-height: 52px;
+          grid-template-columns: 26px minmax(0, 1fr) auto 24px;
+          align-items: center;
+          gap: 7px;
+          border: 1px solid #e7ebf0;
+          border-radius: 6px;
+          background: #ffffff;
+          padding: 6px 6px 6px 8px;
+          font-size: 12px;
+          transition: border-color 140ms ease, background-color 140ms ease;
+        }
+        .quotation-detail-ui .quote-discount-rule-row:hover {
+          border-color: #cfd8e5;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-active {
+          border-color: #8fd8b0;
+          background: #f3fbf7;
+        }
+        .quotation-detail-ui .quote-discount-rule-order {
+          display: inline-flex;
+          width: 24px;
+          height: 24px;
+          align-items: center;
+          justify-content: center;
+          border-radius: 4px;
+          background: #e7effc;
+          color: #4d70a8;
+          font-size: 10px;
+          font-weight: 800;
+          font-variant-numeric: tabular-nums;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-active .quote-discount-rule-order {
+          background: #dff4e9;
+          color: #137a52;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-main {
+          display: flex;
+          min-width: 0;
+          flex-direction: column;
+          gap: 2px;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-name {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: #344054;
+          font-weight: 700;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-mode {
+          color: #98a2b3;
+          font-size: 10px;
+          font-weight: 600;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-amount {
+          color: #b45309;
+          font-weight: 800;
+          font-variant-numeric: tabular-nums;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-remove {
+          display: inline-flex;
+          height: 24px;
+          width: 24px;
+          align-items: center;
+          justify-content: center;
+          border-radius: 4px;
+          color: #98a2b3;
+          transition: background 140ms ease, color 140ms ease;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-remove:hover:not(:disabled) {
+          background: #fee4e2;
+          color: #d92d20;
+        }
+        .quotation-detail-ui .quote-discount-rule-row-remove:disabled {
+          cursor: not-allowed;
+          opacity: 0.45;
+        }
+        .quotation-detail-ui .quote-discount-ledger-empty {
+          display: flex;
+          min-height: 104px;
+          margin-top: 12px;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 7px;
+          border: 1px dashed #dfe3e8;
+          border-radius: 6px;
+          background: #ffffff;
+          color: #98a2b3;
+          font-size: 11px;
+          font-weight: 600;
+        }
+        .quotation-detail-ui .quote-discount-ledger-empty-icon {
+          display: inline-flex;
+          width: 28px;
+          height: 28px;
+          align-items: center;
+          justify-content: center;
+          border-radius: 6px;
+          background: #f2f4f7;
+          color: #667085;
+        }
+        .quotation-detail-ui .quote-discount-ledger-summary {
+          display: grid;
+          gap: 0;
+          flex: 0 0 auto;
+          margin-top: auto;
+          border-top: 1px solid #e4e7ec;
+          background: #fbfcfd;
+          padding-top: 10px;
+        }
+        .quotation-detail-ui .quote-discount-result-row {
+          display: flex;
+          min-height: 34px;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          border-radius: 5px;
+          padding: 0 8px;
+          background: #f3f6fa;
+          color: #475467;
+          font-size: 11px;
+          font-weight: 650;
+        }
+        .quotation-detail-ui .quote-discount-result-row strong {
+          color: #1d2939;
+          font-size: 12px;
+          font-weight: 800;
+          font-variant-numeric: tabular-nums;
+        }
+        .quotation-detail-ui .quote-discount-result-row-warn {
+          background: #fff4e8;
+          color: #b54708;
+        }
+        .quotation-detail-ui .quote-discount-result-row-warn strong {
+          color: #b54708;
+        }
+        .quotation-detail-ui .quote-discount-result-row-danger {
+          margin-top: 2px;
+          border-top: 0;
+          background: #fff0f1;
+          color: #b42318;
+        }
+        .quotation-detail-ui .quote-discount-result-row-danger strong {
+          color: #b42318;
+          font-size: 13px;
+        }
+        @media (max-width: 900px) {
+          .quotation-detail-ui .quote-discount-modal-body {
+            overflow-y: auto !important;
+          }
+          .quotation-detail-ui .quote-discount-workspace {
+            grid-template-columns: 1fr;
+          }
+          .quotation-detail-ui .quote-discount-editor {
+            height: auto;
+            overflow: visible;
+            padding: 0 14px 14px;
+          }
+          .quotation-detail-ui .quote-discount-step-input {
+            margin-top: 0;
+          }
+          .quotation-detail-ui .quote-discount-ledger {
+            height: auto;
+            overflow: visible;
+            border-top: 1px solid #e4e7ec;
+            border-left: 0;
+          }
+          .quotation-detail-ui .quote-discount-ledger-summary {
+            margin-top: 12px;
+          }
+          .quotation-detail-ui .quote-discount-type-grid,
+          .quotation-detail-ui .quote-discount-rule-grid {
+            grid-template-columns: 1fr !important;
+          }
+          .quotation-detail-ui .quote-discount-scope-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+          }
+          .quotation-detail-ui .quote-discount-rule-card-input {
+            grid-template-columns: 24px minmax(0, 1fr);
+          }
+          .quotation-detail-ui .quote-discount-rule-card-input .quote-discount-rule-copy {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+          }
+          .quotation-detail-ui .quote-discount-rule-card-input .quote-discount-rule-title,
+          .quotation-detail-ui .quote-discount-rule-card-input .quote-discount-rule-desc {
+            white-space: normal;
+          }
+          .quotation-detail-ui .quote-discount-rule-card-input .quote-discount-rule-input {
+            grid-column: 2;
+            margin-top: 6px;
+          }
+        }
         .print-quote-document { display: none; }
         @media print {
           html, body {
@@ -13887,6 +15033,7 @@ function QuoteDescriptionCell({
   label = "施工说明",
   emptyText = "点击填写施工说明",
   placeholder = "施工工艺、材料品牌规格、计价备注...",
+  defaultValue,
   highlight,
 }: {
   value: string;
@@ -13895,11 +15042,14 @@ function QuoteDescriptionCell({
   label?: string;
   emptyText?: string;
   placeholder?: string;
+  defaultValue?: string;
   highlight?: Pick<FindReplaceActiveHighlight, "start" | "length"> | null;
 }) {
   const [open, setOpen] = useState(false);
   const text = value || "";
-  const displayText = text.trim() || emptyText;
+  const defaultText = String(defaultValue || "").trim();
+  const hasManualText = Boolean(text.trim());
+  const displayText = hasManualText ? text : defaultText || emptyText;
 
   useEffect(() => {
     if (!open) return;
@@ -13918,18 +15068,20 @@ function QuoteDescriptionCell({
         className="quote-description-trigger"
         title={text || emptyText}
       >
-        <span className={`quote-description-preview ${text.trim() ? "" : "quote-description-placeholder"}`}>
-          {highlight && text.trim() ? renderFindReplaceHighlightedText(displayText, highlight) : displayText}
+        <span className={`quote-description-preview ${hasManualText ? "" : "quote-description-placeholder"} ${!hasManualText && defaultText ? "quote-description-default" : ""}`}>
+          {highlight && hasManualText ? renderFindReplaceHighlightedText(displayText, highlight) : displayText}
         </span>
       </button>
       {open && typeof document !== "undefined" && createPortal(
         <div
           className="fixed inset-0 z-[9999] flex items-center justify-center bg-[#0b1220]/35 px-4 py-6 backdrop-blur-[2px]"
           onClick={() => setOpen(false)}
+          onContextMenu={(event) => event.stopPropagation()}
         >
           <div
             className="quote-description-modal w-full max-w-[640px] overflow-hidden bg-white"
             onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-[#e8eef6] px-5 py-4">
               <div>
@@ -13947,9 +15099,11 @@ function QuoteDescriptionCell({
             </div>
             <div className="bg-[#f8fbff] px-5 py-4">
               <textarea
-                value={text}
+                value={hasManualText ? text : defaultText}
                 readOnly={readOnly}
-                onChange={(event) => onChange(event.target.value)}
+                onChange={(event) => {
+                  if (!readOnly) onChange(event.target.value);
+                }}
                 onKeyDown={handleQuoteCellKeyDown}
                 className="w-full px-3 py-3 text-sm leading-6 read-only:cursor-default"
                 placeholder={placeholder}
@@ -14045,7 +15199,7 @@ function QuoteCategoryChooser({
   );
 }
 
-function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, spaceOptions, feeScopeOptions, otherFeeRows, baseAmount, materialAmount, feeFormulaContext, formulaFinalFeeItemId, isAllSpaceView, searchValue, onSearchChange, onAdd, onManualAdd, onOpenFindReplace, quotaUpdateEntry, categoryNavigation, useQuotaLibraryAction, quantityLinkPanel, quantityLinkPickMode, onQuantityLinkPick, selectedItemKeys, selectedItemCount, onToggleItemSelection, onToggleAllItemSelection, onDeleteSelectedItems, onChange, onOpenRowMenu, onOpenQuantityLink, onReplaceBaseItem, readOnly, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onItemPointerDown, onNotify }: {
+function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, spaceOptions, feeScopeOptions, otherFeeRows, baseAmount, materialAmount, feeFormulaContext, formulaFinalFeeItemId, discountDetailText, isAllSpaceView, searchValue, onSearchChange, onAdd, onManualAdd, onOpenFindReplace, quotaUpdateEntry, categoryNavigation, useQuotaLibraryAction, quantityLinkPanel, quantityLinkPickMode, onQuantityLinkPick, selectedItemKeys, selectedItemCount, onToggleItemSelection, onToggleAllItemSelection, onDeleteSelectedItems, onChange, onOpenRowMenu, onOpenQuantityLink, onReplaceBaseItem, readOnly, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onItemPointerDown, onNotify }: {
   title: string;
   category: QuotationItem["category"];
   activeSpace?: string;
@@ -14058,6 +15212,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
   materialAmount: number;
   feeFormulaContext?: FeeFormulaContext;
   formulaFinalFeeItemId?: string;
+  discountDetailText?: string;
   isAllSpaceView?: boolean;
   searchValue: string;
   onSearchChange: (value: string) => void;
@@ -14107,11 +15262,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
     if (!fullscreen) return;
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      if (document.fullscreenElement) {
-        void document.exitFullscreen();
-      } else {
-        setFullscreen(false);
-      }
+      setFullscreen(false);
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -14119,25 +15270,15 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
 
   useEffect(() => {
     const handleFullscreenChange = () => {
-      const fullscreenElement = document.fullscreenElement;
-      const section = sectionRef.current;
-      setFullscreen(Boolean(fullscreenElement && section && fullscreenElement === section));
+      if (!document.fullscreenElement) return;
+      setFullscreen(false);
     };
     document.addEventListener("fullscreenchange", handleFullscreenChange);
     return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
   }, []);
 
   const toggleFullscreen = useCallback(() => {
-    const target = sectionRef.current;
-    if (document.fullscreenElement) {
-      void document.exitFullscreen();
-      return;
-    }
-    if (!target) return;
-    setFullscreen(true);
-    if (target.requestFullscreen) {
-      void target.requestFullscreen().catch(() => setFullscreen(true));
-    }
+    setFullscreen((current) => !current);
   }, []);
 
   return (
@@ -14291,6 +15432,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           materialAmount={materialAmount}
           feeFormulaContext={feeFormulaContext}
           formulaFinalFeeItemId={formulaFinalFeeItemId}
+          discountDetailText={discountDetailText}
           emptyText={emptyText}
           draggingItemIndex={draggingItemIndex}
           dragOverItem={dragOverItem}
@@ -15114,6 +16256,7 @@ function ProductLibraryPickerModal({
 function QuoteRowIndexCell({
   itemKey,
   label,
+  starred,
   readOnly,
   selected,
   onToggle,
@@ -15121,6 +16264,7 @@ function QuoteRowIndexCell({
 }: {
   itemKey: string;
   label: string | number;
+  starred?: boolean;
   readOnly?: boolean;
   selected: boolean;
   onToggle: (key: string) => void;
@@ -15128,7 +16272,18 @@ function QuoteRowIndexCell({
 }) {
   return (
     <div className={cn("quote-row-index-inner", selected && "is-selected")}>
-      {!readOnly && (
+      {starred ? (
+        <button
+          type="button"
+          disabled={readOnly}
+          onPointerDown={readOnly ? undefined : onItemPointerDown}
+          className={`quote-row-drag-handle no-print inline-flex h-7 w-7 shrink-0 touch-none items-center justify-center rounded-md bg-surface-100 text-surface-300 transition hover:bg-surface-200 ${readOnly ? "cursor-default" : "cursor-grab active:cursor-grabbing"}`}
+          title={readOnly ? "报价总额" : "报价总额，拖动调整顺序"}
+          aria-label={readOnly ? "报价总额" : `报价总额，拖动${label}调整顺序`}
+        >
+          <Star className="h-4 w-4 fill-red-500 text-red-500" />
+        </button>
+      ) : !readOnly && (
         <button
           type="button"
           onPointerDown={onItemPointerDown}
@@ -15835,7 +16990,7 @@ function FeeScopeSelector({
   );
 }
 
-function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, spaceOptions, feeScopeOptions: feeScopeOptionsInput, isOtherFees, baseAmount, materialAmount, feeFormulaContext, formulaFinalFeeItemId, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onOpenQuantityLink, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown, onNotify }: {
+function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, spaceOptions, feeScopeOptions: feeScopeOptionsInput, isOtherFees, baseAmount, materialAmount, feeFormulaContext, formulaFinalFeeItemId, discountDetailText, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onOpenQuantityLink, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown, onNotify }: {
   items: { item: QuotationItem; index: number }[];
   otherFeeRows: { item: QuotationItem; index: number }[];
   showSpace?: boolean;
@@ -15847,6 +17002,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
   materialAmount: number;
   feeFormulaContext?: FeeFormulaContext;
   formulaFinalFeeItemId?: string;
+  discountDetailText?: string;
   emptyText: string;
   draggingItemIndex: number | null;
   dragOverItem: DragOverItemState;
@@ -15947,6 +17103,12 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
     setFeeFormulaDrafts((current) => {
       if (!(key in current)) return current;
       const item = otherFeeRows.find((row) => row.index === index)?.item;
+      if (item && getQuotationFeeValueSource(item) === "manual") {
+        onChange(index, { unit_price: toNumber(current[key]), quantity: 1 });
+        const next = { ...current };
+        delete next[key];
+        return next;
+      }
       onChange(index, {
         ...(hasFormulaTableRows && item && !getQuotationFeeValueSource(item) ? {
           cost_source: "fee_source:formula" as const,
@@ -15968,12 +17130,13 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
   };
   const openFeeSuggestion = (itemKey: string, input: HTMLInputElement) => {
     const rect = input.getBoundingClientRect();
+    const suggestionWidth = Math.max(260, Math.min(rect.width, 380));
     feeSuggestionInputRef.current = input;
     setFeeSuggestion({
       itemKey,
-      left: Math.max(8, Math.min(rect.left, window.innerWidth - 340)),
-      top: Math.min(rect.bottom + 6, window.innerHeight - 340),
-      width: Math.max(300, rect.width),
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - suggestionWidth - 8)),
+      top: Math.min(rect.bottom + 6, window.innerHeight - 280),
+      width: suggestionWidth,
     });
     setFeeSuggestionActiveIndex(0);
   };
@@ -16027,7 +17190,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
     index: number,
     item: QuotationItem,
     itemKey: string,
-    valueSource: "formula" | "manual" | "fixed" | "direct" | "discount",
+    valueSource: "formula" | "manual" | "direct" | "discount",
   ) => {
     if (readOnly) return;
     const currentSource = getQuotationFeeValueSource(item) || "formula";
@@ -16035,6 +17198,20 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
     if (formulaFinalFeeItemId && String(item.id) === formulaFinalFeeItemId && valueSource !== "formula") {
       onNotify?.("无法修改", "报价总额行必须保留为公式方式，请先指定其他行作为报价总额。", "danger");
       return;
+    }
+    if (valueSource === "discount") {
+      const existingDiscountFee = otherFeeRows.find(({ item: row }) => (
+        String(row.id) !== String(item.id)
+        && getQuotationFeeValueSource(row) === "discount"
+      ));
+      if (existingDiscountFee) {
+        onNotify?.(
+          "无法修改",
+          `综合费用中只能设置一行“报价优惠”。当前已被“${String(existingDiscountFee.item.name || "未命名费用").trim()}”使用，请先修改该行。`,
+          "danger",
+        );
+        return;
+      }
     }
 
     const patch = getQuotationFeeValueSourcePatch(valueSource, item);
@@ -16136,6 +17313,11 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
             const cellStyle = rowColor.background ? { backgroundColor: rowColor.background } : undefined;
             const feeMethod = normalizeFeeCalcMethod(item.fee_calc_method);
             const feeValueSource = getQuotationFeeValueSource(item);
+            const existingDiscountFee = otherFeeRows.find(({ item: row }) => (
+              String(row.id) !== String(item.id)
+              && getQuotationFeeValueSource(row) === "discount"
+            ));
+            const discountValueSourceUsedByOtherFee = Boolean(existingDiscountFee);
             const effectiveFeeValueSource = feeValueSource || (hasFormulaTableRows ? "formula" : undefined);
             const effectiveFeeMethod = hasFormulaTableRows && !feeValueSource ? "formula" : feeMethod;
             const isFormulaTableRow = Boolean(effectiveFeeValueSource);
@@ -16149,6 +17331,12 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
             const feeBaseError = isOtherFees ? feeMeta?.error || "" : "";
             const displayItem = feeFormulaDrafts[itemKey] !== undefined ? { ...item, fee_calc_base: feeFormulaDrafts[itemKey] } : item;
             const otherFeeRuleText = isOtherFees ? getOtherFeeRuleDisplay(item, feeTotal, feeFormulaContext, otherFeeItems) : "";
+            const isDiscountFeeRow = isOtherFees && effectiveFeeValueSource === "discount";
+            const feeScopeRuleText = isOtherFees ? getFeeScopeText(item) : "";
+            const combinedRuleText = [
+              feeScopeRuleText ? `默认统计范围（${feeScopeRuleText}）` : "",
+              isDiscountFeeRow ? discountDetailText : otherFeeRuleText,
+            ].filter(Boolean).join("；");
             return (
               <tr
                 key={itemKey}
@@ -16163,6 +17351,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                   <QuoteRowIndexCell
                     itemKey={itemKey}
                     label={isOtherFees ? feeMeta?.sequence || formatAlphaSequence(rowIndex) : rowIndex + 1}
+                    starred={isOtherFees && String(item.id) === String(formulaFinalFeeItemId || "")}
                     readOnly={readOnly}
                     selected={selectedItemKeys.has(itemKey)}
                     onToggle={onToggleItemSelection}
@@ -16209,15 +17398,30 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
 	                              index,
 	                              item,
 	                              itemKey,
-	                              event.target.value as "formula" | "manual" | "fixed" | "direct" | "discount",
+	                              event.target.value as "formula" | "manual" | "direct" | "discount",
 	                            )}
+	                            onDisabledOptionClick={(option) => {
+	                              if (option.value === "discount" && existingDiscountFee) {
+	                                onNotify?.(
+	                                  "无法选择",
+	                                  `综合费用中只能设置一行“报价优惠”。当前已被“${String(existingDiscountFee.item.name || "未命名费用").trim()}”使用，请先修改该行。`,
+	                                  "danger",
+	                                );
+	                              }
+	                            }}
 	                            onKeyDown={handleQuoteCellKeyDown}
 	                            className="quote-cell-editable quote-cell-input quote-cell-select quote-fee-method-select"
 	                            menuClassName="quote-system-select-menu"
 	                            optionClassName="quote-system-select-option"
 	                          >
 	                            {quotationFeeValueSourceOptions.map((option) => (
-	                              <option key={option.value} value={option.value}>{option.label}</option>
+	                              <option
+	                                key={option.value}
+	                                value={option.value}
+	                                disabled={option.value === "discount" && discountValueSourceUsedByOtherFee}
+	                              >
+	                                {option.label}
+	                              </option>
 	                            ))}
 	                          </SystemSelect>
 	                        )
@@ -16251,7 +17455,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
 	                          <input
 	                            value={
 	                              effectiveFeeValueSource === "manual"
-	                                ? "报价时填写"
+	                                ? feeFormulaDrafts[itemKey] ?? (toNumber(item.unit_price) ? String(toNumber(item.unit_price)) : "")
 	                                : effectiveFeeValueSource === "direct"
 	                                  ? "工程直接费"
 	                                  : effectiveFeeValueSource === "discount"
@@ -16262,21 +17466,26 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
 	                                        ? "房屋面积"
 	                                        : feeFormulaDrafts[itemKey] ?? formatStableFeeFormula(item.fee_calc_base, otherFeeItems)
 	                            }
-	                            onFocus={(event) => {
-	                              startEditingFeeFormula(itemKey, formatStableFeeFormula(item.fee_calc_base, otherFeeItems));
-	                              if (canSuggestFeeFormula) openFeeSuggestion(itemKey, event.currentTarget);
+	                            onFocus={() => {
+	                              startEditingFeeFormula(
+	                                itemKey,
+	                                effectiveFeeValueSource === "manual"
+	                                  ? (toNumber(item.unit_price) ? String(toNumber(item.unit_price)) : "")
+	                                  : formatStableFeeFormula(item.fee_calc_base, otherFeeItems),
+	                              );
 	                            }}
-	                            onClick={(event) => {
-	                              if (canSuggestFeeFormula) openFeeSuggestion(itemKey, event.currentTarget);
+	                            onChange={(event) => {
+	                              changeFeeFormulaDraft(itemKey, event.target.value);
+	                              if (effectiveFeeValueSource === "manual") {
+	                                onChange(index, { unit_price: toNumber(event.target.value), quantity: 1 });
+	                              }
 	                            }}
-	                            onChange={(event) => changeFeeFormulaDraft(itemKey, event.target.value)}
 	                            onBlur={() => commitFeeFormulaDraft(itemKey, index)}
 	                            disabled={
 	                              readOnly
-	                              || effectiveFeeValueSource === "manual"
 	                              || effectiveFeeValueSource === "direct"
 	                              || effectiveFeeValueSource === "discount"
-	                              || (effectiveFeeMethod === "fixed" && effectiveFeeValueSource !== "fixed")
+	                              || (effectiveFeeMethod === "fixed" && effectiveFeeValueSource !== "manual")
 	                              || effectiveFeeMethod === "area_unit"
 	                            }
 	                            onKeyDown={(event) => {
@@ -16306,8 +17515,8 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
 	                            }}
 	                            aria-invalid={!!feeBaseError}
 	                            className={`quote-cell-editable quote-cell-input min-w-0 w-full pr-8 text-center disabled:text-surface-300 ${feeBaseError ? "bg-red-50 text-red-700 ring-1 ring-inset ring-red-400" : ""}`}
-	                            placeholder={effectiveFeeValueSource === "fixed" ? "填写固定金额，如 500" : effectiveFeeMethod === "fixed" ? "" : effectiveFeeMethod === "area_unit" ? "房屋面积" : effectiveFeeMethod === "formula" ? "如 (直接费+打拆)*3%+A" : "如 直接费、打拆 或 A+B"}
-	                            title={feeBaseError || (effectiveFeeValueSource === "fixed" ? "填写固定金额" : effectiveFeeMethod === "fixed" ? "" : effectiveFeeMethod === "area_unit" ? "按当前报价房屋面积计算" : "可输入 直接费、空间/类别名称、A+B、(直接费+打拆)*3%+A 等")}
+	                            placeholder={effectiveFeeValueSource === "manual" ? "填写金额" : effectiveFeeMethod === "fixed" ? "" : effectiveFeeMethod === "area_unit" ? "房屋面积" : effectiveFeeMethod === "formula" ? "如 (直接费+打拆)*3%+A" : "如 直接费、打拆 或 A+B"}
+	                            title={feeBaseError || (effectiveFeeValueSource === "manual" ? "填写报价时确定的金额" : effectiveFeeMethod === "fixed" ? "" : effectiveFeeMethod === "area_unit" ? "按当前报价房屋面积计算" : "可输入 直接费、空间/类别名称、A+B、(直接费+打拆)*3%+A 等")}
 	                          />
 	                          {canSuggestFeeFormula && (
 	                            <button
@@ -16331,9 +17540,6 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
 	                            </button>
 	                          )}
 	                        </div>
-	                        {effectiveFeeValueSource === "fixed" && (
-	                          <span className="ml-0.5 mr-3 inline-flex h-7 shrink-0 items-center text-sm font-semibold text-[#475467]">元</span>
-	                        )}
 	                      </div>
                         {feeBaseError && <div className="px-3 pb-1 text-xs font-medium text-red-600">{feeBaseError}</div>}
 	                    </td>
@@ -16405,17 +17611,6 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                 >
                   {feeBaseError ? (
                     "-"
-                  ) : isOtherFees && effectiveFeeValueSource === "manual" && !readOnly ? (
-                    <div className="flex items-center justify-center gap-1">
-	                      <QuoteNumberInput
-	                        value={item.unit_price}
-	                        onChange={(value) => onChange(index, { unit_price: value, quantity: 1 })}
-	                        placeholder="填写金额"
-	                        emptyWhenZero
-	                        className="w-24 text-center font-semibold text-red-600"
-	                      />
-	                      <span className="ml-0.5 mr-3 inline-flex h-7 shrink-0 items-center text-sm font-semibold text-[#475467]">元</span>
-                    </div>
                   ) : (
                     formatQuoteAmount(feeTotal)
                   )}
@@ -16439,7 +17634,8 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                       value={item.remark || ""}
                       readOnly={readOnly}
                       label="规则/说明"
-                      emptyText={feeBaseError || otherFeeRuleText || "点击填写规则/说明"}
+                      emptyText={feeBaseError || combinedRuleText || "点击填写规则/说明"}
+                      defaultValue={combinedRuleText}
                       placeholder="填写费用计算规则、特殊说明或对客户展示的备注..."
                       onChange={(value) => onChange(index, { remark: value })}
                     />
@@ -16471,7 +17667,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
     {feeSuggestion && typeof document !== "undefined" && createPortal(
       <div
         ref={feeSuggestionMenuRef}
-        className="fixed z-[10020] flex max-h-[340px] flex-col overflow-hidden rounded-[10px] border border-[#dce8f8] bg-white p-1.5 shadow-[0_18px_44px_rgba(27,51,88,0.14),0_4px_14px_rgba(27,51,88,0.06)]"
+        className="fixed z-[10020] flex max-h-[280px] flex-col overflow-hidden rounded-[10px] border border-[#dce8f8] bg-white p-1.5 shadow-[0_18px_44px_rgba(27,51,88,0.14),0_4px_14px_rgba(27,51,88,0.06)]"
         style={{
           left: feeSuggestion.left,
           top: feeSuggestion.top,

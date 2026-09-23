@@ -125,6 +125,7 @@ interface PlaceSearchResult {
   id: string;
   name: string;
   address: string;
+  city?: string;
   district: string;
   location: string;
   longitude: number | null;
@@ -140,12 +141,48 @@ declare global {
 }
 
 let amapScriptPromise: Promise<void> | null = null;
-const defaultMapCenter = { longitude: 113.264385, latitude: 23.129112 };
+const nationwideMapCenter = { longitude: 104.195397, latitude: 35.86166 };
+const LAST_MAP_LOCATION_KEY = "renovation:last-map-location";
 
 type BrowserPosition = {
   longitude: number;
   latitude: number;
 };
+
+type SavedMapLocation = BrowserPosition & {
+  city: string;
+};
+
+function readLastMapLocation(): SavedMapLocation | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(LAST_MAP_LOCATION_KEY) || "null");
+    const longitude = Number(parsed?.longitude);
+    const latitude = Number(parsed?.latitude);
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return null;
+    return {
+      longitude,
+      latitude,
+      city: String(parsed?.city || "").trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function rememberMapLocation(longitude: number, latitude: number, city: string) {
+  if (typeof window === "undefined") return;
+  if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return;
+  try {
+    window.localStorage.setItem(LAST_MAP_LOCATION_KEY, JSON.stringify({
+      longitude,
+      latitude,
+      city: city.trim(),
+    }));
+  } catch {
+    // Ignore storage failures; map selection must still work.
+  }
+}
 
 function getBrowserPosition(): Promise<BrowserPosition | null> {
   if (typeof navigator === "undefined" || !navigator.geolocation) return Promise.resolve(null);
@@ -806,6 +843,14 @@ export function AmapLocationPicker({
   const [mapRetryKey, setMapRetryKey] = useState(0);
   keywordRef.current = keyword;
 
+  useEffect(() => {
+    if (!selected) return;
+    const longitude = Number(selected.longitude);
+    const latitude = Number(selected.latitude);
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return;
+    rememberMapLocation(longitude, latitude, currentCityRef.current);
+  }, [selected]);
+
   const placeMarker = useCallback((longitude: number, latitude: number) => {
     if (!window.AMap || !mapRef.current) return;
     const position = [longitude, latitude];
@@ -830,23 +875,52 @@ export function AmapLocationPicker({
 
   const resolveInitialMapCenter = useCallback(async (positionPromise: Promise<BrowserPosition | null>) => {
     const position = await positionPromise;
-    if (!position) return { ...defaultMapCenter, city: "" };
-
-    try {
-      const response = await fetch(`/api/location/reverse?lat=${encodeURIComponent(position.latitude)}&lng=${encodeURIComponent(position.longitude)}`);
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.message || "当前位置解析失败");
-      const longitude = Number(data?.amap_longitude);
-      const latitude = Number(data?.amap_latitude);
-      return {
-        longitude: Number.isFinite(longitude) ? longitude : position.longitude,
-        latitude: Number.isFinite(latitude) ? latitude : position.latitude,
-        city: String(data?.city || data?.province || "").trim(),
-      };
-    } catch {
-      // 浏览器位置仍可作为地图中心，城市搜索会继续由地图移动后的反向解析更新。
-      return { ...position, city: "" };
+    if (position) {
+      try {
+        const response = await fetch(`/api/location/reverse?lat=${encodeURIComponent(position.latitude)}&lng=${encodeURIComponent(position.longitude)}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data?.message || "当前位置解析失败");
+        const longitude = Number(data?.amap_longitude);
+        const latitude = Number(data?.amap_latitude);
+        return {
+          longitude: Number.isFinite(longitude) ? longitude : position.longitude,
+          latitude: Number.isFinite(latitude) ? latitude : position.latitude,
+          city: String(data?.city || data?.province || "").trim(),
+          zoom: 12,
+        };
+      } catch {
+        return { ...position, city: "", zoom: 12 };
+      }
     }
+
+    const initialAddress = keywordRef.current.trim();
+    if (initialAddress) {
+      try {
+        const params = new URLSearchParams({ keywords: initialAddress });
+        const response = await fetch(`/api/location/search?${params.toString()}`);
+        const data = await response.json();
+        const first = Array.isArray(data?.pois)
+          ? data.pois.find((item: any) => Number.isFinite(Number(item?.longitude)) && Number.isFinite(Number(item?.latitude)))
+          : null;
+        if (response.ok && first) {
+          return {
+            longitude: Number(first.longitude),
+            latitude: Number(first.latitude),
+            city: String(first.city || first.district || "").trim(),
+            zoom: 12,
+          };
+        }
+      } catch {
+        // Continue to the remembered or nationwide fallback.
+      }
+    }
+
+    const savedLocation = readLastMapLocation();
+    if (savedLocation) {
+      return { ...savedLocation, zoom: 12 };
+    }
+
+    return { ...nationwideMapCenter, city: "", zoom: 4 };
   }, []);
 
   const reverseCoordinate = useCallback(async (longitude: number, latitude: number) => {
@@ -924,6 +998,7 @@ export function AmapLocationPicker({
 
   const selectResult = (place: PlaceSearchResult) => {
     const name = place.name || place.address;
+    setMapCity(place.city || place.district || "");
     setSelected({
       name,
       address: place.address || place.district,
@@ -957,7 +1032,7 @@ export function AmapLocationPicker({
         if (initialCenter.city) setMapCity(initialCenter.city);
         const map = new window.AMap.Map(mapContainerRef.current, {
           center: [initialCenter.longitude, initialCenter.latitude],
-          zoom: 12,
+          zoom: initialCenter.zoom || 12,
           viewMode: "2D",
         });
         mapRef.current = map;
@@ -1118,7 +1193,7 @@ export function AmapLocationPicker({
   }
 
   return (
-    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-900/24 px-4 py-6 backdrop-blur-[1px]">
+    <div className="fixed inset-0 z-[1300] flex items-center justify-center bg-slate-900/24 px-4 py-6 backdrop-blur-[1px]">
       <div className="customer-entry-map-modal-shell flex max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-none border border-[#DCE4EF] bg-white">
         <div className="flex items-center justify-between border-b border-[#E5EAF2] bg-white px-5 py-4">
           <div>

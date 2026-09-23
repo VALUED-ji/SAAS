@@ -12,6 +12,7 @@ import {
   buildDirectFeeScopeReferences,
   getFeeFormulaText,
   getFeeRuleText,
+  getFeeScopeText,
   getLegacyManagementFeeRate,
   normalizeFeeScopeMode,
   parseFeeScopeValues,
@@ -19,6 +20,7 @@ import {
   toNumber,
   type FeeFormulaContext,
 } from "@/lib/quotationFeeFormulas";
+import { applyQuoteDiscountToFormulaTotal, calculateDiscountRuleAmounts, formatDiscountRuleDetailText, getDiscountRuleValue, type DiscountCalculationRule } from "@/lib/quotationDiscountRules";
 import { getQuotationRowColor } from "@/lib/quotationRowColors";
 import { formatAlphaSequence } from "@/lib/quotationSequence";
 import { normalizeQuotationSignatureLabels } from "@/lib/quotationPrintSettings";
@@ -62,6 +64,7 @@ type ExportItem = {
 
 type DiscountRule = {
   id: string;
+  name?: string;
   type: "fee" | "space" | "work_type";
   mode: "amount" | "rate";
   scope?: string;
@@ -631,6 +634,7 @@ function getLegacyDiscountRule(settings: any): DiscountRule | null {
   const type = settings?.discountType === "space" || settings?.discountType === "work_type" ? settings.discountType : "fee";
   return {
     id: "legacy",
+    name: "优惠",
     type,
     mode: settings?.discountMode === "rate" ? "rate" : "amount",
     scope: settings?.discountScope || "total",
@@ -647,6 +651,7 @@ function getDiscountRules(settings: any): DiscountRule[] {
   const rules = rawRules
     .map((rule: any, index: number) => ({
       id: String(rule?.id || `rule_${index}`),
+      name: String(rule?.name || "").trim() || `优惠${index + 1}`,
       type: rule?.type === "space" || rule?.type === "work_type" ? rule.type : "fee",
       mode: rule?.mode === "rate" ? "rate" : "amount",
       scope: String(rule?.scope || "total"),
@@ -659,12 +664,6 @@ function getDiscountRules(settings: any): DiscountRule[] {
   if (hasRuleList) return rules;
   const legacyRule = getLegacyDiscountRule(settings);
   return legacyRule ? [legacyRule] : [];
-}
-
-function getDiscountRuleValue(rule: DiscountRule) {
-  if (rule.type === "space") return rule.space ? `space:${rule.space}` : "";
-  if (rule.type === "work_type") return rule.workType ? `work_type:${rule.workType}` : "";
-  return rule.scope || "total";
 }
 
 function isRemovedOtherFeeDiscountScope(value: string) {
@@ -686,22 +685,21 @@ function getDiscountRuleScope(rule: DiscountRule, items: ExportItem[], settings:
     || options[0];
 }
 
-function getDiscountRuleAmount(rule: DiscountRule, items: ExportItem[], settings: any, totals: { otherAmount: number }, houseArea = 0) {
-  const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
-  const scopeAmount = Math.max(0, toNumber(scope?.amount));
-  const excludedAmount = Math.min(scopeAmount, Math.max(0, toNumber(settings?.excludeSpecificDiscountAmount)));
-  const baseAmount = Math.max(0, scopeAmount - excludedAmount);
-  if (baseAmount <= 0) return 0;
-  if (rule.mode === "rate") return roundMoney(baseAmount * (1 - Math.min(1, Math.max(0, toNumber(rule.rate || 1)))));
-  return roundMoney(Math.min(Math.max(0, toNumber(rule.discount)), baseAmount));
-}
-
-function getDiscountRuleRows(items: ExportItem[], settings: any, totals: { otherAmount: number }, houseArea = 0) {
-  return getDiscountRules(settings)
+function getDiscountRuleRows(items: ExportItem[], settings: any, totals: { otherAmount: number }, houseArea = 0, totalCap = Number.MAX_SAFE_INTEGER) {
+  const rules = getDiscountRules(settings);
+  const amounts = calculateDiscountRuleAmounts(rules as DiscountCalculationRule[], (rule) => {
+    const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
+    return Math.max(0, toNumber(scope?.amount));
+  }, {
+    excludedAmount: settings?.excludeSpecificDiscountAmount,
+    totalCap,
+  });
+  return rules
     .map((rule) => {
       const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
-      const amount = getDiscountRuleAmount(rule, items, settings, totals, houseArea);
-      const label = scope?.label || (rule.type === "space" ? rule.space : rule.type === "work_type" ? rule.workType : getDiscountScopeLabelByValue(rule.scope || "total")) || "优惠对象";
+      const amount = toNumber(amounts.get(rule.id));
+      const scopeLabel = scope?.label || (rule.type === "space" ? rule.space : rule.type === "work_type" ? rule.workType : getDiscountScopeLabelByValue(rule.scope || "total")) || "优惠对象";
+      const label = String(rule.name || "").trim() || scopeLabel;
       const rateText = `${(toNumber(rule.rate || 1) * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
       const discountRateText = `${((1 - toNumber(rule.rate || 1)) * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
       return {
@@ -709,9 +707,13 @@ function getDiscountRuleRows(items: ExportItem[], settings: any, totals: { other
         label,
         formula: rule.mode === "rate" ? `${label} × ${rateText}` : `${label}优惠`,
         ruleText: rule.mode === "rate"
-          ? `${label}按${rateText}折扣系数计算，折扣优惠金额 ${formatExportAmount(amount)}（${formatExportAmount(toNumber(scope?.amount))} × ${discountRateText}）`
-          : `${label}直接优惠金额 ${formatExportAmount(amount)}`,
+          ? `${label}按${scopeLabel}的${rateText}折扣系数计算，折扣优惠金额 ${formatExportAmount(amount)}（${formatExportAmount(toNumber(scope?.amount))} × ${discountRateText}）`
+          : `${label}基于${scopeLabel}直接优惠金额 ${formatExportAmount(amount)}`,
         amount,
+        scopeLabel,
+        mode: rule.mode,
+        rate: rule.rate,
+        discount: rule.discount,
       };
     })
     .filter((row) => row.amount > 0);
@@ -795,10 +797,15 @@ function shouldShowAutoOtherFeeRule(item: ExportItem) {
 function getOtherFeeRuleDisplay(item: ExportItem, total: number, context?: FeeFormulaContext, items?: ExportItem[]) {
   const remark = String(item.remark || "").trim();
   if (remark) return remark;
-  if (!shouldShowAutoOtherFeeRule(item)) return remark;
-
+  const scopeText = getFeeScopeText(item);
+  const scopeRule = scopeText ? `默认统计范围（${scopeText}）` : "";
+  if (!shouldShowAutoOtherFeeRule(item)) return scopeRule;
   const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context, items);
-  return rule;
+  return [scopeRule, rule].filter(Boolean).join("；");
+}
+
+function getExportFeeValueSource(item: ExportItem) {
+  return String(item.cost_source || "").match(/^fee_source:(.+)$/)?.[1]?.trim() || "";
 }
 
 function itemText(value?: string | number | null) {
@@ -916,7 +923,7 @@ function addSectionTitle(sheet: ExcelJS.Worksheet, rowNumber: number, title: str
   sheet.mergeCells(rowNumber, 1, rowNumber, EXPORT_COLUMN_COUNT);
   const cell = sheet.getCell(rowNumber, 1);
   cell.value = title;
-  cell.font = { name: EXPORT_FONT_NAME, size: 12, bold: true, color: { argb: "111827" } };
+  cell.font = { name: EXPORT_FONT_NAME, size: 13, bold: true, color: { argb: "111827" } };
   cell.alignment = { vertical: "middle" };
   cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF" } };
   sheet.getRow(rowNumber).height = 24;
@@ -927,7 +934,7 @@ function addTableHeader(sheet: ExcelJS.Worksheet, rowNumber: number, headers: st
   row.height = 24;
   for (let col = 1; col <= columnCount; col += 1) {
     const cell = row.getCell(col);
-    cell.font = { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "475569" } };
+    cell.font = { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "475569" } };
     cell.alignment = { vertical: "middle", horizontal: col === 2 ? "left" : "center", wrapText: col !== 1 };
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_HEADER_FILL } };
     applyThinBorder(cell, EXPORT_HEADER_BORDER_COLOR);
@@ -936,7 +943,7 @@ function addTableHeader(sheet: ExcelJS.Worksheet, rowNumber: number, headers: st
 
 function addAmountCell(cell: ExcelJS.Cell, bold = false, color = "111827", horizontal: "left" | "center" | "right" = "right") {
   cell.numFmt = '0.00;-0.00';
-  cell.font = { name: EXPORT_FONT_NAME, size: 10, bold, color: { argb: color } };
+  cell.font = { name: EXPORT_FONT_NAME, size: 11, bold, color: { argb: color } };
   cell.alignment = { vertical: "middle", horizontal };
 }
 
@@ -980,27 +987,27 @@ function addQuotationHeader(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet
         right: { style: "medium", color: { argb: "111111" } },
       };
       cell.alignment = { vertical: "middle", horizontal: "center", wrapText: false, shrinkToFit: true };
-      cell.font = { name: EXPORT_FONT_NAME, size: 10, color: { argb: "111827" } };
+      cell.font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "111827" } };
     }
   }
 
   [1, 4, 8].forEach((labelCol) => {
     [2, 3].forEach((rowNumber) => {
       const cell = sheet.getCell(rowNumber, labelCol);
-      cell.font = { name: EXPORT_FONT_NAME, size: 9, bold: true, color: { argb: "475569" } };
+      cell.font = { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "475569" } };
       cell.alignment = { vertical: "middle", horizontal: "center", wrapText: false, shrinkToFit: true };
     });
   });
   [2, 5, 9].forEach((valueCol) => {
     [2, 3].forEach((rowNumber) => {
       const cell = sheet.getCell(rowNumber, valueCol);
-      cell.font = { name: EXPORT_FONT_NAME, size: 10, bold: false, color: { argb: "111827" } };
+      cell.font = { name: EXPORT_FONT_NAME, size: 11, bold: false, color: { argb: "111827" } };
       cell.alignment = { vertical: "middle", horizontal: "center", wrapText: false, shrinkToFit: true };
     });
   });
-  sheet.getCell(2, 11).font = { name: EXPORT_FONT_NAME, size: 10, bold: false, color: { argb: "475569" } };
+  sheet.getCell(2, 11).font = { name: EXPORT_FONT_NAME, size: 11, bold: false, color: { argb: "475569" } };
   sheet.getCell(2, 11).alignment = { vertical: "bottom", horizontal: "center", wrapText: false, shrinkToFit: true };
-  titleCell.font = { name: EXPORT_FONT_NAME, size: 18, bold: true, color: { argb: "111827" } };
+  titleCell.font = { name: EXPORT_FONT_NAME, size: 19, bold: true, color: { argb: "111827" } };
   titleCell.alignment = { vertical: "middle", horizontal: "center", wrapText: false, shrinkToFit: true };
   if (qrDataUrl) {
     const imageId = workbook.addImage({
@@ -1108,7 +1115,7 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
     sheet.getRow(row).height = 22;
     for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
       const cell = sheet.getCell(row, col);
-      cell.font = { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "475467" } };
+      cell.font = { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "475467" } };
       cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
       cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_HEADER_FILL } };
       applyThinBorder(cell, EXPORT_HEADER_BORDER_COLOR);
@@ -1124,7 +1131,7 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
     sheet.mergeCells(rowNumber, 2, rowNumber, EXPORT_COLUMN_COUNT);
     sheet.getCell(rowNumber, 2).value = group.space;
     styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
-      font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "111827" } },
+      font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
       alignment: { vertical: "middle" },
       fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_SPACE_FILL } },
     });
@@ -1163,7 +1170,7 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
       for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
         const cell = row.getCell(col);
         applyThinBorder(cell);
-        cell.font = { name: EXPORT_FONT_NAME, size: 10, color: { argb: "344054" } };
+        cell.font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "344054" } };
       }
       columnLayouts.forEach((layout) => {
         const cell = row.getCell(layout.start);
@@ -1179,7 +1186,7 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
     sheet.mergeCells(rowNumber, 1, rowNumber, labelEndCol);
     sheet.getCell(rowNumber, 1).value = "小计";
     styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
-      font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "344054" } },
+      font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "344054" } },
       fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_SECTION_FILL } },
       alignment: { vertical: "middle" },
     });
@@ -1196,7 +1203,7 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
   sheet.mergeCells(rowNumber, 1, rowNumber, labelEndCol);
   sheet.getCell(rowNumber, 1).value = "基装小计";
   styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
-    font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "111827" } },
+    font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
     fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_TOTAL_FILL } },
   });
   sheet.getCell(rowNumber, 1).alignment = { horizontal: "center", vertical: "middle" };
@@ -1222,7 +1229,7 @@ function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: E
     sheet.mergeCells(rowNumber, 1, rowNumber, EXPORT_COLUMN_COUNT);
     sheet.getCell(rowNumber, 1).value = group.space;
     styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
-      font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "111827" } },
+      font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
       alignment: { vertical: "middle" },
       fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_SPACE_FILL } },
     });
@@ -1264,7 +1271,7 @@ function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: E
       for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
         const cell = row.getCell(col);
         applyThinBorder(cell);
-        cell.font = { name: EXPORT_FONT_NAME, size: 10, color: { argb: "344054" } };
+        cell.font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "344054" } };
         cell.alignment = { vertical: "middle", horizontal: "center", wrapText: ![1, 7, 8, 9, 10].includes(col) };
       }
       [8, 10].forEach((col) => addAmountCell(row.getCell(col), col === 10, "111827", "center"));
@@ -1277,7 +1284,7 @@ function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: E
     sheet.getCell(rowNumber, 10).value = groupTotal;
     sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
     styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
-      font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "344054" } },
+      font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "344054" } },
       fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_SECTION_FILL } },
     });
     addAmountCell(sheet.getCell(rowNumber, 10), true, "111827", "center");
@@ -1292,7 +1299,7 @@ function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: E
   sheet.getCell(rowNumber, 10).value = total;
   sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
   styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
-    font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "111827" } },
+    font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
     fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_TOTAL_FILL } },
   });
   addAmountCell(sheet.getCell(rowNumber, 10), true, "DC2626", "center");
@@ -1317,7 +1324,7 @@ function addCustomCabinetSection(sheet: ExcelJS.Worksheet, startRow: number, ite
     sheet.mergeCells(rowNumber, 1, rowNumber, EXPORT_COLUMN_COUNT);
     sheet.getCell(rowNumber, 1).value = group.space;
     styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
-      font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "111827" } },
+      font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
       alignment: { vertical: "middle" },
       fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_SPACE_FILL } },
     });
@@ -1358,7 +1365,7 @@ function addCustomCabinetSection(sheet: ExcelJS.Worksheet, startRow: number, ite
       for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
         const cell = row.getCell(col);
         applyThinBorder(cell);
-        cell.font = { name: EXPORT_FONT_NAME, size: 10, color: { argb: "344054" } };
+        cell.font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "344054" } };
         cell.alignment = { vertical: "middle", horizontal: "center", wrapText: ![1, 7, 8, 9, 10].includes(col) };
       }
       [9, 10].forEach((col) => addAmountCell(row.getCell(col), col === 10, "111827", "center"));
@@ -1371,7 +1378,7 @@ function addCustomCabinetSection(sheet: ExcelJS.Worksheet, startRow: number, ite
     sheet.getCell(rowNumber, 10).value = groupTotal;
     sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
     styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
-      font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "344054" } },
+      font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "344054" } },
       fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_SECTION_FILL } },
     });
     addAmountCell(sheet.getCell(rowNumber, 10), true, "111827", "center");
@@ -1386,7 +1393,7 @@ function addCustomCabinetSection(sheet: ExcelJS.Worksheet, startRow: number, ite
   sheet.getCell(rowNumber, 10).value = total;
   sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
   styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
-    font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "111827" } },
+    font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
     fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_TOTAL_FILL } },
   });
   addAmountCell(sheet.getCell(rowNumber, 10), true, "DC2626", "center");
@@ -1403,6 +1410,17 @@ function addOtherFeeSection(
   materialAmount: number,
   feeFormulaContext: FeeFormulaContext,
   otherFeeTotals: number[],
+  discountRows: Array<{
+    id: string;
+    label: string;
+    scopeLabel: string;
+    mode: "amount" | "rate";
+    rate?: number;
+    discount?: number;
+    amount: number;
+    ruleText: string;
+    formula: string;
+  }>,
   discount: number,
   taxAmount: number,
   finalAmount: number,
@@ -1443,7 +1461,6 @@ function addOtherFeeSection(
     finalFormulaParts.push("- 优惠");
     finalRuleParts.push(`- 优惠 ${formatExportAmount(discount)}`);
   }
-  const discountRows = formulaTableMode ? [] : getDiscountRuleRows(allItems, settings, { otherAmount }, houseArea);
   const fallbackDiscountRows = !formulaTableMode && discount > 0 && discountRows.length === 0
     ? [{
         id: "legacy",
@@ -1452,7 +1469,17 @@ function addOtherFeeSection(
         ruleText: `${getDiscountScopeLabel(settings)}优惠 ${formatExportAmount(discount)}`,
         amount: discount,
       }]
-    : discountRows;
+    : !formulaTableMode
+      ? discountRows
+      : [];
+  const discountDetailText = formatDiscountRuleDetailText(discountRows.map((row) => ({
+    name: row.label,
+    scopeLabel: row.scopeLabel,
+    mode: row.mode,
+    rate: row.rate,
+    discount: row.discount,
+    amount: row.amount,
+  })), discount);
 
   const addFeeRow = (values: [unknown, unknown, unknown, unknown, unknown], options: { fill?: string; bold?: boolean; amountColor?: string; rowColor?: string | null } = {}) => {
     setRowValues(sheet, rowNumber, [
@@ -1478,7 +1505,7 @@ function addOtherFeeSection(
     for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
       const cell = row.getCell(col);
       applyThinBorder(cell);
-      cell.font = { name: EXPORT_FONT_NAME, size: 10, color: { argb: col === 6 ? (options.amountColor || "111827") : "344054" }, bold: options.bold || col === 2 || col === 6 };
+      cell.font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: col === 6 ? (options.amountColor || "111827") : "344054" }, bold: options.bold || col === 2 || col === 6 };
       cell.alignment = { vertical: "middle", horizontal: col === 6 ? "right" : col === 1 ? "center" : "left", wrapText: col !== 1 };
       if (options.fill) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: options.fill } };
     }
@@ -1492,7 +1519,12 @@ function addOtherFeeSection(
 
   items.forEach((item, index) => {
     const total = otherFeeTotals[index] || 0;
-    const ruleText = getOtherFeeRuleDisplay(item, total, feeFormulaContext, items);
+    const ruleText = getExportFeeValueSource(item) === "discount"
+      ? String(item.remark || "").trim() || [
+        getFeeScopeText(item) ? `默认统计范围（${getFeeScopeText(item)}）` : "",
+        discountDetailText,
+      ].filter(Boolean).join("；")
+      : getOtherFeeRuleDisplay(item, total, feeFormulaContext, items);
     addFeeRow([formatAlphaSequence(index + feeSequenceOffset), item.name || "", getFeeFormulaText(item, items, feeSequenceOffset), total, ruleText], { rowColor: item.row_color });
   });
 
@@ -1540,7 +1572,7 @@ function addCompositionTable(
       sheet.getCell(rowNumber, 1).value = row.name;
       sheet.getCell(rowNumber, 9).value = row.amount;
       styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
-        font: { name: EXPORT_FONT_NAME, size: 10, color: { argb: "344054" } },
+        font: { name: EXPORT_FONT_NAME, size: 11, color: { argb: "344054" } },
         alignment: { vertical: "middle" },
       });
       sheet.getCell(rowNumber, 1).alignment = { vertical: "middle", horizontal: "left" };
@@ -1552,7 +1584,7 @@ function addCompositionTable(
   } else {
     sheet.mergeCells(rowNumber, 1, rowNumber, EXPORT_COLUMN_COUNT);
     sheet.getCell(rowNumber, 1).value = emptyText;
-    sheet.getCell(rowNumber, 1).font = { name: EXPORT_FONT_NAME, size: 10, color: { argb: "94A3B8" } };
+    sheet.getCell(rowNumber, 1).font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "94A3B8" } };
     sheet.getCell(rowNumber, 1).alignment = { vertical: "middle", horizontal: "center" };
     for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
     sheet.getRow(rowNumber).height = 32;
@@ -1566,7 +1598,7 @@ function addCompositionTable(
   sheet.mergeCells(rowNumber, 9, rowNumber, EXPORT_COLUMN_COUNT);
   sheet.getCell(rowNumber, 9).value = total;
   styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
-    font: { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "111827" } },
+    font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
     fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_TOTAL_FILL } },
   });
   addAmountCell(sheet.getCell(rowNumber, 9), true, "DC2626");
@@ -1596,7 +1628,7 @@ function addCompositionSections(
     const cell = sheet.getCell(rowNumber, col);
     applyThinBorder(cell, EXPORT_HEADER_BORDER_COLOR);
     cell.alignment = { vertical: "middle", horizontal: [2, 10].includes(col) ? "right" : "center" };
-    cell.font = { name: EXPORT_FONT_NAME, size: col >= 9 ? 12 : 10, bold: true, color: { argb: col >= 9 ? "DC2626" : "334155" } };
+    cell.font = { name: EXPORT_FONT_NAME, size: col >= 9 ? 13 : 11, bold: true, color: { argb: col >= 9 ? "DC2626" : "334155" } };
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: col >= 9 ? EXPORT_TOTAL_FILL : EXPORT_SECTION_FILL } };
   }
   addAmountCell(sheet.getCell(rowNumber, 2), true, "111827");
@@ -1622,7 +1654,7 @@ function addSignatureSection(sheet: ExcelJS.Worksheet, startRow: number, labels:
     const cell = sheet.getCell(rowNumber, slot.start);
     const label = String(signatureLabels[index] || "").replace(/[：:]+$/g, "");
     cell.value = label ? `${label}：` : "";
-    cell.font = { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "334155" } };
+    cell.font = { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "334155" } };
     cell.alignment = { vertical: "middle", horizontal: "left", wrapText: false, shrinkToFit: true };
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF" } };
   });
@@ -1665,10 +1697,10 @@ function addAppendixNoteSection(sheet: ExcelJS.Worksheet, startRow: number, note
   sheet.getCell(rowNumber, 1).value = "附注";
   sheet.mergeCells(rowNumber, 2, rowNumber, EXPORT_COLUMN_COUNT);
   sheet.getCell(rowNumber, 2).value = content;
-  sheet.getCell(rowNumber, 1).font = { name: EXPORT_FONT_NAME, size: 10, bold: true, color: { argb: "475467" } };
+  sheet.getCell(rowNumber, 1).font = { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "475467" } };
   sheet.getCell(rowNumber, 1).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
   sheet.getCell(rowNumber, 1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_HEADER_FILL } };
-  sheet.getCell(rowNumber, 2).font = { name: EXPORT_FONT_NAME, size: 10, color: { argb: "111111" } };
+  sheet.getCell(rowNumber, 2).font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "111111" } };
   sheet.getCell(rowNumber, 2).alignment = { vertical: "middle", horizontal: "left", wrapText: true };
   sheet.getCell(rowNumber, 2).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF" } };
   sheet.getRow(rowNumber).height = getAppendixNoteRowHeight(sheet, content);
@@ -1728,7 +1760,7 @@ function addBudgetCompilationSheet(workbook: ExcelJS.Workbook, quotation: any, c
   ];
   sheet.mergeCells("A1:L1");
   sheet.getCell("A1").value = "预算编制";
-  sheet.getCell("A1").font = { name: EXPORT_FONT_NAME, size: 18, bold: true, color: { argb: "111827" } };
+  sheet.getCell("A1").font = { name: EXPORT_FONT_NAME, size: 19, bold: true, color: { argb: "111827" } };
   sheet.getCell("A1").alignment = { vertical: "middle", horizontal: "center" };
   sheet.getRow(1).height = 34;
 
@@ -1740,7 +1772,7 @@ function addBudgetCompilationSheet(workbook: ExcelJS.Workbook, quotation: any, c
     sheet.mergeCells(rowNumber, 1, rowNumber, EXPORT_COLUMN_COUNT);
     const cell = sheet.getCell(rowNumber, 1);
     cell.value = line;
-    cell.font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "111111" } };
+    cell.font = { name: EXPORT_FONT_NAME, size: 12, color: { argb: "111111" } };
     cell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFF" } };
     sheet.getRow(rowNumber).height = line ? 22 : 10;
@@ -1817,19 +1849,19 @@ function addCoverSheet(workbook: ExcelJS.Workbook, quotation: any, branchSetting
 
   sheet.mergeCells(6, 2, 6, 9);
   sheet.getCell(6, 2).value = coverCompanyName;
-  sheet.getCell(6, 2).font = { name: EXPORT_FONT_NAME, size: 24, bold: true, color: { argb: "111111" } };
+  sheet.getCell(6, 2).font = { name: EXPORT_FONT_NAME, size: 25, bold: true, color: { argb: "111111" } };
   sheet.getCell(6, 2).alignment = { vertical: "middle", horizontal: "center", wrapText: false, shrinkToFit: true };
   sheet.getRow(6).height = 40;
 
   sheet.mergeCells(9, 2, 9, 9);
   sheet.getCell(9, 2).value = buildExportTitle(quotation);
-  sheet.getCell(9, 2).font = { name: EXPORT_FONT_NAME, size: 20, bold: true, color: { argb: "111111" } };
+  sheet.getCell(9, 2).font = { name: EXPORT_FONT_NAME, size: 21, bold: true, color: { argb: "111111" } };
   sheet.getCell(9, 2).alignment = { vertical: "middle", horizontal: "center", wrapText: false, shrinkToFit: true };
   sheet.getRow(9).height = 34;
 
   sheet.mergeCells(12, 2, 12, 9);
   sheet.getCell(12, 2).value = `报价执行有效期： ${getQuotationValidityText(quotationValidUntil)}`;
-  sheet.getCell(12, 2).font = { name: EXPORT_FONT_NAME, size: 13, color: { argb: "111111" } };
+  sheet.getCell(12, 2).font = { name: EXPORT_FONT_NAME, size: 14, color: { argb: "111111" } };
   sheet.getCell(12, 2).alignment = { vertical: "middle", horizontal: "center", wrapText: false };
   sheet.getRow(12).height = 28;
 
@@ -1841,8 +1873,8 @@ function addCoverSheet(workbook: ExcelJS.Workbook, quotation: any, branchSetting
     const valueCell = sheet.getCell(rowNumber, 5);
     labelCell.value = `${label.split("").join(" ")}：`;
     valueCell.value = value;
-    labelCell.font = { name: EXPORT_FONT_NAME, size: 12, color: { argb: "111111" } };
-    valueCell.font = { name: EXPORT_FONT_NAME, size: 12, color: { argb: "111111" } };
+    labelCell.font = { name: EXPORT_FONT_NAME, size: 13, color: { argb: "111111" } };
+    valueCell.font = { name: EXPORT_FONT_NAME, size: 13, color: { argb: "111111" } };
     labelCell.alignment = { vertical: "middle", horizontal: "right", wrapText: false };
     valueCell.alignment = { vertical: "middle", horizontal: "center", wrapText: false, shrinkToFit: true };
     valueCell.border = { bottom: { style: "thin", color: { argb: "111111" } } };
@@ -1861,7 +1893,7 @@ function addCoverSheet(workbook: ExcelJS.Workbook, quotation: any, branchSetting
     sheet.addImage(imageId, { tl: { col: 4.18, row: 38.95 }, ext: { width: 122, height: 34 } });
   }
   sheet.mergeCells(40, 4, 40, 7);
-  sheet.getCell(40, 5).font = { name: EXPORT_FONT_NAME, size: 13, bold: true, color: { argb: "111111" } };
+  sheet.getCell(40, 5).font = { name: EXPORT_FONT_NAME, size: 14, bold: true, color: { argb: "111111" } };
   sheet.getCell(40, 5).alignment = { vertical: "middle", horizontal: "left", wrapText: false, shrinkToFit: true };
   sheet.getRow(40).height = 26;
   for (let col = 1; col <= 10; col += 1) {
@@ -1987,6 +2019,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   const quotationHouseArea = toNumber(quotation.customer_area_size ?? quotation.project_area);
   const formulaTableMode = rawSettings.comprehensiveFeeMode === "formula" && String(rawSettings.formulaFinalFeeItemId || "").trim();
   let discount = 0;
+  let undiscountedFormulaAmount = 0;
   let feeFormulaContext = {
     ...buildFeeFormulaContext(items, quoteCategories, quotationHouseArea),
     discountAmount: Number(rawSettings.discount || 0),
@@ -2003,7 +2036,8 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
       String(rawSettings.formulaFinalFeeItemId || "").trim(),
       undiscountedFeeFormulaContext,
     );
-    const discountRows = getDiscountRuleRows(items, rawSettings, { otherAmount: undiscountedFormulaTable.finalAmount }, quotationHouseArea);
+    undiscountedFormulaAmount = undiscountedFormulaTable.finalAmount;
+    const discountRows = getDiscountRuleRows(items, rawSettings, { otherAmount: undiscountedFormulaTable.finalAmount }, quotationHouseArea, undiscountedFormulaTable.finalAmount);
     discount = discountRows.length > 0
       ? Math.min(undiscountedFormulaTable.finalAmount, discountRows.reduce((sum, row) => roundMoney(sum + row.amount), 0))
       : Number(rawSettings.discount || quotation.discount || 0);
@@ -2021,19 +2055,25 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
       feeFormulaContext,
     )
     : null;
+  const formulaFinalAmount = formulaTable
+    ? applyQuoteDiscountToFormulaTotal(undiscountedFormulaAmount, formulaTable.finalAmount, discount)
+    : null;
   const otherFeeTotals = formulaTable
     ? formulaTable.details.map((detail) => detail.total)
     : calculateOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext);
   const otherAmount = formulaTable
-    ? formulaTable.finalAmount
+    ? formulaFinalAmount || 0
     : calculateChargeableOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
-  const discountRows = formulaTable ? [] : getDiscountRuleRows(items, rawSettings, { otherAmount }, quotationHouseArea);
+  const discountRows = formulaTable ? [] : getDiscountRuleRows(items, rawSettings, { otherAmount }, quotationHouseArea, baseAmount + materialAmount + otherAmount);
+  const displayDiscountRows = formulaTable
+    ? getDiscountRuleRows(items, rawSettings, { otherAmount: undiscountedFormulaAmount }, quotationHouseArea, undiscountedFormulaAmount)
+    : discountRows;
   discount = formulaTable ? discount : discountRows.length > 0
     ? Math.min(baseAmount + materialAmount + otherAmount, discountRows.reduce((sum, row) => roundMoney(sum + row.amount), 0))
     : Number(rawSettings.discount || quotation.discount || 0);
   const taxAmount = formulaTable ? 0 : Math.max(0, baseAmount + materialAmount + otherAmount - discount) * Number(rawSettings.taxRate || 0) / 100;
   const finalAmount = formulaTable
-    ? formulaTable.finalAmount
+    ? formulaFinalAmount || 0
     : Math.max(0, roundMoney(baseAmount + materialAmount + otherAmount + taxAmount - discount));
   const costComposition = buildCostComposition(items);
   const branchSettings = quotation.quotation_org_unit_id
@@ -2105,7 +2145,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
           : addMaterialSection(sheet, rowNumber, group.items, rawSettings.quoteSpaces, `${group.label}明细`);
       });
     if (isAllDetailScope || exportScope === "fees") {
-      rowNumber = addOtherFeeSection(sheet, rowNumber, otherItems, items, baseAmount, materialAmount, feeFormulaContext, otherFeeTotals, discount, taxAmount, finalAmount, rawSettings, quotationHouseArea);
+      rowNumber = addOtherFeeSection(sheet, rowNumber, otherItems, items, baseAmount, materialAmount, feeFormulaContext, otherFeeTotals, displayDiscountRows, discount, taxAmount, finalAmount, rawSettings, quotationHouseArea);
     }
   }
   if (outputMode !== "composition" && appendixNote && (exportScope === "all" || exportScope === "all_without_cover" || exportScope === "fees")) {

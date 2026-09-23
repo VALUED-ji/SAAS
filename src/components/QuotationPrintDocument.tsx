@@ -1,7 +1,8 @@
 "use client";
 
 import { Fragment, useEffect, useState, type ReactNode } from "react";
-import { calculateChargeableOtherFeeTotals, calculateFormulaTableTotal, calculateOtherFeeTotals, getFeeFormulaText, getFeeRuleText, toMoney, toNumber, type FeeFormulaContext } from "@/lib/quotationFeeFormulas";
+import { buildDirectFeeScopeReferences, calculateChargeableOtherFeeTotals, calculateFormulaTableTotal, calculateOtherFeeTotals, getFeeFormulaText, getFeeRuleText, getFeeScopeText, toMoney, toNumber, type FeeFormulaContext } from "@/lib/quotationFeeFormulas";
+import { applyQuoteDiscountToFormulaTotal, calculateDiscountRuleAmounts, formatDiscountRuleDetailText, getDiscountRuleValue } from "@/lib/quotationDiscountRules";
 import { getQuotationRowColor } from "@/lib/quotationRowColors";
 import { formatAlphaSequence } from "@/lib/quotationSequence";
 import { normalizeQuotationSignatureLabels } from "@/lib/quotationPrintSettings";
@@ -119,6 +120,17 @@ type Totals = {
   discount: number;
   finalAmount: number;
   feeFormulaContext: FeeFormulaContext;
+  discountRows?: Array<{
+    id: string;
+    label: string;
+    formula: string;
+    ruleText: string;
+    amount: number;
+    scopeLabel: string;
+    mode: "amount" | "rate";
+    rate?: number;
+    discount?: number;
+  }>;
 };
 
 type AppendixNotePart = {
@@ -128,6 +140,7 @@ type AppendixNotePart = {
 
 type DiscountRule = {
   id: string;
+  name?: string;
   type: "fee" | "space" | "work_type";
   mode: "amount" | "rate";
   scope?: string;
@@ -421,6 +434,7 @@ function getLegacyDiscountRule(settings?: PrintableQuotationSettings): DiscountR
   const type = settings?.discountType === "space" || settings?.discountType === "work_type" ? settings.discountType : "fee";
   return {
     id: "legacy",
+    name: "优惠",
     type,
     mode: settings?.discountMode === "rate" ? "rate" : "amount",
     scope: settings?.discountScope || "total",
@@ -437,6 +451,7 @@ function getDiscountRules(settings?: PrintableQuotationSettings): DiscountRule[]
   const rules = rawRules
     .map((rule, index): DiscountRule => ({
       id: String(rule?.id || `rule_${index}`),
+      name: String(rule?.name || "").trim() || `优惠${index + 1}`,
       type: rule?.type === "space" || rule?.type === "work_type" ? rule.type : "fee",
       mode: rule?.mode === "rate" ? "rate" : "amount",
       scope: String(rule?.scope || "total"),
@@ -449,12 +464,6 @@ function getDiscountRules(settings?: PrintableQuotationSettings): DiscountRule[]
   if (hasRuleList) return rules;
   const legacyRule = getLegacyDiscountRule(settings);
   return legacyRule ? [legacyRule] : [];
-}
-
-function getDiscountRuleValue(rule: DiscountRule) {
-  if (rule.type === "space") return rule.space ? `space:${rule.space}` : "";
-  if (rule.type === "work_type") return rule.workType ? `work_type:${rule.workType}` : "";
-  return rule.scope || "total";
 }
 
 function isRemovedOtherFeeDiscountScope(value: string) {
@@ -476,22 +485,21 @@ function getDiscountRuleScope(rule: DiscountRule, items: PrintableQuotationItem[
     || options[0];
 }
 
-function getDiscountRuleAmount(rule: DiscountRule, items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }, houseArea = 0) {
-  const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
-  const scopeAmount = Math.max(0, toNumber(scope?.amount));
-  const excludedAmount = Math.min(scopeAmount, Math.max(0, toNumber(settings?.excludeSpecificDiscountAmount)));
-  const baseAmount = Math.max(0, scopeAmount - excludedAmount);
-  if (baseAmount <= 0) return 0;
-  if (rule.mode === "rate") return toMoney(baseAmount * (1 - Math.min(1, Math.max(0, toNumber(rule.rate || 1)))));
-  return toMoney(Math.min(Math.max(0, toNumber(rule.discount)), baseAmount));
-}
-
-function getDiscountRuleRows(items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }, houseArea = 0) {
-  return getDiscountRules(settings)
+function getDiscountRuleRows(items: PrintableQuotationItem[], settings: PrintableQuotationSettings | undefined, totals: { otherAmount: number }, houseArea = 0, totalCap = Number.MAX_SAFE_INTEGER) {
+  const rules = getDiscountRules(settings);
+  const amounts = calculateDiscountRuleAmounts(rules, (rule) => {
+    const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
+    return Math.max(0, toNumber(scope?.amount));
+  }, {
+    excludedAmount: settings?.excludeSpecificDiscountAmount,
+    totalCap,
+  });
+  return rules
     .map((rule) => {
       const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
-      const amount = getDiscountRuleAmount(rule, items, settings, totals, houseArea);
-      const label = scope?.label || (rule.type === "space" ? rule.space : rule.type === "work_type" ? rule.workType : getDiscountScopeLabelByValue(rule.scope || "total")) || "优惠对象";
+      const amount = toNumber(amounts.get(rule.id));
+      const scopeLabel = scope?.label || (rule.type === "space" ? rule.space : rule.type === "work_type" ? rule.workType : getDiscountScopeLabelByValue(rule.scope || "total")) || "优惠对象";
+      const label = String(rule.name || "").trim() || scopeLabel;
       const rateText = `${(toNumber(rule.rate || 1) * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
       const discountRateText = `${((1 - toNumber(rule.rate || 1)) * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
       return {
@@ -499,9 +507,13 @@ function getDiscountRuleRows(items: PrintableQuotationItem[], settings: Printabl
         label,
         formula: rule.mode === "rate" ? `${label} × ${rateText}` : `${label}优惠`,
         ruleText: rule.mode === "rate"
-          ? `${label}按${rateText}折扣系数计算，折扣优惠金额 ${formatPrintAmount(amount)}（${formatPrintAmount(toNumber(scope?.amount))} × ${discountRateText}）`
-          : `${label}直接优惠金额 ${formatPrintAmount(amount)}`,
+          ? `${label}按${scopeLabel}的${rateText}折扣系数计算，折扣优惠金额 ${formatPrintAmount(amount)}（${formatPrintAmount(toNumber(scope?.amount))} × ${discountRateText}）`
+          : `${label}基于${scopeLabel}直接优惠金额 ${formatPrintAmount(amount)}`,
         amount,
+        scopeLabel,
+        mode: rule.mode,
+        rate: rule.rate,
+        discount: rule.discount,
       };
     })
     .filter((row) => row.amount > 0);
@@ -555,6 +567,16 @@ function buildFeeFormulaContext(items: PrintableQuotationItem[], categories: str
   });
 
   const customCategoryAmount = Object.values(categoryAmounts).reduce((sum, amount) => sum + toNumber(amount), 0);
+  const directItems = items
+    .filter((item) => !isOtherCategory(item.category))
+    .map((item) => ({
+      category: getCategoryKey(item.category),
+      categoryLabel: getCategoryLabel(item.category),
+      space: inferItemSpace(item),
+      total: getItemTotal(item),
+      laborAmount: getItemLaborSubtotal(item),
+      materialCostAmount: getItemMaterialSubtotal(item),
+    }));
   return {
     houseArea,
     mainMaterialAmount,
@@ -562,16 +584,8 @@ function buildFeeFormulaContext(items: PrintableQuotationItem[], categories: str
     laborAmount,
     materialCostAmount,
     categoryAmounts,
-    directItems: items
-      .filter((item) => !isOtherCategory(item.category))
-      .map((item) => ({
-        category: getCategoryKey(item.category),
-        categoryLabel: getCategoryLabel(item.category),
-        space: inferItemSpace(item),
-        total: getItemTotal(item),
-        laborAmount: getItemLaborSubtotal(item),
-        materialCostAmount: getItemMaterialSubtotal(item),
-      })),
+    directItems,
+    scopeReferences: buildDirectFeeScopeReferences(directItems),
   };
 }
 
@@ -583,10 +597,15 @@ function shouldShowAutoOtherFeeRule(item: PrintableQuotationItem) {
 function getOtherFeeRuleDisplay(item: PrintableQuotationItem, total: number, context?: FeeFormulaContext, items?: PrintableQuotationItem[]) {
   const remark = String(item.remark || "").trim();
   if (remark) return remark;
-  if (!shouldShowAutoOtherFeeRule(item)) return remark;
-
+  const scopeText = getFeeScopeText(item);
+  const scopeRule = scopeText ? `默认统计范围（${scopeText}）` : "";
+  if (!shouldShowAutoOtherFeeRule(item)) return scopeRule;
   const rule = getFeeRuleText(item, total, { currencySymbol: false, useGrouping: false, includeMethodLabel: false }, context, items);
-  return rule;
+  return [scopeRule, rule].filter(Boolean).join("；");
+}
+
+function getPrintableFeeValueSource(item: PrintableQuotationItem) {
+  return String(item.cost_source || "").match(/^fee_source:(.+)$/)?.[1]?.trim() || "";
 }
 
 function calculateQuotationTotals(items: PrintableQuotationItem[], settings?: PrintableQuotationSettings, houseArea = 0): Totals {
@@ -608,7 +627,7 @@ function calculateQuotationTotals(items: PrintableQuotationItem[], settings?: Pr
       String(settings?.formulaFinalFeeItemId || "").trim(),
       undiscountedFeeFormulaContext,
     );
-    const discountRuleRows = getDiscountRuleRows(items, settings, { otherAmount: undiscountedFormulaTable.finalAmount }, houseArea);
+    const discountRuleRows = getDiscountRuleRows(items, settings, { otherAmount: undiscountedFormulaTable.finalAmount }, houseArea, undiscountedFormulaTable.finalAmount);
     const ruleDiscount = discountRuleRows.reduce((sum, row) => toMoney(sum + row.amount), 0);
     const discount = Math.min(undiscountedFormulaTable.finalAmount, Math.max(0, discountRuleRows.length > 0 ? ruleDiscount : toNumber(settings?.discount)));
     const feeFormulaContext = {
@@ -622,18 +641,24 @@ function calculateQuotationTotals(items: PrintableQuotationItem[], settings?: Pr
       String(settings?.formulaFinalFeeItemId || "").trim(),
       feeFormulaContext,
     );
+    const finalAmount = applyQuoteDiscountToFormulaTotal(
+      undiscountedFormulaTable.finalAmount,
+      formulaTable.finalAmount,
+      discount,
+    );
     return {
       baseAmount,
       materialAmount,
       mainMaterialAmount,
       customCategoryAmount,
-      otherAmount: formulaTable.finalAmount,
-      directAmount: formulaTable.finalAmount,
+      otherAmount: finalAmount,
+      directAmount: finalAmount,
       managementFee: 0,
       taxAmount: 0,
       discount,
-      finalAmount: formulaTable.finalAmount,
+      finalAmount,
       feeFormulaContext,
+      discountRows: discountRuleRows,
     };
   }
   const feeFormulaContext = {
@@ -643,12 +668,12 @@ function calculateQuotationTotals(items: PrintableQuotationItem[], settings?: Pr
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, materialAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
   const directAmount = baseAmount + materialAmount + otherAmount;
   const managementFee = 0;
-  const discountRuleRows = getDiscountRuleRows(items, settings, { otherAmount }, houseArea);
+  const discountRuleRows = getDiscountRuleRows(items, settings, { otherAmount }, houseArea, directAmount);
   const ruleDiscount = discountRuleRows.reduce((sum, row) => toMoney(sum + row.amount), 0);
   const discount = Math.min(directAmount, Math.max(0, discountRuleRows.length > 0 ? ruleDiscount : toNumber(settings?.discount)));
   const taxAmount = Math.max(0, directAmount - discount) * toNumber(settings?.taxRate) / 100;
   const finalAmount = Math.max(0, directAmount + taxAmount - discount);
-  return { baseAmount, materialAmount, mainMaterialAmount, customCategoryAmount, otherAmount, directAmount, managementFee, taxAmount, discount, finalAmount, feeFormulaContext };
+  return { baseAmount, materialAmount, mainMaterialAmount, customCategoryAmount, otherAmount, directAmount, managementFee, taxAmount, discount, finalAmount, feeFormulaContext, discountRows: discountRuleRows };
 }
 
 function groupItemsBySpace(items: PrintableQuotationItem[], settings?: PrintableQuotationSettings) {
@@ -1230,9 +1255,15 @@ function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQu
   const columnWidths = getBaseColumnWidthMap(columns);
 
   return (
-	    <table className="quotation-print-table quotation-print-base-table">
+	    <table className={`quotation-print-table quotation-print-base-table ${columnOptions.description ? "quotation-print-base-table-with-description" : ""}`}>
         <colgroup>
-          {columns.map((column) => <col key={column.key} style={{ width: `${columnWidths[column.key]}%` }} />)}
+          {columns.map((column) => (
+            <col
+              key={column.key}
+              className={`quotation-print-base-col-${column.key}`}
+              style={{ width: `${columnWidths[column.key]}%` }}
+            />
+          ))}
         </colgroup>
 	      <thead>
 	        <tr>
@@ -1502,7 +1533,7 @@ function OtherFeesTable({ items, allItems, totals, settings, houseArea = 0 }: { 
   const feeSequenceOffset = formulaTableMode ? 0 : 1;
   const otherAmount = formulaTableMode ? totals.finalAmount : otherFeeTotals.reduce((sum, amount) => toMoney(sum + amount), 0);
   const hasDiscount = !formulaTableMode && totals.discount > 0;
-  const discountRows = formulaTableMode ? [] : getDiscountRuleRows(allItems, settings, { otherAmount }, houseArea);
+  const discountRows = formulaTableMode ? [] : getDiscountRuleRows(allItems, settings, { otherAmount }, houseArea, totals.directAmount);
   const fallbackDiscountRows = hasDiscount && discountRows.length === 0
     ? [{
         id: "legacy",
@@ -1512,6 +1543,18 @@ function OtherFeesTable({ items, allItems, totals, settings, houseArea = 0 }: { 
         amount: totals.discount,
       }]
     : discountRows;
+  const discountDetailText = totals.discountRows?.length
+    ? formatDiscountRuleDetailText(totals.discountRows.map((row) => ({
+      name: row.label,
+      scopeLabel: row.scopeLabel,
+      mode: row.mode,
+      rate: row.rate,
+      discount: row.discount,
+      amount: row.amount,
+    })), totals.discount)
+    : totals.discount > 0
+      ? `报价优惠：${formatPrintAmount(totals.discount)}`
+      : "";
   const finalSequenceIndex = items.length + fallbackDiscountRows.length + 1;
   const finalFormulaParts = ["工程直接费"];
   const finalRuleParts = [`工程直接费 ${formatPrintAmount(engineeringDirectAmount)}`];
@@ -1570,7 +1613,14 @@ function OtherFeesTable({ items, allItems, totals, settings, houseArea = 0 }: { 
                 <td className="text-right font-semibold text-surface-950">
                   {formatPrintAmount(otherFeeTotals[index] || 0)}
                 </td>
-                <td className="quotation-print-rule-cell leading-relaxed text-surface-600">{getOtherFeeRuleDisplay(item, otherFeeTotals[index] || 0, totals.feeFormulaContext, items)}</td>
+                <td className="quotation-print-rule-cell leading-relaxed text-surface-600">
+                  {getPrintableFeeValueSource(item) === "discount"
+                    ? String(item.remark || "").trim() || [
+                      getFeeScopeText(item) ? `默认统计范围（${getFeeScopeText(item)}）` : "",
+                      discountDetailText,
+                    ].filter(Boolean).join("；")
+                    : getOtherFeeRuleDisplay(item, otherFeeTotals[index] || 0, totals.feeFormulaContext, items)}
+                </td>
               </tr>
             );
           })}
@@ -2924,6 +2974,12 @@ export function QuotationPrintDocument({
             border: 0 !important;
             border-radius: 0 !important;
             box-shadow: none !important;
+          }
+          .quotation-print-base-table-with-description col.quotation-print-base-col-name {
+            width: 15.75% !important;
+          }
+          .quotation-print-base-table-with-description col.quotation-print-base-col-description {
+            width: 32.75% !important;
           }
           .quotation-print-cover-page {
             width: 100% !important;

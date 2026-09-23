@@ -16,6 +16,7 @@ import {
   toMoney,
   type FeeFormulaContext,
 } from "@/lib/quotationFeeFormulas";
+import { applyQuoteDiscountToFormulaTotal, calculateDiscountRulesTotal, getDiscountRuleValue, type DiscountCalculationRule } from "@/lib/quotationDiscountRules";
 import { quotationRowColors } from "@/lib/quotationRowColors";
 import { getBranchSettingsForCustomer, getBranchSettingsForOrgUnit } from "@/lib/branchSettingsLookup";
 import { normalizeQuotationSignatureLabels } from "@/lib/quotationPrintSettings";
@@ -77,6 +78,7 @@ type ItemInput = {
 
 type DiscountRule = {
   id: string;
+  name?: string;
   type: "fee" | "space" | "work_type";
   mode: "amount" | "rate";
   scope?: string;
@@ -815,6 +817,7 @@ function getLegacyDiscountRule(settings: any): DiscountRule | null {
   const type = settings?.discountType === "space" || settings?.discountType === "work_type" ? settings.discountType : "fee";
   return {
     id: "legacy",
+    name: "优惠",
     type,
     mode: settings?.discountMode === "rate" ? "rate" : "amount",
     scope: settings?.discountScope || "total",
@@ -831,6 +834,7 @@ function normalizeDiscountRules(settings: any): DiscountRule[] {
   const rules = rawRules
     .map((rule: any, index: number) => ({
       id: String(rule?.id || `rule_${index}`),
+      name: String(rule?.name || "").trim() || `优惠${index + 1}`,
       type: rule?.type === "space" || rule?.type === "work_type" ? rule.type : "fee",
       mode: rule?.mode === "rate" ? "rate" : "amount",
       scope: String(rule?.scope || "total"),
@@ -843,12 +847,6 @@ function normalizeDiscountRules(settings: any): DiscountRule[] {
   if (hasRuleList) return rules;
   const legacyRule = getLegacyDiscountRule(settings);
   return legacyRule ? [legacyRule] : [];
-}
-
-function getDiscountRuleValue(rule: DiscountRule) {
-  if (rule.type === "space") return rule.space ? `space:${rule.space}` : "";
-  if (rule.type === "work_type") return rule.workType ? `work_type:${rule.workType}` : "";
-  return rule.scope || "total";
 }
 
 function isRemovedOtherFeeDiscountScope(value: string) {
@@ -870,14 +868,14 @@ function getDiscountRuleScope(rule: DiscountRule, items: any[], settings: any, t
     || options[0];
 }
 
-function getDiscountRuleAmount(rule: DiscountRule, items: any[], settings: any, totals: { otherAmount: number }, houseArea = 0) {
-  const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
-  const scopeAmount = Math.max(0, Number(scope?.amount || 0));
-  const excludedAmount = Math.min(scopeAmount, safeNonNegativeNumber(settings?.excludeSpecificDiscountAmount));
-  const baseAmount = Math.max(0, scopeAmount - excludedAmount);
-  if (baseAmount <= 0) return 0;
-  if (rule.mode === "rate") return roundMoney(baseAmount * (1 - Math.min(1, Math.max(0, Number(rule.rate || 1)))));
-  return roundMoney(Math.min(safeNonNegativeNumber(rule.discount), baseAmount));
+function getDiscountRulesAmount(rules: DiscountRule[], items: any[], settings: any, totals: { otherAmount: number; directAmount?: number }, houseArea = 0) {
+  return calculateDiscountRulesTotal(rules as DiscountCalculationRule[], (rule) => {
+    const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
+    return Math.max(0, Number(scope?.amount || 0));
+  }, {
+    excludedAmount: settings?.excludeSpecificDiscountAmount,
+    totalCap: totals.directAmount,
+  });
 }
 
 function buildFeeFormulaContext(items: any[], categories: string[] = [], houseArea = 0): FeeFormulaContext {
@@ -1003,10 +1001,10 @@ function calculate(items: any[], settings: any, houseArea = 0) {
       undiscountedFeeFormulaContext,
     );
     const discountRules = normalizeDiscountRules(settings);
-    const ruleDiscount = discountRules.reduce(
-      (sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, { otherAmount: undiscountedFormulaTable.finalAmount }, houseArea)),
-      0,
-    );
+    const ruleDiscount = getDiscountRulesAmount(discountRules, items, settings, {
+      otherAmount: undiscountedFormulaTable.finalAmount,
+      directAmount: undiscountedFormulaTable.finalAmount,
+    }, houseArea);
     const discount = Math.min(undiscountedFormulaTable.finalAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : Number(settings.discount || 0)));
     const feeFormulaContext = {
       ...buildFeeFormulaContext(items, settings.quoteCategories, houseArea),
@@ -1019,17 +1017,22 @@ function calculate(items: any[], settings: any, houseArea = 0) {
       String(settings.formulaFinalFeeItemId || "").trim(),
       feeFormulaContext,
     );
+    const finalAmount = applyQuoteDiscountToFormulaTotal(
+      undiscountedFormulaTable.finalAmount,
+      formulaTable.finalAmount,
+      discount,
+    );
     return {
       baseAmount,
       materialAmount: directBaseAmount,
       mainMaterialAmount: materialAmount,
       customCategoryAmount,
-      otherAmount: formulaTable.finalAmount,
-      directAmount: formulaTable.finalAmount,
+      otherAmount: finalAmount,
+      directAmount: finalAmount,
       managementFee: 0,
       taxAmount: 0,
       discount,
-      finalAmount: formulaTable.finalAmount,
+      finalAmount,
     };
   }
   const feeFormulaContext = {
@@ -1039,9 +1042,9 @@ function calculate(items: any[], settings: any, houseArea = 0) {
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, directBaseAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
   const directAmount = baseAmount + directBaseAmount + otherAmount;
   const taxRate = Number(settings.taxRate || 0);
-  const rawTotals = { otherAmount };
+  const rawTotals = { otherAmount, directAmount };
   const discountRules = normalizeDiscountRules(settings);
-  const ruleDiscount = discountRules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, rawTotals, houseArea)), 0);
+  const ruleDiscount = getDiscountRulesAmount(discountRules, items, settings, rawTotals, houseArea);
   const discount = Math.min(directAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : Number(settings.discount || 0)));
   const managementFee = 0;
   const taxableAmount = Math.max(0, directAmount - discount);
@@ -1336,8 +1339,10 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   const readonlyMessage = recipientReadonly
     ? "该报价单由他人发送给你，仅支持查看、打印和导出，不能修改报价内容。"
     : getQuotationContentLockMessage(contentLockReason);
+  const resolvedDiscount = quotation.discount ?? migration.settings.discount;
   const settings = {
     ...migration.settings,
+    discount: safeNonNegativeNumber(resolvedDiscount),
     signatureLabels: normalizeQuotationSignatureLabels(branchSettings.settings.printSettings.quotationSignatureLabels),
   };
   return NextResponse.json({
@@ -1348,7 +1353,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
     branch_company_phone: branchSettings.settings.basicInfo.contactPhone || "",
     settings,
     items,
-    totals: calculate(items, { ...settings, discount: quotation.discount ?? settings.discount }, quotationHouseArea),
+    totals: calculate(items, settings, quotationHouseArea),
     legacyManagementFeeMigrated: migration.migrated,
     readonly: recipientReadonly || Boolean(contentLockReason),
     readonlyReason: recipientReadonly ? "recipient" : contentLockReason || "",

@@ -4,7 +4,7 @@
 "use client";
 
 import { useMemo, useState, type DragEvent } from "react";
-import { ChevronRight, Edit3, GripVertical, Plus, Power, Search, Trash2, X } from "lucide-react";
+import { ArrowRightLeft, ChevronRight, Edit3, GitMerge, GripVertical, Plus, Power, Search, Trash2, X } from "lucide-react";
 import NativeImage from "@/components/ui/NativeImage";
 import { formatUserRoleLabel } from "@/lib/userRoleLabels";
 export interface OrgUnit {
@@ -22,6 +22,9 @@ export interface OrgUnit {
   managers?: UserOption[];
   is_active?: number;
   customer_count?: number;
+  created_at?: string;
+  duplicate_group_size?: number;
+  is_duplicate?: boolean;
 }
 export interface UserOption { id: string; name: string; avatar?: string | null; role: string; role_name?: string | null; org_unit_id?: string | null; org_unit_name?: string; phone?: string | null; is_active?: number; }
 
@@ -226,11 +229,15 @@ export function EnhancedOrgNode({
   dropTarget,
   moveFeedbackId,
   moveFeedbackToken,
+  memberStats,
   onSelect,
   onToggle,
   onAdd,
   onEdit,
   onDelete,
+  onToggleActive,
+  onMerge,
+  onGeneralMerge,
   onDragStartNode,
   onDragOverNode,
   onDragLeaveNode,
@@ -248,11 +255,20 @@ export function EnhancedOrgNode({
   dropTarget: { id: string; position: "before" | "after" } | null;
   moveFeedbackId: string;
   moveFeedbackToken: number;
+  memberStats: {
+    direct: Map<string, number>;
+    total: Map<string, number>;
+    descendants: Map<string, number>;
+    totalCustomers: Map<string, number>;
+  };
   onSelect: (id: string) => void;
   onToggle: (id: string) => void;
   onAdd: (p: string, t: string) => void;
   onEdit: (n: OrgUnit) => void;
   onDelete: (node: OrgUnit) => void;
+  onToggleActive: (node: OrgUnit) => void;
+  onMerge: (node: OrgUnit) => void;
+  onGeneralMerge: (node: OrgUnit) => void;
   onDragStartNode: (event: DragEvent<HTMLSpanElement>, id: string) => void;
   onDragOverNode: (event: DragEvent<HTMLDivElement>, id: string) => void;
   onDragLeaveNode: (id: string) => void;
@@ -270,6 +286,10 @@ export function EnhancedOrgNode({
   const nodeCanReorder = canReorder && reorderableIds.has(node.id);
   const currentNodeDropTarget = dropTarget?.id === node.id ? dropTarget : null;
   const currentNodeMoveFeedbackToken = moveFeedbackId === node.id ? moveFeedbackToken : 0;
+  const directMemberCount = memberStats.direct.get(node.id) || 0;
+  const totalMemberCount = memberStats.total.get(node.id) || 0;
+  const totalDescendantCount = memberStats.descendants.get(node.id) || 0;
+  const totalCustomerCount = memberStats.totalCustomers.get(node.id) || 0;
 
   return (
     <div className="org-tree-node">
@@ -340,11 +360,18 @@ export function EnhancedOrgNode({
               {searchQuery ? highlightText(node.name, searchQuery) : node.name}
             </span>
             <span className="shrink-0 rounded border border-surface-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-surface-600">{meta.label}</span>
+            {node.is_duplicate && (
+              <span className="shrink-0 rounded border border-red-200 bg-red-50 px-1.5 py-0.5 text-[11px] font-semibold text-red-700">
+                重复 {node.duplicate_group_size || 2}
+              </span>
+            )}
             {!active && <StatusPill active={false} compact />}
           </div>
-          <div className="mt-1 flex min-w-0 items-center gap-3 text-xs text-surface-500">
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-surface-500">
             <span className="truncate">管理人员：{managerName || "未设置"}</span>
-            <span className="shrink-0">下级：{node.children?.length || 0}</span>
+            <span className="shrink-0">下级：{node.children?.length || 0} / {totalDescendantCount}</span>
+            <span className="shrink-0">成员：{directMemberCount} / {totalMemberCount}</span>
+            <span className="shrink-0">客户：{Number(node.customer_count || 0)} / {totalCustomerCount}</span>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -377,6 +404,35 @@ export function EnhancedOrgNode({
           >
             <Edit3 className="h-4 w-4" />
           </button>
+          {node.is_duplicate && (
+            <button
+              type="button"
+              onClick={(event) => { event.stopPropagation(); onMerge(node); }}
+              className={`${iconButtonClass} hover:bg-red-50 hover:text-red-700`}
+              aria-label="合并重复组织"
+              title="合并重复组织"
+            >
+              <GitMerge className="h-4 w-4" />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); onGeneralMerge(node); }}
+            className={`${iconButtonClass} hover:bg-primary-50 hover:text-primary-700`}
+            aria-label="合并到其他组织"
+            title="合并到其他组织"
+          >
+            <ArrowRightLeft className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); onToggleActive(node); }}
+            className={`${iconButtonClass} ${active ? "hover:bg-amber-50 hover:text-amber-700" : "hover:bg-primary-50 hover:text-primary-700"}`}
+            aria-label={active ? "停用组织" : "启用组织"}
+            title={active ? "停用组织" : "启用组织"}
+          >
+            <Power className="h-4 w-4" />
+          </button>
           <button
             type="button"
             onClick={(event) => { event.stopPropagation(); onDelete(node); }}
@@ -408,12 +464,16 @@ export function EnhancedOrgNode({
                 onAdd={onAdd}
                 onEdit={onEdit}
                 onDelete={onDelete}
+                onToggleActive={onToggleActive}
+                onMerge={onMerge}
+                onGeneralMerge={onGeneralMerge}
                 canReorder={canReorder}
                 reorderableIds={reorderableIds}
                 draggedId={draggedId}
                 dropTarget={dropTarget}
                 moveFeedbackId={moveFeedbackId}
                 moveFeedbackToken={moveFeedbackToken}
+                memberStats={memberStats}
                 onDragStartNode={onDragStartNode}
                 onDragOverNode={onDragOverNode}
                 onDragLeaveNode={onDragLeaveNode}

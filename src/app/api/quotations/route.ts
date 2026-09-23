@@ -18,6 +18,7 @@ import {
   toMoney,
   type FeeFormulaContext,
 } from "@/lib/quotationFeeFormulas";
+import { applyQuoteDiscountToFormulaTotal, calculateDiscountRulesTotal, getDiscountRuleValue, type DiscountCalculationRule } from "@/lib/quotationDiscountRules";
 import { calculatePackageQuotePrice, formatPricingAmount, toPricingAmount } from "@/lib/quotaTemplatePricing";
 import {
   applyQuotationQuantityLinks,
@@ -42,6 +43,7 @@ import {
 
 type DiscountRule = {
   id: string;
+  name?: string;
   type: "fee" | "space" | "work_type";
   mode: "amount" | "rate";
   scope?: string;
@@ -468,6 +470,7 @@ function getLegacyDiscountRule(settings: any): DiscountRule | null {
   const type = settings?.discountType === "space" || settings?.discountType === "work_type" ? settings.discountType : "fee";
   return {
     id: "legacy",
+    name: "优惠",
     type,
     mode: settings?.discountMode === "rate" ? "rate" : "amount",
     scope: settings?.discountScope || "total",
@@ -484,6 +487,7 @@ function normalizeDiscountRules(settings: any): DiscountRule[] {
   const rules = rawRules
     .map((rule: any, index: number) => ({
       id: String(rule?.id || `rule_${index}`),
+      name: String(rule?.name || "").trim() || `优惠${index + 1}`,
       type: rule?.type === "space" || rule?.type === "work_type" ? rule.type : "fee",
       mode: rule?.mode === "rate" ? "rate" : "amount",
       scope: String(rule?.scope || "total"),
@@ -496,12 +500,6 @@ function normalizeDiscountRules(settings: any): DiscountRule[] {
   if (hasRuleList) return rules;
   const legacyRule = getLegacyDiscountRule(settings);
   return legacyRule ? [legacyRule] : [];
-}
-
-function getDiscountRuleValue(rule: DiscountRule) {
-  if (rule.type === "space") return rule.space ? `space:${rule.space}` : "";
-  if (rule.type === "work_type") return rule.workType ? `work_type:${rule.workType}` : "";
-  return rule.scope || "total";
 }
 
 function isRemovedOtherFeeDiscountScope(value: string) {
@@ -523,14 +521,14 @@ function getDiscountRuleScope(rule: DiscountRule, items: any[], settings: any, t
     || options[0];
 }
 
-function getDiscountRuleAmount(rule: DiscountRule, items: any[], settings: any, totals: { otherAmount: number }, houseArea = 0) {
-  const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
-  const scopeAmount = Math.max(0, Number(scope?.amount || 0));
-  const excludedAmount = Math.min(scopeAmount, safeNonNegativeNumber(settings?.excludeSpecificDiscountAmount));
-  const baseAmount = Math.max(0, scopeAmount - excludedAmount);
-  if (baseAmount <= 0) return 0;
-  if (rule.mode === "rate") return roundMoney(baseAmount * (1 - Math.min(1, Math.max(0, Number(rule.rate || 1)))));
-  return roundMoney(Math.min(safeNonNegativeNumber(rule.discount), baseAmount));
+function getDiscountRulesAmount(rules: DiscountRule[], items: any[], settings: any, totals: { otherAmount: number; directAmount?: number }, houseArea = 0) {
+  return calculateDiscountRulesTotal(rules as DiscountCalculationRule[], (rule) => {
+    const scope = getDiscountRuleScope(rule, items, settings, totals, houseArea);
+    return Math.max(0, Number(scope?.amount || 0));
+  }, {
+    excludedAmount: settings?.excludeSpecificDiscountAmount,
+    totalCap: totals.directAmount,
+  });
 }
 
 function calculate(items: any[], settings: any, houseArea = 0) {
@@ -552,10 +550,10 @@ function calculate(items: any[], settings: any, houseArea = 0) {
       undiscountedFeeFormulaContext,
     );
     const discountRules = normalizeDiscountRules(settings);
-    const ruleDiscount = discountRules.reduce(
-      (sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, { otherAmount: undiscountedFormulaTable.finalAmount }, houseArea)),
-      0,
-    );
+    const ruleDiscount = getDiscountRulesAmount(discountRules, items, settings, {
+      otherAmount: undiscountedFormulaTable.finalAmount,
+      directAmount: undiscountedFormulaTable.finalAmount,
+    }, houseArea);
     const discount = Math.min(undiscountedFormulaTable.finalAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : Number(settings.discount || 0)));
     const feeFormulaContext = {
       ...buildFeeFormulaContext(items, settings.quoteCategories, houseArea),
@@ -568,17 +566,22 @@ function calculate(items: any[], settings: any, houseArea = 0) {
       String(settings.formulaFinalFeeItemId || "").trim(),
       feeFormulaContext,
     );
+    const finalAmount = applyQuoteDiscountToFormulaTotal(
+      undiscountedFormulaTable.finalAmount,
+      formulaTable.finalAmount,
+      discount,
+    );
     return {
       baseAmount,
       materialAmount: directBaseAmount,
       mainMaterialAmount: materialAmount,
       customCategoryAmount,
-      otherAmount: formulaTable.finalAmount,
-      directAmount: formulaTable.finalAmount,
+      otherAmount: finalAmount,
+      directAmount: finalAmount,
       managementFee: 0,
       taxAmount: 0,
       discount,
-      finalAmount: formulaTable.finalAmount,
+      finalAmount,
     };
   }
   const feeFormulaContext = {
@@ -588,9 +591,9 @@ function calculate(items: any[], settings: any, houseArea = 0) {
   const otherAmount = calculateChargeableOtherFeeTotals(otherItems, baseAmount, directBaseAmount, feeFormulaContext).reduce((sum, amount) => sum + amount, 0);
   const directAmount = baseAmount + directBaseAmount + otherAmount;
   const taxRate = Number(settings.taxRate || 0);
-  const rawTotals = { otherAmount };
+  const rawTotals = { otherAmount, directAmount };
   const discountRules = normalizeDiscountRules(settings);
-  const ruleDiscount = discountRules.reduce((sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, rawTotals, houseArea)), 0);
+  const ruleDiscount = getDiscountRulesAmount(discountRules, items, settings, rawTotals, houseArea);
   const discount = Math.min(directAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : Number(settings.discount || 0)));
   const taxableAmount = Math.max(0, directAmount - discount);
   const taxAmount = Math.round(taxableAmount * taxRate) / 100;
@@ -635,22 +638,27 @@ function calculateQuotationRecordCostSummary(items: any[], settingsValue: unknow
       undiscountedFeeFormulaContext,
     );
     const discountRules = normalizeDiscountRules(settings);
-    const ruleDiscount = discountRules.reduce(
-      (sum, rule) => toMoney(sum + getDiscountRuleAmount(rule, items, settings, { otherAmount: undiscountedFormulaTable.finalAmount }, houseArea)),
-      0,
-    );
+    const ruleDiscount = getDiscountRulesAmount(discountRules, items, settings, {
+      otherAmount: undiscountedFormulaTable.finalAmount,
+      directAmount: undiscountedFormulaTable.finalAmount,
+    }, houseArea);
     discountAmount = Math.min(undiscountedFormulaTable.finalAmount, Math.max(0, discountRules.length > 0 ? ruleDiscount : discountAmount));
     const feeFormulaContext = {
       ...buildFeeFormulaContext(items, quoteCategories, houseArea),
       discountAmount,
     };
-    otherAmount = calculateFormulaTableTotal(
+    const formulaTable = calculateFormulaTableTotal(
       otherItems,
       baseAmount,
       directBaseAmount,
       String(settings.formulaFinalFeeItemId || "").trim(),
       feeFormulaContext,
-    ).finalAmount;
+    );
+    otherAmount = applyQuoteDiscountToFormulaTotal(
+      undiscountedFormulaTable.finalAmount,
+      formulaTable.finalAmount,
+      discountAmount,
+    );
   } else {
     const feeFormulaContext = {
       ...buildFeeFormulaContext(items, quoteCategories, houseArea),
@@ -937,10 +945,12 @@ export async function GET(req: NextRequest) {
       c.building_no as customer_building_no, c.unit_no as customer_unit_no,
       c.room_no as customer_room_no, c.no_room_number as customer_no_room_number,
       c.decoration_type as customer_decoration_type,
-      COALESCE(c.area_size, q.temp_customer_area) as customer_area_size
+      COALESCE(c.area_size, q.temp_customer_area) as customer_area_size,
+      creator.name as creator_name
     FROM quotations q
     LEFT JOIN projects p ON q.project_id = p.id
     LEFT JOIN customers c ON p.customer_id = c.id
+    LEFT JOIN users creator ON creator.id = q.created_by_id
     LEFT JOIN org_units store_org
       ON store_org.company_id = q.company_id
       AND store_org.deleted_at IS NULL

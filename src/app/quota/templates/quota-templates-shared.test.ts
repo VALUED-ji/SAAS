@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { calculateFormulaTableTotal } from "@/lib/quotationFeeFormulas";
 import { formatQuotationQuantityFormulaRows } from "@/lib/quotationQuantityLinks";
 import {
   applyTemplateSpaceQuantityLinks,
+  convertComprehensiveFeesToFormulaMode,
+  findDuplicateDiscountFee,
   getTemplateFeeRulePreview,
   makeEmptyTemplate,
   makeSpaceCopy,
@@ -73,7 +76,7 @@ describe("quota template quantity presets", () => {
     ]);
 
     expect(fixedFee).toMatchObject({
-      valueSource: "fixed",
+      valueSource: "formula",
       fee_calc_method: "formula",
       fee_calc_base: "500",
       unit_price: 0,
@@ -84,6 +87,49 @@ describe("quota template quantity presets", () => {
       fee_calc_method: "fixed",
       unit_price: 0,
     });
+  });
+
+  it("subtracts the quote discount when converting legacy comprehensive fees", () => {
+    const fees = convertComprehensiveFeesToFormulaMode([]);
+    const finalFee = fees.find((fee) => fee.isFinalTotal);
+    const formulaFees = fees.map((fee) => ({ ...fee, category: "other", fee_value_source: fee.valueSource }));
+
+    expect(finalFee).toBeTruthy();
+    const result = calculateFormulaTableTotal(formulaFees, 1000, 0, String(finalFee?.id || ""), { discountAmount: 100 });
+    expect(result.finalAmount).toBe(900);
+  });
+
+  it("detects a duplicate quote-discount value source", () => {
+    const duplicate = findDuplicateDiscountFee([
+      {
+        id: "fee-discount-a",
+        name: "人工优惠",
+        isFinalTotal: false,
+        valueSource: "discount",
+        fee_calc_method: "reference",
+        fee_calc_base: "",
+        fee_rate: 0,
+        unit_price: 0,
+        remark: "",
+        fee_scope_mode: "all",
+        fee_scope_space_names: [],
+      },
+      {
+        id: "fee-discount-b",
+        name: "总经理优惠",
+        isFinalTotal: false,
+        valueSource: "discount",
+        fee_calc_method: "reference",
+        fee_calc_base: "",
+        fee_rate: 0,
+        unit_price: 0,
+        remark: "",
+        fee_scope_mode: "all",
+        fee_scope_space_names: [],
+      },
+    ]);
+
+    expect(duplicate?.id).toBe("fee-discount-b");
   });
 
   it("normalizes preset quantity and formula", () => {

@@ -77,6 +77,7 @@ import {
   initialTemplates,
   isBuiltinProjectGroup,
   excludeOverriddenQuotaFields,
+  findDuplicateDiscountFee,
   loadQuotaLibraryItems as loadCachedQuotaLibraryItems,
   loadTemplatesFromStorage,
   makeCombinedAreaPricingTier,
@@ -195,9 +196,8 @@ const templateFeeScopeModeOptions: Array<{ value: FeeScopeMode; label: string }>
 ];
 
 const templateFeeValueSourceOptions: Array<{ value: NonNullable<TemplateComprehensiveFee["valueSource"]>; label: string }> = [
-  { value: "formula", label: "公式" },
+  { value: "formula", label: "自定义公式" },
   { value: "direct", label: "工程直接费" },
-  { value: "fixed", label: "固定金额" },
   { value: "manual", label: "报价时填写" },
   { value: "discount", label: "报价优惠" },
 ];
@@ -1097,9 +1097,6 @@ export default function QuotaTemplatesPage() {
   const templateFormulaFeeItems = buildTemplateFormulaFeeItems(editingTemplate?.comprehensiveFees || []);
   const templateFeeBaseErrors = (editingTemplate?.comprehensiveFees || []).map((fee, feeIndex) => {
     const draftFormula = feeFormulaDrafts[fee.id] ?? fee.fee_calc_base;
-    if ((fee.valueSource || "formula") === "fixed" && !/^-?\d+(?:\.\d+)?$/.test(String(draftFormula || "").trim())) {
-      return "固定金额请填写数字";
-    }
     return normalizeFeeCalcMethod(fee.fee_calc_method) === "fixed" || normalizeFeeCalcMethod(fee.fee_calc_method) === "area_unit"
       ? ""
       : getFeeCalcBaseError(
@@ -1609,6 +1606,16 @@ export default function QuotaTemplatesPage() {
   };
 
   const updateComprehensiveFee = (feeId: string, patch: Partial<TemplateComprehensiveFee>) => {
+    if (comprehensiveFeeMode === "formula" && patch.valueSource === "discount") {
+      const existingDiscountFee = editingTemplate?.comprehensiveFees.find((fee) => (
+        fee.id !== feeId && (fee.valueSource || "formula") === "discount"
+      ));
+      if (existingDiscountFee) {
+        window.alert(`综合费用中只能设置一行“报价优惠”。当前已被“${existingDiscountFee.name.trim() || "未命名费用"}”使用，请先修改该行。`);
+        setHighlightedComprehensiveFeeId(existingDiscountFee.id);
+        return;
+      }
+    }
     if (patch.valueSource && patch.valueSource !== "formula") {
       setFeeFormulaDrafts((current) => {
         const next = { ...current };
@@ -1631,16 +1638,13 @@ export default function QuotaTemplatesPage() {
           ? nextFee.valueSource || "formula"
           : "formula";
         if (comprehensiveFeeMode === "formula" && valueSource !== "formula") {
-          const isFixedAmount = valueSource === "fixed";
           return {
             ...nextFee,
             valueSource,
-            fee_calc_method: valueSource === "manual" ? "fixed" : isFixedAmount ? "formula" : "reference",
+            fee_calc_method: valueSource === "manual" ? "fixed" : "reference",
             fee_calc_base: valueSource === "direct"
               ? "直接费"
-              : isFixedAmount
-                ? normalizeFeeCalcBase(nextFee.fee_calc_base) || "0"
-                : "",
+              : "",
             fee_rate: 0,
             unit_price: 0,
             isFinalTotal: nextFee.isFinalTotal === true,
@@ -2995,16 +2999,20 @@ export default function QuotaTemplatesPage() {
       if (targetFee) revealComprehensiveFeeError(targetFee.id);
       return;
     }
+    const duplicateDiscountFee = comprehensiveFeeMode === "formula"
+      ? findDuplicateDiscountFee(comprehensiveFeesWithDrafts)
+      : null;
+    if (duplicateDiscountFee) {
+      window.alert("综合费用中只能设置一行“报价优惠”，请删除或修改重复的取值方式。");
+      revealComprehensiveFeeError(duplicateDiscountFee.id);
+      return;
+    }
     const comprehensiveFeeErrors = comprehensiveFeesWithDrafts.map((fee, feeIndex) => {
       const valueSource = comprehensiveFeeMode === "formula" ? fee.valueSource || "formula" : "formula";
       const method = normalizeFeeCalcMethod(fee.fee_calc_method);
       const errors = [
         String(fee.name || "").trim() ? "" : "请填写费用名称",
-        valueSource === "fixed"
-          ? /^-?\d+(?:\.\d+)?$/.test(String(fee.fee_calc_base || "").trim())
-            ? ""
-            : "固定金额请填写数字"
-          : valueSource !== "formula" || method === "fixed" || method === "area_unit"
+        valueSource !== "formula" || method === "fixed" || method === "area_unit"
             ? ""
             : getFeeCalcBaseError(
               fee.fee_calc_base,
@@ -3081,7 +3089,7 @@ export default function QuotaTemplatesPage() {
           const method = comprehensiveFeeMode === "formula"
             ? valueSource === "manual"
               ? "fixed"
-              : valueSource === "formula" || valueSource === "fixed"
+              : valueSource === "formula"
                 ? "formula"
                 : "reference"
             : normalizeFeeCalcMethod(fee.fee_calc_method);
@@ -3091,9 +3099,7 @@ export default function QuotaTemplatesPage() {
             valueSource,
             isFinalTotal: comprehensiveFeeMode === "formula" && fee.isFinalTotal === true,
             fee_calc_method: method,
-            fee_calc_base: valueSource === "fixed"
-              ? normalizeFeeCalcBase(fee.fee_calc_base) || "0"
-              : method === "fixed" || valueSource === "discount"
+            fee_calc_base: method === "fixed" || valueSource === "discount"
                 ? ""
                 : method === "area_unit"
                   ? "房屋面积"
@@ -4339,9 +4345,13 @@ export default function QuotaTemplatesPage() {
                               const isDragging = draggingFeeId === fee.id;
                               const dropBefore = dragOverFee?.id === fee.id && dragOverFee.position === "before";
                               const dropAfter = dragOverFee?.id === fee.id && dragOverFee.position === "after";
-                              const recentlyMoved = recentlyMovedFeeId === fee.id;
-                              const feeValueSource = fee.valueSource || "formula";
-                              const formulaInputValue = feeValueSource === "direct"
+	                              const recentlyMoved = recentlyMovedFeeId === fee.id;
+	                              const feeValueSource = fee.valueSource || "formula";
+	                              const existingDiscountFee = editingTemplate.comprehensiveFees.find((otherFee) => (
+	                                otherFee.id !== fee.id && (otherFee.valueSource || "formula") === "discount"
+	                              ));
+	                              const discountValueSourceUsedByOtherFee = Boolean(existingDiscountFee);
+	                              const formulaInputValue = feeValueSource === "direct"
                                 ? "直接费"
                                 : feeValueSource === "discount"
                                   ? "报价优惠"
@@ -4413,13 +4423,31 @@ export default function QuotaTemplatesPage() {
                                     {comprehensiveFeeMode === "formula" ? (
                                       <SystemSelect
                                         value={fee.valueSource || "formula"}
-                                        onChange={(event) => updateComprehensiveFee(fee.id, {
-                                          valueSource: event.target.value as TemplateComprehensiveFee["valueSource"],
-                                        })}
+                                        onChange={(event) => {
+                                          const nextValueSource = event.target.value as TemplateComprehensiveFee["valueSource"];
+                                          if (nextValueSource === "discount" && existingDiscountFee) {
+                                            window.alert(`综合费用中只能设置一行“报价优惠”。当前已被“${existingDiscountFee.name.trim() || "未命名费用"}”使用，请先修改该行。`);
+                                            setHighlightedComprehensiveFeeId(existingDiscountFee.id);
+                                            return;
+                                          }
+                                          updateComprehensiveFee(fee.id, { valueSource: nextValueSource });
+                                        }}
+                                        onDisabledOptionClick={(option) => {
+                                          if (option.value === "discount" && existingDiscountFee) {
+                                            window.alert(`综合费用中只能设置一行“报价优惠”。当前已被“${existingDiscountFee.name.trim() || "未命名费用"}”使用，请先修改该行。`);
+                                            setHighlightedComprehensiveFeeId(existingDiscountFee.id);
+                                          }
+                                        }}
                                         className="quota-template-fee-plain-field input-field h-8 w-full py-0 text-xs font-medium leading-5 text-surface-500"
                                       >
                                         {templateFeeValueSourceOptions.map((option) => (
-                                          <option key={option.value} value={option.value}>{option.label}</option>
+                                          <option
+                                            key={option.value}
+                                            value={option.value}
+                                            disabled={option.value === "discount" && discountValueSourceUsedByOtherFee}
+                                          >
+                                            {option.label}
+                                          </option>
                                         ))}
                                       </SystemSelect>
                                     ) : (
@@ -4457,8 +4485,6 @@ export default function QuotaTemplatesPage() {
                                           comprehensiveFeeMode === "formula"
                                             ? (fee.valueSource || "formula") === "manual"
                                               ? "报价时填写金额"
-                                              : fee.valueSource === "fixed"
-                                                ? "填写固定金额，如 500"
                                               : fee.valueSource === "direct"
                                                 ? "自动读取工程直接费"
                                                 : fee.valueSource === "discount"
@@ -4472,7 +4498,7 @@ export default function QuotaTemplatesPage() {
                                                   ? "如 (直接费+G)*3%+A"
                                                   : templateFeeFormulaPlaceholder
                                         }
-                                        title={feeBaseError || (feeValueSource === "fixed" ? "填写固定金额" : feeMethod === "area_unit" ? "按当前报价房屋面积计算" : `可输入 ${templateFeeFormulaExampleText} 等`)}
+                                        title={feeBaseError || (feeMethod === "area_unit" ? "按当前报价房屋面积计算" : `可输入 ${templateFeeFormulaExampleText} 等`)}
                                       />
                                       {feeBaseError && (
                                         <span
@@ -4503,11 +4529,6 @@ export default function QuotaTemplatesPage() {
                                         >
                                           <ChevronDown className="h-3.5 w-3.5" />
                                         </button>
-                                      )}
-                                      {feeValueSource === "fixed" && (
-                                        <span className="pointer-events-none absolute right-2 top-1/2 inline-flex -translate-y-1/2 items-center whitespace-nowrap text-xs font-semibold text-[#475467]">
-                                          元
-                                        </span>
                                       )}
                                     </div>
                                   </td>
@@ -4567,7 +4588,7 @@ export default function QuotaTemplatesPage() {
                   )}
                   <div className="mt-3 rounded-md border border-primary-100 bg-primary-50/60 px-3 py-2 text-xs leading-5 text-primary-800">
                     {comprehensiveFeeMode === "formula"
-                      ? "自由公式表按行计算，A/B/C 对应上方行编号；可根据取值方式使用公式、报价时填写、工程直接费或报价优惠；固定金额直接填写数值即可。必须指定一行“报价总额”，系统不再额外应用优惠和税率。"
+                      ? "自由公式表按行计算，A/B/C 对应上方行编号；可根据取值方式使用自定义公式、报价时填写、工程直接费或报价优惠；固定金额可选择自定义公式并直接填写数字。必须指定一行“报价总额”，系统不再额外应用优惠和税率。"
                       : `基础公式支持：${templateFeeFormulaExampleText} 等；可直接输入空间或类别名称，例如“打拆”，表示该范围下全部直接项目合计。A/B/C 对应上方综合费用编号，复杂运算请选择“自定义公式”。`}
                   </div>
                 </div>

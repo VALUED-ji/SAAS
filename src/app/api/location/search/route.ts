@@ -150,11 +150,11 @@ function resultMatchesKeyword(item: ReturnType<typeof normalizePoi>, keywords: s
   return searchableText.includes(query);
 }
 
-function shouldExpandBeyondCurrentCity(results: ReturnType<typeof normalizePoi>[], keywords: string, city: string) {
-  if (!city || !results.length) return false;
-  const query = normalizeSearchText(keywords);
-  if (query.length < 3) return false;
-  return !results.some((item) => resultMatchesKeyword(item, keywords));
+function resultBelongsToCity(item: ReturnType<typeof normalizePoi>, city: string) {
+  const normalizedCity = normalizeCityName(city);
+  if (!normalizedCity) return false;
+  const itemRegion = normalizeCityName([item.city, item.district, item.address].filter(Boolean).join(""));
+  return itemRegion.includes(normalizedCity);
 }
 
 function mergeResults(results: ReturnType<typeof normalizePoi>[], keywords: string, preferredCity = "") {
@@ -217,11 +217,18 @@ export async function GET(req: NextRequest) {
     const cityLimited = Boolean(city);
     let { errors, results } = await fetchSearchBatch(key, keywords, city, cityLimited);
     let usedCityLimit = cityLimited;
-    if ((!results.length || shouldExpandBeyondCurrentCity(results, keywords, city)) && cityLimited) {
+    const localMatches = results.filter((item) => resultMatchesKeyword(item, keywords));
+    if (cityLimited && localMatches.length > 0) {
+      results = localMatches;
+    } else if (cityLimited) {
       const fallback = await fetchSearchBatch(key, keywords, "", false);
       errors = fallback.errors.length ? fallback.errors : errors;
-      results = [...results, ...fallback.results];
+      results = fallback.results
+        .filter((item) => resultMatchesKeyword(item, keywords))
+        .filter((item) => !resultBelongsToCity(item, city));
       usedCityLimit = false;
+    } else {
+      results = localMatches;
     }
     if (!results.length && errors.length >= 2) {
       throw errors[0].reason;

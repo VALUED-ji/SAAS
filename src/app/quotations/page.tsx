@@ -1621,6 +1621,71 @@ export default function QuotationsPage() {
     setSystemDialog({ title, message, tone, confirmText, cancelText, onConfirm });
   };
 
+  const submitCreateQuotation = async () => {
+    if (creating) return;
+    setCreating(true);
+    setMessage("");
+    try {
+      if (isPackageTemplate && packageQuoteArea <= 0) {
+        setMessage("请先确认一口价计价面积");
+        return;
+      }
+      if (needsQuotationStoreSelection && !selectedQuotationStoreId) {
+        setMessage("请选择报价归属门店");
+        return;
+      }
+      let quotationCustomerId = customerId;
+      let quotationCustomerSnapshot = createCustomerSnapshot;
+      const createAsTemporaryCustomer = isNewCustomerMode || isTemporaryQuotationMode;
+      if (isNewCustomerMode) {
+        if (!quickCustomer.address.trim()) {
+          setMessage("请填写小区/地址");
+          return;
+        }
+        quotationCustomerId = "";
+        quotationCustomerSnapshot = emptyCreateCustomerSnapshot;
+      }
+      const res = await api.post<{ id: string; persisted?: boolean }>("/api/quotations", {
+        create_mode: createAsTemporaryCustomer ? "temporary" : "customer",
+        customer_id: createAsTemporaryCustomer ? undefined : quotationCustomerId,
+        customer_snapshot: createAsTemporaryCustomer ? undefined : quotationCustomerSnapshot,
+        temp_customer: createAsTemporaryCustomer ? {
+          name: isNewCustomerMode ? quickCustomer.name : temporaryCustomer.name,
+          phone: isNewCustomerMode ? quickCustomer.phone : temporaryCustomer.phone,
+          weixin: isNewCustomerMode ? quickCustomer.weixin : temporaryCustomer.weixin,
+          address: isNewCustomerMode ? quickCustomer.address : temporaryCustomer.address,
+          area: isNewCustomerMode ? quickCustomer.area_size : temporaryCustomer.area,
+          decoration_type: isNewCustomerMode ? quickCustomer.decoration_type : temporaryCustomer.decoration_type,
+        } : undefined,
+        quotation_org_unit_id: selectedQuotationStoreId || undefined,
+        quotation_type: quotationType.trim(),
+        notes: createNotes,
+        customer_visible_note: createCustomerVisibleNote,
+        template: selectedTemplate || undefined,
+        templatePricing: isPackageTemplate ? { area: packageQuoteArea } : undefined,
+      });
+      if (!res?.persisted) {
+        throw new Error("报价保存状态未确认，请刷新预算记录后核对");
+      }
+      setMessage("报价已写入数据库，正在确认列表同步...");
+      await confirmCreatedQuotationPersisted(res.id);
+      await refetchDeletedQuotations();
+      setShowCreate(false);
+      setCreateLockedCustomerId("");
+      createReturnRecordCustomerKeyRef.current = "";
+      setMessage("报价已保存");
+      if (isNewCustomerMode) {
+        setQuickCustomer(emptyQuickCustomerDraft);
+        setCreateMode("customer");
+      }
+      router.push(`/quotations/${res.id}`);
+    } catch (err: any) {
+      setMessage(err.message || "创建失败");
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const copyQuotation = (record: any) => {
     setCopyQuotationDialog(record);
     setMessage("");
@@ -2165,17 +2230,18 @@ export default function QuotationsPage() {
 
       <section className="quotation-index-table-panel flex min-h-0 flex-1 flex-col overflow-hidden">
         <ThinScrollArea className="min-h-0 flex-1" scrollClassName="h-full">
-          <table className="quotation-list-table w-full min-w-[1574px] table-fixed border-separate border-spacing-0 text-sm">
+          <table className="quotation-list-table w-full min-w-[1694px] table-fixed border-separate border-spacing-0 text-sm">
             <colgroup>
               <col className="w-[68px]" />
               <col className="w-[260px]" />
               <col className="w-[116px]" />
-              <col className="w-[116px]" />
               <col className="w-[146px]" />
               <col className="w-[96px]" />
+              <col className="w-[116px]" />
               <col className="w-[130px]" />
               <col className="w-[124px]" />
               <col className="w-[104px]" />
+              <col className="w-[120px]" />
               <col className="w-[150px]" />
               <col className="w-[130px]" />
               <col className="w-[134px]" />
@@ -2185,12 +2251,13 @@ export default function QuotationsPage() {
                 <th className="quotation-index-th quotation-index-center">序号</th>
                 <th className="quotation-index-th">房号</th>
                 <th className="quotation-index-th quotation-index-center">客户姓名</th>
-                <th className="quotation-index-th quotation-index-center">设计师</th>
                 <th className="quotation-index-th quotation-index-center">手机号</th>
                 <th className="quotation-index-th quotation-index-center">面积</th>
+                <th className="quotation-index-th quotation-index-center">设计师</th>
                 <th className="quotation-index-th quotation-index-number">合同金额</th>
                 <th className="quotation-index-th quotation-index-center">客户状态</th>
                 <th className="quotation-index-th quotation-index-center">报价份数</th>
+                <th className="quotation-index-th quotation-index-center">创建人</th>
                 <th className="quotation-index-th quotation-index-center">最新报价日期</th>
                 <th className="quotation-index-th quotation-index-center">门店</th>
                 <th className="quotation-index-th quotation-sticky-action sticky right-0 z-20 whitespace-nowrap">报价记录</th>
@@ -2213,9 +2280,9 @@ export default function QuotationsPage() {
 	                    <td className="quotation-index-td quotation-index-center">
 	                      <span className="block truncate">{getQuotationListCustomerName(q)}</span>
 	                    </td>
-	                    <td className="quotation-index-td quotation-index-center">{q.designer_name || "-"}</td>
 	                    <td className="quotation-index-td quotation-index-center tabular-nums">{getContactText(q)}</td>
 	                    <td className="quotation-index-td quotation-index-center">{getAreaText(q)}</td>
+	                    <td className="quotation-index-td quotation-index-center">{q.designer_name || "-"}</td>
 	                    <td className="quotation-index-td quotation-index-amount quotation-index-number tabular-nums">{formatRecordAmount(getSignedContractAmount(q))}</td>
 	                    <td className="quotation-index-td quotation-index-center">
 	                      <span className={`quotation-index-tag ${getContractStatusClass(q)}`}>
@@ -2224,6 +2291,11 @@ export default function QuotationsPage() {
 	                    </td>
 	                    <td className="quotation-index-td quotation-index-center">
 	                      <span className="quotation-index-tag quotation-index-tag-neutral">{recordCount} 份</span>
+	                    </td>
+	                    <td className="quotation-index-td quotation-index-center">
+	                      <span className="block truncate" title={q.creator_name || q.created_by_name || ""}>
+	                        {q.creator_name || q.created_by_name || "-"}
+	                      </span>
 	                    </td>
 	                    <td className="quotation-index-td quotation-index-center tabular-nums">
 	                      {formatQuoteDateTime(getLatestQuoteDate(q))}
@@ -2250,7 +2322,7 @@ export default function QuotationsPage() {
                 );
               }) : (
 	                <tr className="quotation-index-empty-row">
-	                  <td colSpan={12} className="quotation-index-empty-cell h-[360px] py-14 text-center">
+	                  <td colSpan={13} className="quotation-index-empty-cell h-[360px] py-14 text-center">
 	                    <div className="mx-auto max-w-sm px-6 py-8">
 	                      <span className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-[8px] border border-[#D6E2F1] bg-[#F8FBFF] text-[#407AFF]">
 	                        <ReceiptText className="h-7 w-7" />
@@ -3110,7 +3182,7 @@ export default function QuotationsPage() {
       )}
 
       {showCreate && (
-        <div className="quotation-create-overlay fixed inset-0 z-50 flex items-center justify-center bg-[#0f172a]/24 p-3 sm:p-5">
+        <div className="quotation-create-overlay fixed inset-0 z-[1200] flex items-center justify-center bg-[#0f172a]/24 p-3 sm:p-5">
           <div className="quotation-create-modal flex h-[min(920px,96vh)] w-full max-w-[1180px] flex-col overflow-hidden rounded-[16px] bg-white text-[12px] [&_button]:!text-[12px] [&_input]:!text-[12px] [&_label]:!text-[12px] [&_p]:!text-[12px] [&_select]:!text-[12px] [&_span]:!text-[12px] [&_strong]:!text-[12px] [&_textarea]:!text-[12px]">
             <div className="quotation-create-header flex shrink-0 items-center justify-between border-b border-[#e5eaf2] !bg-white px-6 py-4">
               <div className="min-w-0">
@@ -3871,67 +3943,20 @@ export default function QuotationsPage() {
                 <button
                   disabled={(isTemporaryQuotationMode ? !temporaryCustomer.address.trim() : isNewCustomerMode ? !quickCustomer.address.trim() : !customerId) || (needsQuotationStoreSelection && !selectedQuotationStoreId) || creating || (isPackageTemplate && packageQuoteArea <= 0)}
                   onClick={async () => {
-                    setCreating(true);
-                    setMessage("");
-                    try {
-                      if (isPackageTemplate && packageQuoteArea <= 0) {
-                        setMessage("请先确认一口价计价面积");
-                        return;
-                      }
-                      if (needsQuotationStoreSelection && !selectedQuotationStoreId) {
-                        setMessage("请选择报价归属门店");
-                        return;
-                      }
-                      let quotationCustomerId = customerId;
-                      let quotationCustomerSnapshot = createCustomerSnapshot;
-                      const createAsTemporaryCustomer = isNewCustomerMode || isTemporaryQuotationMode;
-                      if (isNewCustomerMode) {
-                        if (!quickCustomer.address.trim()) {
-                          setMessage("请填写小区/地址");
-                          return;
-                        }
-                        quotationCustomerId = "";
-                        quotationCustomerSnapshot = emptyCreateCustomerSnapshot;
-                      }
-                      const res = await api.post<{ id: string; persisted?: boolean }>("/api/quotations", {
-                        create_mode: createAsTemporaryCustomer ? "temporary" : "customer",
-                        customer_id: createAsTemporaryCustomer ? undefined : quotationCustomerId,
-                        customer_snapshot: createAsTemporaryCustomer ? undefined : quotationCustomerSnapshot,
-                        temp_customer: createAsTemporaryCustomer ? {
-                          name: isNewCustomerMode ? quickCustomer.name : temporaryCustomer.name,
-                          phone: isNewCustomerMode ? quickCustomer.phone : temporaryCustomer.phone,
-                          weixin: isNewCustomerMode ? quickCustomer.weixin : temporaryCustomer.weixin,
-                          address: isNewCustomerMode ? quickCustomer.address : temporaryCustomer.address,
-                          area: isNewCustomerMode ? quickCustomer.area_size : temporaryCustomer.area,
-                          decoration_type: isNewCustomerMode ? quickCustomer.decoration_type : temporaryCustomer.decoration_type,
-                        } : undefined,
-	                        quotation_org_unit_id: selectedQuotationStoreId || undefined,
-	                        quotation_type: quotationType.trim(),
-	                        notes: createNotes,
-                        customer_visible_note: createCustomerVisibleNote,
-                        template: selectedTemplate || undefined,
-                        templatePricing: isPackageTemplate ? { area: packageQuoteArea } : undefined,
+                    if (!selectedTemplateId) {
+                      showConfirm({
+                        title: "未选择定额模板",
+                        message: "当前没有选择定额模板，仍可以继续创建报价。是否继续？",
+                        tone: "info",
+                        confirmText: "继续创建",
+                        cancelText: "返回选择",
+                        onConfirm: () => {
+                          void submitCreateQuotation();
+                        },
                       });
-                      if (!res?.persisted) {
-                        throw new Error("报价保存状态未确认，请刷新预算记录后核对");
-                      }
-                      setMessage("报价已写入数据库，正在确认列表同步...");
-                      await confirmCreatedQuotationPersisted(res.id);
-                      await refetchDeletedQuotations();
-	                      setShowCreate(false);
-	                      setCreateLockedCustomerId("");
-                      createReturnRecordCustomerKeyRef.current = "";
-                      setMessage("报价已保存");
-                      if (isNewCustomerMode) {
-                        setQuickCustomer(emptyQuickCustomerDraft);
-                        setCreateMode("customer");
-                      }
-                      router.push(`/quotations/${res.id}`);
-                    } catch (err: any) {
-                      setMessage(err.message || "创建失败");
-                    } finally {
-                      setCreating(false);
+                      return;
                     }
+                    await submitCreateQuotation();
                   }}
                   className="btn-primary disabled:opacity-50"
                 >
