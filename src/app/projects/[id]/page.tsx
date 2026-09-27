@@ -802,8 +802,7 @@ function isPositiveDepositMessage(message: string) {
 const contractTypes = ["装修施工合同", "设计合同", "主材合同", "增补合同", "整装合同", "软装合同", "其他"];
 const contractSteps = [
   { title: "基本信息", desc: "类型、名称、编号" },
-  { title: "签约双方", desc: "甲方与乙方信息" },
-  { title: "项目条款", desc: "地址、工期、施工约定" },
+  { title: "签约与项目", desc: "甲方信息、地址与工期" },
   { title: "金额收款", desc: "金额、定金、收款比例" },
   { title: "合同附件", desc: "合同文件与备注" },
 ];
@@ -1363,6 +1362,10 @@ type ContractForm = {
   party_b_phone: string;
   party_b_license: string;
   project_address: string;
+  project_building_no: string;
+  project_unit_no: string;
+  project_room_no: string;
+  project_no_room_number: boolean;
   project_area: string;
   planned_start: string;
   planned_end: string;
@@ -1445,6 +1448,10 @@ function defaultContractForm(customer?: any, project?: any, company?: any, schem
     party_b_phone: company?.contactPhone || company?.phone || "",
     party_b_license: company?.businessLicenseNo || "",
     project_address: address,
+    project_building_no: String(customer?.building_no || "").trim(),
+    project_unit_no: String(customer?.unit_no || "").trim(),
+    project_room_no: String(customer?.room_no || "").trim(),
+    project_no_room_number: customer?.no_room_number === true || customer?.no_room_number === 1,
     project_area: String(project?.area || customer?.area_size || ""),
     planned_start: "",
     planned_end: "",
@@ -1490,6 +1497,10 @@ function contractRecordToForm(contract: ContractRecord): ContractForm {
     party_b_phone: partyB.phone || "",
     party_b_license: partyB.license_no || "",
     project_address: projectInfo.address || "",
+    project_building_no: projectInfo.building_no || "",
+    project_unit_no: projectInfo.unit_no || "",
+    project_room_no: projectInfo.room_no || "",
+    project_no_room_number: Boolean(projectInfo.no_room_number),
     project_area: projectInfo.area ? String(projectInfo.area) : "",
     planned_start: projectInfo.planned_start || "",
     planned_end: projectInfo.planned_end || "",
@@ -2005,7 +2016,7 @@ function CustomerDetailPageContent() {
     if (!id) return;
     setContractsLoading(true);
     try {
-      const res = await fetch(`/api/customers/${id}/contracts`);
+      const res = await fetch(`/api/customers/${id}/contracts?includeContent=1`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "加载合同失败");
       const schemes = Array.isArray(data.paymentSchemes) ? data.paymentSchemes : [];
@@ -2649,16 +2660,28 @@ function CustomerDetailPageContent() {
       const freshTemplates = Array.isArray(fresh?.contractTemplates) ? fresh.contractTemplates : contractTemplates;
       const quote = freshFormalQuotations[0] || ((fresh?.latestQuotation?.status === "APPROVED" ? fresh.latestQuotation : null) || (latestQuotation?.status === "APPROVED" ? latestQuotation : null));
       const depositTotal = fresh ? Number(fresh.depositTotal || 0) : contractDepositTotal;
-      const form = defaultContractForm(seedCustomer, seedProject, seedCompany, defaultScheme?.id || "");
+      const freshContracts = Array.isArray(fresh?.contracts) ? fresh.contracts : contracts;
+      const draft = freshContracts
+        .filter((contract: any) => String(contract?.status || "").toUpperCase() === "DRAFT")
+        .find((contract: any) => {
+          const content = contract?.content || {};
+          const draftQuotationId = content?.amount_info?.quotation_id || content?.quotation_id || "";
+          return draftQuotationId && quote?.id && String(draftQuotationId) === String(quote.id);
+        });
+      const form = draft
+        ? contractRecordToForm(draft)
+        : defaultContractForm(seedCustomer, seedProject, seedCompany, defaultScheme?.id || "");
       const defaultTemplate = freshTemplates.find((template: ContractTemplateOption) => template.contract_type === form.contract_type && template.is_default)
         || freshTemplates.find((template: ContractTemplateOption) => template.contract_type === form.contract_type);
-      form.contract_template_id = defaultTemplate?.id || "";
-      const quoteAmount = getQuotationAmount(quote);
-      form.quotation_id = quote?.id || "";
-      form.total_amount = quoteAmount > 0 ? String(toMoney(quoteAmount)) : "";
-      form.deposit_deduct_amount = quoteAmount > 0 ? String(getMaxContractDepositDeduct(quoteAmount, depositTotal)) : "";
+      if (!form.contract_template_id) form.contract_template_id = defaultTemplate?.id || "";
+      if (!draft) {
+        const quoteAmount = getQuotationAmount(quote);
+        form.quotation_id = quote?.id || "";
+        form.total_amount = quoteAmount > 0 ? String(toMoney(quoteAmount)) : "";
+        form.deposit_deduct_amount = quoteAmount > 0 ? String(getMaxContractDepositDeduct(quoteAmount, depositTotal)) : "";
+      }
       setContractForm(form);
-      setContractStep(0);
+      setContractStep(draft ? Math.max(0, Math.min(contractSteps.length - 1, Number(draft.content?.draft_step || 0))) : 0);
       clearContractMissingFields();
       setShowContractModal(true);
     } finally {
@@ -2669,7 +2692,7 @@ function CustomerDetailPageContent() {
   const openContractEditor = (contract: ContractRecord) => {
     setContractForm(contractRecordToForm(contract));
     const draftStep = Number(contract.content?.draft_step ?? 0);
-    setContractStep(Number.isFinite(draftStep) ? Math.max(0, Math.min(4, draftStep)) : 0);
+    setContractStep(Number.isFinite(draftStep) ? Math.max(0, Math.min(contractSteps.length - 1, draftStep)) : 0);
     setContractMessage("");
     clearContractMissingFields();
     setShowContractModal(true);
@@ -2844,22 +2867,16 @@ function CustomerDetailPageContent() {
       return { message, fields };
     }
     if (stepToValidate === 1) {
-      if (!contractForm.party_a_name.trim()) addMissingField("party_a_name", "请完善甲方姓名和手机号");
-      if (!contractForm.party_a_phone.trim()) addMissingField("party_a_phone", "请完善甲方姓名和手机号");
-      if (!contractForm.party_b_name.trim()) addMissingField("party_b_name", "请完善乙方公司和联系人");
-      if (!contractForm.party_b_contact.trim()) addMissingField("party_b_contact", "请完善乙方公司和联系人");
-      return { message, fields };
-    }
-    if (stepToValidate === 2) {
+                      if (!contractForm.party_a_name.trim()) addMissingField("party_a_name", "请完善客户姓名和手机号");
+                      if (!contractForm.party_a_phone.trim()) addMissingField("party_a_phone", "请完善客户姓名和手机号");
       if (!contractForm.project_address.trim()) addMissingField("project_address", "请填写项目地址");
       if (!contractForm.planned_start) addMissingField("planned_start", "请选择计划开工日期");
       const duration = Math.ceil(Number(contractForm.duration_days || 0));
       if (!Number.isFinite(duration) || duration <= 0) addMissingField("duration_days", "请填写大于 0 的签约工期");
       if (!contractForm.planned_end) addMissingField("planned_end", "请确认计划竣工日期");
-      if (!contractForm.construction_scope.trim()) addMissingField("construction_scope", "请填写施工范围");
       return { message, fields };
     }
-    if (stepToValidate === 3) {
+    if (stepToValidate === 2) {
       if (contractQuotationOptions.length === 0) {
         addMissingField("quotation_id", "该客户暂无正式报价，请先将预算报价设为正式报价");
         return { message, fields };
@@ -2960,7 +2977,14 @@ function CustomerDetailPageContent() {
       license_no: contractForm.party_b_license,
     },
     project_info: {
-      address: contractForm.project_address,
+      address: contractForm.project_no_room_number
+        ? contractForm.project_address
+        : [contractForm.project_address, contractForm.project_building_no, contractForm.project_unit_no, contractForm.project_room_no].filter(Boolean).join(""),
+      community: contractForm.project_address,
+      building_no: contractForm.project_no_room_number ? "" : contractForm.project_building_no,
+      unit_no: contractForm.project_no_room_number ? "" : contractForm.project_unit_no,
+      room_no: contractForm.project_no_room_number ? "" : contractForm.project_room_no,
+      no_room_number: contractForm.project_no_room_number,
       area: contractForm.project_area,
       planned_start: contractForm.planned_start,
       planned_end: contractForm.planned_end,
@@ -3029,7 +3053,7 @@ function CustomerDetailPageContent() {
   };
 
   const handleSaveContract = async () => {
-    const invalidStep = [0, 1, 2, 3].find((step) => getContractStepValidation(step).message);
+    const invalidStep = [0, 1, 2].find((step) => getContractStepValidation(step).message);
     const { message, fields } = invalidStep === undefined ? { message: "", fields: [] } : getContractStepValidation(invalidStep);
     if (message) {
       if (invalidStep !== undefined) setContractStep(invalidStep);
@@ -6467,7 +6491,7 @@ function CustomerDetailPageContent() {
               disabled={contractOpening}
             >
               {contractOpening ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-              {contractOpening ? "加载中..." : "新建合同"}
+              {contractOpening ? "加载中..." : "提交合同"}
             </button>
           </div>
           {contractMessage && !showContractModal && (
@@ -6649,7 +6673,7 @@ function CustomerDetailPageContent() {
                 disabled={contractOpening}
               >
                 {contractOpening ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                {contractOpening ? "加载中..." : "新建合同"}
+                {contractOpening ? "加载中..." : "提交合同"}
               </button>
             </div>
           )}
@@ -6796,7 +6820,7 @@ function CustomerDetailPageContent() {
               </button>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto bg-[#f6f8fb] px-5 py-4">
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-[#f6f8fb] px-5 py-4">
               {contractMessage && (
                 <div className={`mb-4 rounded-[10px] border px-3 py-2 text-sm ${
                   contractMessage.includes("已同意") || contractMessage.includes("已创建") || contractMessage.includes("已暂存")
@@ -6986,7 +7010,7 @@ function CustomerDetailPageContent() {
       {showContractModal && (
         <div className="fixed bottom-0 right-0 top-0 z-50 bg-[#111827]/32 backdrop-blur-[1px] md:left-[var(--active-sidebar-width)] max-md:left-0">
           <div className="absolute inset-0" onClick={() => setShowContractModal(false)} />
-          <div className="contract-workbench-ui absolute left-1/2 top-1/2 z-10 flex h-[calc(100dvh-32px)] max-h-[880px] w-[calc(100vw-56px)] max-w-[1240px] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-[12px] border border-[#dce4ef] bg-white shadow-[0_16px_44px_rgba(15,23,42,0.13)]">
+          <div className="contract-workbench-ui absolute left-1/2 top-1/2 z-10 flex h-[calc(100dvh-24px)] max-h-[calc(100dvh-24px)] w-[calc(100vw-56px)] max-w-[1240px] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-[12px] border border-[#dce4ef] bg-white shadow-[0_16px_44px_rgba(15,23,42,0.13)]">
             <div className="border-b border-[#e2e7ee] bg-white px-5 py-4">
               <div className="flex min-w-0 items-center gap-3">
                 <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[10px] bg-[#edf4ff] text-[#2f6feb] ring-1 ring-inset ring-[#cfe0ff]">
@@ -6994,7 +7018,7 @@ function CustomerDetailPageContent() {
                 </span>
                 <div className="min-w-0">
                   <h3 className="truncate text-base font-semibold text-[#182230]">
-                    {contractForm.resign_source_contract_id ? "重签合同" : contractForm.id ? "编辑暂存合同" : "新建合同"}
+                    {contractForm.resign_source_contract_id ? "重签合同" : contractForm.id ? "编辑暂存合同" : "提交合同"}
                   </h3>
                   <p className="mt-1 text-xs leading-5 text-[#667085]">
                   {contractForm.resign_source_contract_id ? "重签会生成一份新合同，原合同保留为历史归档。" : "可随时暂存当前填写内容，最终创建后再同步生成收款计划。"}
@@ -7020,7 +7044,7 @@ function CustomerDetailPageContent() {
                     {contractStep + 1}/{contractSteps.length}
                   </span>
                 </div>
-                <div className="mt-4 grid grid-cols-5 gap-1 rounded-[10px] bg-[#f2f6fb] p-1">
+                <div className="mt-4 grid grid-cols-4 gap-1 rounded-[10px] bg-[#f2f6fb] p-1">
                   {contractSteps.map((step, index) => {
                     const active = contractStep === index;
                     const done = contractStep > index;
@@ -7056,7 +7080,7 @@ function CustomerDetailPageContent() {
                 </div>
               </div>
               {contractStep === 0 && (
-                <div className="grid min-h-[520px] gap-4 xl:grid-cols-[minmax(0,1fr)_292px]">
+                <div className="grid min-h-[520px] flex-1 gap-4">
                   <div className="rounded-[12px] border border-[#dfe7f1] bg-white p-5">
                     <div className="mb-4">
                       <h4 className="text-[15px] font-semibold text-[#182230]">合同基本信息</h4>
@@ -7133,29 +7157,6 @@ function CustomerDetailPageContent() {
                   </div>
 
                   <div className="flex flex-col gap-4">
-                    <div className="rounded-[12px] border border-[#dfe7f1] bg-[#f8fafc] p-4">
-                      <h4 className="text-[15px] font-semibold text-[#182230]">合同概览</h4>
-                      <div className="mt-4 space-y-3 text-sm">
-                        <div className="rounded-[10px] border border-[#e2e7ee] bg-white px-3 py-2.5">
-                          <p className="text-xs text-[#667085]">客户</p>
-                          <p className="mt-1 font-semibold text-[#182230]">{customer?.name || "-"}</p>
-                        </div>
-                        <div className="rounded-[10px] border border-[#e2e7ee] bg-white px-3 py-2.5">
-                          <p className="text-xs text-[#667085]">项目地址</p>
-                          <p className="mt-1 break-words font-semibold leading-5 text-[#182230]">{contractForm.project_address || customer?.address || "-"}</p>
-                        </div>
-                        <div className="rounded-[10px] border border-[#e2e7ee] bg-white px-3 py-2.5">
-                          <p className="text-xs text-[#667085]">最新报价金额</p>
-                          <p className="mt-1 font-semibold tabular-nums text-[#d92d20]">
-                            {latestQuotation ? formatPlainAmount(getQuotationAmount(latestQuotation)) : "-"}
-                          </p>
-                        </div>
-                        <div className="rounded-[10px] border border-[#e2e7ee] bg-white px-3 py-2.5">
-                          <p className="text-xs text-[#667085]">已收定金</p>
-                          <p className="mt-1 font-semibold tabular-nums text-[#d92d20]">{formatPlainAmount(contractDepositTotal)}</p>
-                        </div>
-                      </div>
-                    </div>
                     <div className="rounded-[12px] border border-[#cfe0ff] bg-[#edf4ff] p-4 text-sm leading-6 text-[#2459c7]">
                       <div>
                         <p className="font-semibold text-[#175cd3]">填写建议</p>
@@ -7170,88 +7171,47 @@ function CustomerDetailPageContent() {
               )}
 
               {contractStep === 1 && (
-                <div className="grid min-h-[520px] gap-4 lg:grid-cols-2">
-                  <div className="rounded-[12px] border border-[#dfe7f1] bg-white p-5">
-                    <div className="mb-4 flex items-center gap-2">
-                      <div className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#edf4ff] text-[#2f6feb] ring-1 ring-inset ring-[#cfe0ff]">
-                        <User className="h-4 w-4" />
-                      </div>
-                      <div>
-                        <h4 className="text-[15px] font-semibold text-[#182230]">甲方信息</h4>
-                        <p className="text-xs leading-5 text-[#667085]">通常为业主或客户本人</p>
-                      </div>
-                    </div>
-                    <div className="space-y-4">
-                      <label className="block">
-                        <span className="mb-1 block text-sm font-medium text-surface-700">甲方姓名 <span className="text-red-600">*</span></span>
-                        <input value={contractForm.party_a_name} onChange={(event) => setContractForm((prev) => ({ ...prev, party_a_name: event.target.value, party_a_contact: event.target.value || prev.party_a_contact }))} className={contractRequiredFieldClassName("party_a_name")} data-contract-required-field="party_a_name" />
-                      </label>
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <label className="block">
-                          <span className="mb-1 block text-sm font-medium text-surface-700">联系人</span>
-                          <input value={contractForm.party_a_contact} onChange={(event) => setContractForm((prev) => ({ ...prev, party_a_contact: event.target.value }))} className="input-field" />
-                        </label>
-                        <label className="block">
-                          <span className="mb-1 block text-sm font-medium text-surface-700">手机号 <span className="text-red-600">*</span></span>
-                          <input value={contractForm.party_a_phone} onChange={(event) => setContractForm((prev) => ({ ...prev, party_a_phone: event.target.value }))} className={contractRequiredFieldClassName("party_a_phone")} data-contract-required-field="party_a_phone" />
-                        </label>
-                      </div>
-                      <label className="block">
-                        <span className="mb-1 block text-sm font-medium text-surface-700">身份证号/证件号</span>
-                        <input value={contractForm.party_a_id_no} onChange={(event) => setContractForm((prev) => ({ ...prev, party_a_id_no: event.target.value }))} className="input-field" placeholder="可选，用于正式合同归档" />
-                      </label>
-                    </div>
-                  </div>
-
-                  <div className="rounded-[12px] border border-[#dfe7f1] bg-white p-5">
-                    <div className="mb-4 flex items-center gap-2">
-                      <div className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#f2f6fb] text-[#475467] ring-1 ring-inset ring-[#dce4ef]">
-                        <Store className="h-4 w-4" />
-                      </div>
-                      <div>
-                        <h4 className="text-[15px] font-semibold text-[#182230]">乙方信息</h4>
-                        <p className="text-xs leading-5 text-[#667085]">自动带出客户所属分公司法定信息</p>
-                      </div>
-                    </div>
-                    <div className="space-y-4">
-                      <label className="block">
-                        <span className="mb-1 block text-sm font-medium text-surface-700">乙方公司 <span className="text-red-600">*</span></span>
-                        <input value={contractForm.party_b_name} onChange={(event) => setContractForm((prev) => ({ ...prev, party_b_name: event.target.value }))} className={contractRequiredFieldClassName("party_b_name")} data-contract-required-field="party_b_name" placeholder="请输入签约公司名称" />
-                      </label>
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <label className="block">
-                          <span className="mb-1 block text-sm font-medium text-surface-700">联系人 <span className="text-red-600">*</span></span>
-                          <input value={contractForm.party_b_contact} onChange={(event) => setContractForm((prev) => ({ ...prev, party_b_contact: event.target.value }))} className={contractRequiredFieldClassName("party_b_contact")} data-contract-required-field="party_b_contact" placeholder="例如：门店负责人" />
-                        </label>
-                        <label className="block">
-                          <span className="mb-1 block text-sm font-medium text-surface-700">联系电话</span>
-                          <input value={contractForm.party_b_phone} onChange={(event) => setContractForm((prev) => ({ ...prev, party_b_phone: event.target.value }))} className="input-field" />
-                        </label>
-                      </div>
-                      <label className="block">
-                        <span className="mb-1 block text-sm font-medium text-surface-700">营业执照号</span>
-                        <input value={contractForm.party_b_license} onChange={(event) => setContractForm((prev) => ({ ...prev, party_b_license: event.target.value }))} className="input-field" placeholder="统一社会信用代码" />
-                      </label>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {contractStep === 2 && (
-                <div className="flex min-h-[520px] flex-col gap-4">
+                <div className="grid min-h-[520px] flex-1 gap-4">
                   <div className="rounded-[12px] border border-[#dfe7f1] bg-white p-5">
                     <div className="mb-4">
                       <h4 className="text-[15px] font-semibold text-[#182230]">项目信息</h4>
                       <p className="mt-1 text-xs leading-5 text-[#667085]">明确施工地址、面积和合同工期，方便后续施工管理承接。</p>
                     </div>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <label className="block">
+                        <span className="mb-1 block text-sm font-medium text-surface-700">客户姓名 <span className="text-red-600">*</span></span>
+                        <input value={contractForm.party_a_name} onChange={(event) => setContractForm((prev) => ({ ...prev, party_a_name: event.target.value, party_a_contact: event.target.value || prev.party_a_contact }))} className={contractRequiredFieldClassName("party_a_name")} data-contract-required-field="party_a_name" />
+                      </label>
+                      <label className="block">
+                        <span className="mb-1 block text-sm font-medium text-surface-700">手机号 <span className="text-red-600">*</span></span>
+                        <input value={contractForm.party_a_phone} onChange={(event) => setContractForm((prev) => ({ ...prev, party_a_phone: event.target.value }))} className={contractRequiredFieldClassName("party_a_phone")} data-contract-required-field="party_a_phone" />
+                      </label>
+                    </div>
+                    <div className="my-5 border-t border-[#e2e7ee]" />
                     <div className="grid gap-4 md:grid-cols-4">
-                      <label className="block md:col-span-3">
-                        <span className="mb-1 block text-sm font-medium text-surface-700">项目地址 <span className="text-red-600">*</span></span>
+                      <label className="block md:col-span-4">
+                        <span className="mb-1 block text-sm font-medium text-surface-700">小区/楼盘 <span className="text-red-600">*</span></span>
                         <input value={contractForm.project_address} onChange={(event) => setContractForm((prev) => ({ ...prev, project_address: event.target.value }))} className={contractRequiredFieldClassName("project_address")} data-contract-required-field="project_address" />
+                      </label>
+                      <label className="block">
+                        <span className="mb-1 block text-sm font-medium text-surface-700">楼栋</span>
+                        <input value={contractForm.project_building_no} disabled={contractForm.project_no_room_number} onChange={(event) => setContractForm((prev) => ({ ...prev, project_building_no: event.target.value }))} className={`input-field ${contractForm.project_no_room_number ? "contract-project-locked-input" : ""}`} placeholder="如：3栋" />
+                      </label>
+                      <label className="block">
+                        <span className="mb-1 block text-sm font-medium text-surface-700">单元</span>
+                        <input value={contractForm.project_unit_no} disabled={contractForm.project_no_room_number} onChange={(event) => setContractForm((prev) => ({ ...prev, project_unit_no: event.target.value }))} className={`input-field ${contractForm.project_no_room_number ? "contract-project-locked-input" : ""}`} placeholder="如：2单元" />
+                      </label>
+                      <label className="block">
+                        <span className="mb-1 block text-sm font-medium text-surface-700">房室</span>
+                        <input value={contractForm.project_room_no} disabled={contractForm.project_no_room_number} onChange={(event) => setContractForm((prev) => ({ ...prev, project_room_no: event.target.value }))} className={`input-field ${contractForm.project_no_room_number ? "contract-project-locked-input" : ""}`} placeholder="如：1201室" />
                       </label>
                       <label className="block">
                         <span className="mb-1 block text-sm font-medium text-surface-700">面积（㎡）</span>
                         <input type="number" min="0" step="0.01" value={contractForm.project_area} onChange={(event) => setContractForm((prev) => ({ ...prev, project_area: event.target.value }))} className="input-field" />
+                      </label>
+                      <label className="inline-flex items-center gap-2 text-sm font-medium text-surface-700 md:col-span-4">
+                        <input type="checkbox" checked={contractForm.project_no_room_number} onChange={(event) => setContractForm((prev) => ({ ...prev, project_no_room_number: event.target.checked, project_building_no: event.target.checked ? "" : prev.project_building_no, project_unit_no: event.target.checked ? "" : prev.project_unit_no, project_room_no: event.target.checked ? "" : prev.project_room_no }))} className="h-4 w-4 rounded border-surface-300 accent-primary-600" />
+                        无具体房号
                       </label>
                       <label className="block">
                         <span className="mb-1 block text-sm font-medium text-surface-700">计划开工 <span className="text-red-600">*</span></span>
@@ -7308,219 +7268,197 @@ function CustomerDetailPageContent() {
                       </div>
                     </div>
                   </div>
+                </div>
+              )}
 
-                  <div className="grid gap-4 rounded-[12px] border border-[#dfe7f1] bg-white p-5 lg:grid-cols-2">
-                    <label className="block">
-                      <span className="mb-1 block text-sm font-medium text-surface-700">施工范围 <span className="text-red-600">*</span></span>
-                      <textarea value={contractForm.construction_scope} onChange={(event) => setContractForm((prev) => ({ ...prev, construction_scope: event.target.value }))} className={contractRequiredFieldClassName("construction_scope", "min-h-[130px] resize-y")} data-contract-required-field="construction_scope" />
-                    </label>
-                    <label className="block">
-                      <span className="mb-1 block text-sm font-medium text-surface-700">施工条款</span>
-                      <textarea value={contractForm.construction_terms} onChange={(event) => setContractForm((prev) => ({ ...prev, construction_terms: event.target.value }))} className="input-field min-h-[130px] resize-y" />
-                    </label>
-                    <label className="block">
-                      <span className="mb-1 block text-sm font-medium text-surface-700">质量标准</span>
-                      <textarea value={contractForm.quality_standard} onChange={(event) => setContractForm((prev) => ({ ...prev, quality_standard: event.target.value }))} className="input-field min-h-[110px] resize-y" />
-                    </label>
-                    <label className="block">
-                      <span className="mb-1 block text-sm font-medium text-surface-700">保修条款</span>
-                      <textarea value={contractForm.warranty_terms} onChange={(event) => setContractForm((prev) => ({ ...prev, warranty_terms: event.target.value }))} className="input-field min-h-[110px] resize-y" />
-                    </label>
+              {contractStep === 2 && (
+                <div className="flex min-h-[520px] flex-1 flex-col rounded-[12px] border border-[#dfe7f1] bg-white p-5">
+                  <div className="flex flex-col">
+                    <div className="mb-4">
+                      <h4 className="text-[15px] font-semibold text-[#182230]">合同金额与定金抵扣</h4>
+                      <p className="mt-1 text-xs leading-5 text-[#667085]">请选择已设为正式报价的预算，合同金额会按该预算带出。</p>
+                    </div>
+                    <div className="flex min-h-0 flex-1 flex-col justify-between gap-5">
+                      <div className="space-y-4">
+                      <label className="block md:col-span-2">
+                        <span className="mb-1 block text-sm font-medium text-surface-700">预算报价 <span className="text-red-600">*</span></span>
+                        <SystemSelect
+                          value={contractForm.quotation_id}
+                          onChange={(event) => applyContractQuotation(event.target.value)}
+                          className={contractRequiredFieldClassName("quotation_id")}
+                          data-contract-required-field="quotation_id"
+                        >
+                          <option value="">{contractQuotationOptions.length > 0 ? "请选择正式报价" : "暂无正式报价可选"}</option>
+                          {contractQuotationOptions.map((quotation: any) => (
+                            <option key={quotation.id} value={quotation.id}>
+                              {quotation.title || "装修报价单"} · {formatPlainAmount(getQuotationAmount(quotation))}
+                            </option>
+                          ))}
+                        </SystemSelect>
+                      </label>
+                      {selectedContractQuotation && (
+                        <div className="rounded-[10px] border border-[#abefc6] bg-[#ecfdf3] px-3 py-2 text-sm text-[#027a48] md:col-span-2">
+                          已选择正式报价：{selectedContractQuotation.title || "装修报价单"}，金额 {formatPlainAmount(getQuotationAmount(selectedContractQuotation))}
+                        </div>
+                      )}
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                      <label className="block">
+                        <span className="mb-1 block text-sm font-medium text-surface-700">合同总金额（元） <span className="text-red-600">*</span></span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={contractForm.total_amount}
+                          onChange={(event) => {
+                            const nextTotal = Number(event.target.value || 0);
+                            setContractForm((prev) => ({
+                              ...prev,
+                              total_amount: event.target.value,
+                              deposit_deduct_amount: prev.deposit_deducted ? String(normalizeContractDepositDeduct(prev.deposit_deduct_amount, nextTotal)) : "",
+                            }));
+                          }}
+                          className={contractRequiredFieldClassName("total_amount")}
+                          data-contract-required-field="total_amount"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="mb-1 block text-sm font-medium text-surface-700">收款比例模板 <span className="text-red-600">*</span></span>
+                        <SystemSelect
+                          value={contractForm.payment_scheme_id}
+                          onChange={(event) => setContractForm((prev) => ({ ...prev, payment_scheme_id: event.target.value }))}
+                          className={contractRequiredFieldClassName("payment_scheme_id")}
+                          data-contract-required-field="payment_scheme_id"
+                        >
+                          {paymentSchemes.length === 0 && <option value="">暂无可用模板</option>}
+                          {paymentSchemes.map((scheme) => (
+                            <option key={scheme.id} value={scheme.id}>{scheme.name}{scheme.isDefault ? "（默认）" : ""}</option>
+                          ))}
+                        </SystemSelect>
+                      </label>
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                      <div className="flex min-h-[68px] items-center justify-between gap-3 rounded-[10px] border border-[#dfe7f1] bg-[#f8fafc] px-3 py-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold leading-5 text-[#182230]">定金是否抵扣</p>
+                          <p className="mt-0.5 text-xs leading-5 text-[#667085]">当前已收定金</p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-4">
+                          <p className="text-base font-semibold tabular-nums text-[#d92d20]">{formatPlainAmount(contractDepositTotal)}</p>
+                          <button
+                            type="button"
+                            onClick={() => setContractForm((prev) => {
+                              const nextDeducted = !prev.deposit_deducted;
+                              return {
+                                ...prev,
+                                deposit_deducted: nextDeducted,
+                                deposit_deduct_amount: nextDeducted ? String(getMaxContractDepositDeduct(Number(prev.total_amount || 0))) : "",
+                              };
+                            })}
+                            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${contractForm.deposit_deducted ? "bg-[#2f6feb]" : "bg-[#d0d7e2]"}`}
+                            aria-label="定金是否抵扣"
+                          >
+                            <span className={`absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-[0_1px_3px_rgba(16,24,40,0.2)] transition-transform ${contractForm.deposit_deducted ? "translate-x-5" : "translate-x-0"}`} />
+                          </button>
+                        </div>
+                      </div>
+                      <label className="flex min-h-[68px] items-center justify-between gap-3 rounded-[10px] border border-[#dfe7f1] bg-[#f8fafc] px-3 py-2">
+                        <span className="shrink-0 text-sm font-semibold leading-5 text-[#182230]">本次抵扣定金（元）</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          disabled={!contractForm.deposit_deducted}
+                          value={contractForm.deposit_deducted ? String(contractDepositDeductAmount) : ""}
+                          onChange={(event) => setContractForm((prev) => ({
+                            ...prev,
+                            deposit_deduct_amount: String(normalizeContractDepositDeduct(event.target.value, Number(prev.total_amount || 0))),
+                          }))}
+                          className={contractRequiredFieldClassName("deposit_deduct_amount", `w-[180px] ${contractForm.deposit_deducted ? "" : "bg-surface-50 text-surface-400"}`)}
+                          data-contract-required-field="deposit_deduct_amount"
+                        />
+                      </label>
+                      </div>
+                    </div>
+                    {paymentSchemes.length === 0 && (
+                      <div className="mt-4 rounded-[10px] border border-[#fecdca] bg-[#fef3f2] px-3 py-2 text-sm text-[#b42318]">
+                        当前分公司未配置收款比例模板，请先到分公司设置维护合同收款方案。
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-4 grid min-h-0 flex-1 gap-4 border-t border-[#e2e7ee] pt-4 xl:grid-cols-[280px_minmax(0,1fr)]">
+                    <div className="flex min-h-0 flex-col rounded-[12px] border border-[#dfe7f1] bg-[#f8fafc] p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <h4 className="text-[15px] font-semibold text-[#182230]">金额汇总</h4>
+                        <span className={`rounded-[8px] px-3 py-1 text-xs font-semibold ${
+                          contractPaymentRatioTotal === 100 ? "bg-[#ecfdf3] text-[#027a48]" : "bg-[#fef3f2] text-[#b42318]"
+                        }`}>
+                          收款比例 {formatPlainAmount(contractPaymentRatioTotal).replace(".00", "")}%
+                        </span>
+                      </div>
+                      <div className="mt-3 grid min-h-0 flex-1 gap-3">
+                        <div className="flex flex-col justify-between rounded-[10px] border border-[#e2e7ee] bg-white px-3 py-2.5">
+                          <p className="text-xs text-[#667085]">合同总金额</p>
+                          <p className="font-semibold tabular-nums text-[#d92d20]">{formatPlainAmount(contractTotalAmount)}</p>
+                        </div>
+                        <div className="flex flex-col justify-between rounded-[10px] border border-[#e2e7ee] bg-white px-3 py-2.5">
+                          <p className="text-xs text-[#667085]">定金抵扣</p>
+                          <p className="font-semibold tabular-nums text-[#182230]">{formatPlainAmount(contractDepositDeductAmount)}</p>
+                        </div>
+                        <div className="flex flex-col justify-between rounded-[10px] border border-[#e2e7ee] bg-white px-3 py-2.5">
+                          <p className="text-xs text-[#667085]">应收合同款</p>
+                          <p className="font-semibold tabular-nums text-[#d92d20]">{formatPlainAmount(contractPayableAmount)}</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[12px] border border-[#dfe7f1] bg-white">
+                      <div className="flex items-center justify-between border-b border-[#e2e7ee] bg-[#f8fafc] px-4 py-3">
+                        <div>
+                          <h4 className="text-[15px] font-semibold text-[#182230]">收款计划预览</h4>
+                          <p className="mt-1 text-xs text-[#667085]">按应收合同款和选择的收款比例自动生成</p>
+                        </div>
+                        {selectedPaymentScheme && (
+                          <span className="rounded-full border border-[#dce4ef] bg-white px-3 py-1 text-xs font-semibold text-[#344054]">
+                            {selectedPaymentScheme.name}
+                          </span>
+                        )}
+                      </div>
+                      {contractPaymentStages.length > 0 ? (
+                        <div className="mx-4 my-3 overflow-hidden rounded-[10px] border border-[#e2e7ee]">
+                        <table className="w-full table-fixed text-[13px] font-medium leading-5 text-[#344054]">
+                          <thead className="bg-[#f8fafc]">
+                            <tr className="border-b border-[#e2e7ee] text-[13px] font-semibold text-[#344054]">
+                              <th className="w-[8%] px-2 py-3 text-center">期数</th>
+                              <th className="w-[24%] px-2 py-3 text-center">款项名称</th>
+                              <th className="w-[12%] px-2 py-3 text-center">比例</th>
+                              <th className="w-[24%] px-2 py-3 text-center">应收金额</th>
+                              <th className="w-[32%] px-2 py-3 text-center">收款阶段</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-[#eef2f6]">
+                            {contractPaymentStages.map((stage, index) => (
+                              <tr key={stage.id || index} className="even:bg-[#fbfcfe] hover:bg-[#f4f7fb]">
+                                <td className="px-2 py-3 text-center text-[#344054]">{index + 1}</td>
+                                <td className="truncate px-2 py-3 text-center text-[#344054]">{stage.name || `第${index + 1}期款`}</td>
+                                <td className="px-2 py-3 text-center text-[#344054]">{Number(stage.ratio || 0)}%</td>
+                                <td className="px-2 py-3 text-center font-semibold tabular-nums text-[#344054]">{formatPlainAmount(stage.amount || 0)}</td>
+                                <td className="truncate px-2 py-3 text-center text-[#344054]">{stage.trigger || "-"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        </div>
+                      ) : (
+                        <div className="py-12 text-center text-sm text-surface-400">请选择收款比例模板</div>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
 
               {contractStep === 3 && (
-                <div className="flex min-h-[520px] flex-col gap-4">
-                  <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
-                    <div className="rounded-[12px] border border-[#dfe7f1] bg-white p-5">
-                      <div className="mb-4">
-                        <h4 className="text-[15px] font-semibold text-[#182230]">合同金额与定金抵扣</h4>
-                        <p className="mt-1 text-xs leading-5 text-[#667085]">请选择已设为正式报价的预算，合同金额会按该预算带出。</p>
-                      </div>
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <label className="block md:col-span-2">
-                          <span className="mb-1 block text-sm font-medium text-surface-700">预算报价 <span className="text-red-600">*</span></span>
-                          <SystemSelect
-                            value={contractForm.quotation_id}
-                            onChange={(event) => applyContractQuotation(event.target.value)}
-                            className={contractRequiredFieldClassName("quotation_id")}
-                            data-contract-required-field="quotation_id"
-                          >
-                            <option value="">{contractQuotationOptions.length > 0 ? "请选择正式报价" : "暂无正式报价可选"}</option>
-                            {contractQuotationOptions.map((quotation: any) => (
-                              <option key={quotation.id} value={quotation.id}>
-                                {quotation.title || "装修报价单"} · {formatPlainAmount(getQuotationAmount(quotation))} · {formatDateTime(quotation.updated_at || quotation.created_at)}
-                              </option>
-                            ))}
-                          </SystemSelect>
-                          {contractQuotationOptions.length === 0 ? (
-                            <p className="mt-1 text-xs text-red-600">该客户暂无正式报价，请先在预算报价中将一份报价设为正式报价。</p>
-                          ) : (
-                            <p className="mt-1 text-xs text-surface-500">这里只能选择状态为“正式报价”的预算。</p>
-                          )}
-                        </label>
-                        {selectedContractQuotation && (
-                          <div className="rounded-[10px] border border-[#abefc6] bg-[#ecfdf3] px-3 py-2 text-sm text-[#027a48] md:col-span-2">
-                            已选择正式报价：{selectedContractQuotation.title || "装修报价单"}，金额 {formatPlainAmount(getQuotationAmount(selectedContractQuotation))}
-                          </div>
-                        )}
-                        <label className="block">
-                          <span className="mb-1 block text-sm font-medium text-surface-700">合同总金额（元） <span className="text-red-600">*</span></span>
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={contractForm.total_amount}
-                            onChange={(event) => {
-                              const nextTotal = Number(event.target.value || 0);
-                              setContractForm((prev) => ({
-                                ...prev,
-                                total_amount: event.target.value,
-                                deposit_deduct_amount: prev.deposit_deducted ? String(normalizeContractDepositDeduct(prev.deposit_deduct_amount, nextTotal)) : "",
-                              }));
-                            }}
-                            className={contractRequiredFieldClassName("total_amount")}
-                            data-contract-required-field="total_amount"
-                            placeholder="请输入合同总金额"
-                          />
-                        </label>
-                        <label className="block">
-                          <span className="mb-1 block text-sm font-medium text-surface-700">收款比例模板 <span className="text-red-600">*</span></span>
-                          <SystemSelect
-                            value={contractForm.payment_scheme_id}
-                            onChange={(event) => setContractForm((prev) => ({ ...prev, payment_scheme_id: event.target.value }))}
-                            className={contractRequiredFieldClassName("payment_scheme_id")}
-                            data-contract-required-field="payment_scheme_id"
-                          >
-                            {paymentSchemes.length === 0 && <option value="">暂无可用模板</option>}
-                            {paymentSchemes.map((scheme) => (
-                              <option key={scheme.id} value={scheme.id}>{scheme.name}{scheme.isDefault ? "（默认）" : ""}</option>
-                            ))}
-                          </SystemSelect>
-                        </label>
-                        <div className="flex min-h-[118px] flex-col justify-between rounded-[10px] border border-[#dfe7f1] bg-[#f8fafc] px-4 py-3.5">
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="text-sm font-semibold leading-5 text-[#182230]">定金是否抵扣</p>
-                              <p className="mt-1 text-xs leading-5 text-[#667085]">当前已收定金</p>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => setContractForm((prev) => {
-                                const nextDeducted = !prev.deposit_deducted;
-                                return {
-                                  ...prev,
-                                  deposit_deducted: nextDeducted,
-                                  deposit_deduct_amount: nextDeducted ? String(getMaxContractDepositDeduct(Number(prev.total_amount || 0))) : "",
-                                };
-                              })}
-                              className={`relative mt-0.5 h-6 w-11 shrink-0 rounded-full transition-colors ${contractForm.deposit_deducted ? "bg-[#2f6feb]" : "bg-[#d0d7e2]"}`}
-                              aria-label="定金是否抵扣"
-                            >
-                              <span className={`absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-[0_1px_3px_rgba(16,24,40,0.2)] transition-transform ${contractForm.deposit_deducted ? "translate-x-5" : "translate-x-0"}`} />
-                            </button>
-                          </div>
-                          <p className="text-lg font-semibold leading-6 tabular-nums text-[#d92d20]">{formatPlainAmount(contractDepositTotal)}</p>
-                        </div>
-                        <label className="flex min-h-[118px] flex-col justify-between rounded-[10px] border border-[#dfe7f1] bg-[#f8fafc] px-4 py-3.5">
-                          <span className="block text-sm font-semibold leading-5 text-[#182230]">本次抵扣定金（元）</span>
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            disabled={!contractForm.deposit_deducted}
-                            value={contractForm.deposit_deducted ? String(contractDepositDeductAmount) : ""}
-                            onChange={(event) => setContractForm((prev) => ({
-                              ...prev,
-                              deposit_deduct_amount: String(normalizeContractDepositDeduct(event.target.value, Number(prev.total_amount || 0))),
-                            }))}
-                            className={contractRequiredFieldClassName("deposit_deduct_amount", contractForm.deposit_deducted ? "" : "bg-surface-50 text-surface-400")}
-                            data-contract-required-field="deposit_deduct_amount"
-                            placeholder={contractForm.deposit_deducted ? "请输入抵扣金额" : "不抵扣时为空"}
-                          />
-                          <p className="text-xs leading-5 text-surface-500">最多可抵扣 {formatPlainAmount(getMaxContractDepositDeduct(contractTotalAmount))}，取已收定金和合同金额中的较小值。</p>
-                        </label>
-                      </div>
-                      {paymentSchemes.length === 0 && (
-                        <div className="mt-4 rounded-[10px] border border-[#fecdca] bg-[#fef3f2] px-3 py-2 text-sm text-[#b42318]">
-                          当前分公司未配置收款比例模板，请先到分公司设置维护合同收款方案。
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="rounded-[12px] border border-[#dfe7f1] bg-[#f8fafc] p-4">
-                      <h4 className="text-[15px] font-semibold text-[#182230]">金额汇总</h4>
-                      <div className="mt-4 space-y-3 text-sm">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[#667085]">合同总金额</span>
-                          <span className="font-semibold tabular-nums text-[#d92d20]">{formatPlainAmount(contractTotalAmount)}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-[#667085]">定金抵扣</span>
-                          <span className="font-semibold tabular-nums text-[#182230]">{formatPlainAmount(contractDepositDeductAmount)}</span>
-                        </div>
-                        <div className="border-t border-[#dfe7f1] pt-3">
-                          <div className="flex items-center justify-between">
-                            <span className="font-semibold text-[#182230]">应收合同款</span>
-                            <span className="text-xl font-semibold tabular-nums text-[#d92d20]">{formatPlainAmount(contractPayableAmount)}</span>
-                          </div>
-                        </div>
-                        <div className={`rounded-[10px] px-3 py-2 text-xs font-semibold ${
-                          contractPaymentRatioTotal === 100 ? "bg-[#ecfdf3] text-[#027a48] ring-1 ring-[#abefc6]" : "bg-[#fef3f2] text-[#b42318] ring-1 ring-[#fecdca]"
-                        }`}>
-                          收款比例合计：{formatPlainAmount(contractPaymentRatioTotal).replace(".00", "")}%
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="overflow-hidden rounded-[12px] border border-[#dfe7f1] bg-white">
-                    <div className="flex items-center justify-between border-b border-[#e2e7ee] bg-[#f8fafc] px-4 py-3">
-                      <div>
-                        <h4 className="text-[15px] font-semibold text-[#182230]">收款计划预览</h4>
-                        <p className="mt-1 text-xs text-[#667085]">按应收合同款和选择的收款比例自动生成</p>
-                      </div>
-                      {selectedPaymentScheme && (
-                        <span className="rounded-full border border-[#dce4ef] bg-white px-3 py-1 text-xs font-semibold text-[#344054]">
-                          {selectedPaymentScheme.name}
-                        </span>
-                      )}
-                    </div>
-                    {contractPaymentStages.length > 0 ? (
-                      <ThinScrollArea>
-                        <table className="w-full min-w-[760px] text-sm">
-                          <thead className="bg-[#f8fafc]">
-                            <tr className="border-b border-[#e2e7ee] text-xs font-semibold text-[#475467]">
-                              <th className="px-4 py-3 text-center">期数</th>
-                              <th className="px-4 py-3 text-left">收款阶段</th>
-                              <th className="px-4 py-3 text-center">比例</th>
-                              <th className="px-4 py-3 text-left">触发条件</th>
-                              <th className="px-4 py-3 text-right">应收金额</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-[#eef2f6]">
-                            {contractPaymentStages.map((stage, index) => (
-                              <tr key={stage.id || index} className="hover:bg-[#f8fafc]">
-                                <td className="px-4 py-3 text-center text-[#667085]">{index + 1}</td>
-                                <td className="px-4 py-3 font-medium text-[#182230]">{stage.name || `第${index + 1}期款`}</td>
-                                <td className="px-4 py-3 text-center text-[#475467]">{Number(stage.ratio || 0)}%</td>
-                                <td className="px-4 py-3 text-[#667085]">{stage.trigger || "-"}</td>
-                                <td className="px-4 py-3 text-right font-semibold tabular-nums text-[#d92d20]">{formatPlainAmount(stage.amount || 0)}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </ThinScrollArea>
-                    ) : (
-                      <div className="py-12 text-center text-sm text-surface-400">请选择收款比例模板</div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {contractStep === 4 && (
-                <div className="grid min-h-[520px] gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
+                <div className="grid min-h-[520px] flex-1 gap-4">
                   <div className="rounded-[12px] border border-[#dfe7f1] bg-white p-5">
                     <div className="mb-4 flex items-start justify-between gap-3">
                       <div>
@@ -7549,7 +7487,7 @@ function CustomerDetailPageContent() {
                     </div>
 
                     {contractForm.attachments.length > 0 ? (
-                      <div className="space-y-2">
+                      <div className="min-h-[180px] space-y-2">
                         {contractForm.attachments.map((file) => (
                           <div key={file.id} className="flex items-center gap-3 rounded-[10px] border border-[#e2e7ee] bg-white px-3 py-2.5 hover:bg-[#f8fafc]">
                             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#edf4ff] text-[#2f6feb]">
@@ -7591,41 +7529,12 @@ function CustomerDetailPageContent() {
                       <textarea
                         value={contractForm.remarks}
                         onChange={(event) => setContractForm((prev) => ({ ...prev, remarks: event.target.value }))}
-                        className="input-field min-h-[120px] resize-y"
+                        className="input-field contract-remark-textarea resize-y"
                         placeholder="例如：客户要求本周内完成签约归档，补充协议另行上传。"
                       />
                     </label>
                   </div>
 
-                  <div className="rounded-[12px] border border-[#dfe7f1] bg-[#f8fafc] p-4">
-                    <h4 className="text-[15px] font-semibold text-[#182230]">创建前确认</h4>
-                    <div className="mt-4 space-y-3 text-sm">
-                      <div className="rounded-[10px] border border-[#e2e7ee] bg-white px-3 py-2.5">
-                        <p className="text-xs text-[#667085]">合同名称</p>
-                        <p className="mt-1 break-words font-semibold leading-5 text-[#182230]">{contractForm.title || "-"}</p>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="rounded-[10px] border border-[#e2e7ee] bg-white px-3 py-2.5">
-                          <p className="text-xs text-[#667085]">合同类型</p>
-                          <p className="mt-1 font-semibold text-[#182230]">{contractForm.contract_type || "-"}</p>
-                        </div>
-                        <div className="rounded-[10px] border border-[#e2e7ee] bg-white px-3 py-2.5">
-                          <p className="text-xs text-[#667085]">收款期数</p>
-                          <p className="mt-1 font-semibold text-[#182230]">{contractPaymentStages.length} 期</p>
-                        </div>
-                      </div>
-                      <div className="rounded-[10px] border border-[#e2e7ee] bg-white px-3 py-2.5">
-                        <p className="text-xs text-[#667085]">应收合同款</p>
-                        <p className="mt-1 text-xl font-semibold tabular-nums text-[#d92d20]">{formatPlainAmount(contractPayableAmount)}</p>
-                      </div>
-                      <div className="rounded-[10px] border border-[#fedf89] bg-[#fffaeb] px-3 py-2 text-xs leading-5 text-[#b54708]">
-                        创建后会生成合同记录、收款计划，并将客户进度更新为合同已创建。合同内容后续可继续完善查看。
-                      </div>
-                    </div>
-                    <div className="mt-4 rounded-[10px] border border-[#e2e7ee] bg-white px-3 py-3 text-xs leading-5 text-[#667085]">
-                      附件不是必填项。若纸质合同尚未扫描，可以先完成合同创建，后续从合同资料中补充上传。
-                    </div>
-                  </div>
                 </div>
               )}
 

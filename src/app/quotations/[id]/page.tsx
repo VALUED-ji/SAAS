@@ -1268,6 +1268,7 @@ function QuantityLinkInput({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const skipBlurCommitRef = useRef(false);
   const previousValueRef = useRef("");
+  const moveToNextRowOnEnter = !isOtherCategory(item.category);
 
   const prepareEditing = (input: HTMLInputElement) => {
     if (readOnly) return;
@@ -1469,6 +1470,9 @@ function QuantityLinkInput({
             commit(input.value);
             skipBlurCommitRef.current = true;
             input.blur();
+            if (moveToNextRowOnEnter) {
+              focusNextQuoteCell(input);
+            }
             return;
           }
           if (event.key === "Escape") {
@@ -1683,7 +1687,7 @@ function newItem(category: QuotationItem["category"], space?: string, options: {
     material_model: "",
     remark: "",
     unit: "",
-    quantity: isOther ? 1 : 0,
+    quantity: isOther || isCustomCabinetCategory(category) ? 1 : 0,
     unit_price: 0,
     material_cost: 0,
     labor_cost: 0,
@@ -9900,18 +9904,18 @@ export default function QuotationDetailPage() {
         .quotation-detail-ui .quote-name-cell-wrap {
           isolation: isolate;
         }
-        .quotation-detail-ui .quote-name-quick-replace {
+        .quotation-detail-ui .quote-row-quick-replace {
           position: absolute;
-          left: 7px;
+          right: 4px;
           top: 50%;
           z-index: 4;
           display: inline-flex;
-          height: 24px;
-          width: 24px;
+          height: 20px;
+          width: 20px;
           align-items: center;
           justify-content: center;
           border: 1px solid rgba(64, 122, 255, 0.24);
-          border-radius: 7px;
+          border-radius: 6px;
           background: rgba(255, 255, 255, 0.96);
           color: #407AFF;
           opacity: 0;
@@ -9919,14 +9923,13 @@ export default function QuotationDetailPage() {
           transform: translateY(-50%) scale(0.92);
           transition: opacity 140ms ease, transform 140ms ease, border-color 140ms ease, background-color 140ms ease, color 140ms ease;
         }
-        .quotation-detail-ui .quote-name-quick-replace:hover {
+        .quotation-detail-ui .quote-row-quick-replace:hover {
           border-color: rgba(64, 122, 255, 0.42);
           background: #edf4ff;
           color: #245ee8;
         }
-        .quotation-detail-ui .quote-item-row:hover .quote-name-quick-replace,
-        .quotation-detail-ui .quote-name-cell-wrap:focus-within .quote-name-quick-replace,
-        .quotation-detail-ui .quote-name-quick-replace:focus-visible {
+        .quotation-detail-ui .quote-item-row:hover .quote-row-quick-replace,
+        .quotation-detail-ui .quote-row-quick-replace:focus-visible {
           opacity: 1;
           pointer-events: auto;
           transform: translateY(-50%) scale(1);
@@ -14899,7 +14902,6 @@ function QuoteNameTextarea({
   readOnly,
   special,
   highlight,
-  onQuickReplace,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -14907,7 +14909,6 @@ function QuoteNameTextarea({
   readOnly?: boolean;
   special?: boolean;
   highlight?: Pick<FindReplaceActiveHighlight, "start" | "length"> | null;
-  onQuickReplace?: () => void;
 }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -14948,27 +14949,8 @@ function QuoteNameTextarea({
     };
   }, [resizeTextarea, value]);
 
-		  return (
-		    <div ref={wrapperRef} className="quote-name-cell-wrap relative flex h-full min-h-[56px] w-full items-center">
-        {onQuickReplace && !readOnly ? (
-          <button
-            type="button"
-            onMouseDown={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-            }}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              onQuickReplace();
-            }}
-            className="quote-name-quick-replace no-print"
-            title="替换定额"
-            aria-label="替换定额"
-          >
-            <Replace className="h-3.5 w-3.5" />
-          </button>
-        ) : null}
+	  return (
+	    <div ref={wrapperRef} className="quote-name-cell-wrap relative flex h-full min-h-[56px] w-full items-center">
 	      {special && <span className="quote-special-mark" title="特价项目">特</span>}
 	      {highlight && value ? (
 	        <span className={`quote-name-highlight-layer quote-name-highlight-layer-multiline ${className}`} aria-hidden="true">
@@ -16261,6 +16243,7 @@ function QuoteRowIndexCell({
   selected,
   onToggle,
   onItemPointerDown,
+  onQuickReplace,
 }: {
   itemKey: string;
   label: string | number;
@@ -16269,6 +16252,7 @@ function QuoteRowIndexCell({
   selected: boolean;
   onToggle: (key: string) => void;
   onItemPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => void;
+  onQuickReplace?: () => void;
 }) {
   return (
     <div className={cn("quote-row-index-inner", selected && "is-selected")}>
@@ -16314,6 +16298,25 @@ function QuoteRowIndexCell({
         )}
         <span className="quote-row-number min-w-4">{label}</span>
       </button>
+      {onQuickReplace ? (
+        <button
+          type="button"
+          onMouseDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onQuickReplace();
+          }}
+          className="quote-row-quick-replace no-print"
+          title="替换定额"
+          aria-label="替换定额"
+        >
+          <Replace className="h-3 w-3" />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -16442,6 +16445,7 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
           selected={selected}
           onToggle={onToggleItemSelection}
           onItemPointerDown={(event) => onItemPointerDown(event, index)}
+          onQuickReplace={!readOnly && onReplaceBaseItem ? () => onReplaceBaseItem(index) : undefined}
         />
       </td>
       {showSpace && (
@@ -16457,7 +16461,6 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
           readOnly={readOnly}
           special={isSpecialQuoteItem(item)}
           highlight={findReplaceHighlight?.field === "name" ? findReplaceHighlight : null}
-          onQuickReplace={!readOnly && onReplaceBaseItem ? () => onReplaceBaseItem(index) : undefined}
         />
       </td>
       <td className="border border-surface-200 p-0" style={cellStyle}>
@@ -16700,11 +16703,11 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
       <td className="border border-surface-200 p-0" style={cellStyle}>
         <QuoteNumberInput value={item.material_cost || 0} onChange={(value) => handleChange({ material_cost: value })} className="text-center" disabled={readOnly} />
       </td>
-      <td className="border border-surface-200 px-1 py-1 text-center font-semibold text-surface-500" style={cellStyle}>×</td>
+      <td className="border border-surface-200 px-0 py-1 text-center font-semibold text-surface-500" style={cellStyle}>×</td>
       <td className="border border-surface-200 p-0" style={cellStyle}>
         <QuoteNumberInput value={item.labor_cost || 0} onChange={(value) => handleChange({ labor_cost: value })} className="text-center" disabled={readOnly} />
       </td>
-      <td className="border border-surface-200 px-1 py-1 text-center font-semibold text-surface-500" style={cellStyle}>×</td>
+      <td className="border border-surface-200 px-0 py-1 text-center font-semibold text-surface-500" style={cellStyle}>×</td>
       <td className="border border-surface-200 p-0" style={cellStyle}>
         <QuoteNumberInput value={item.profit_margin || 0} onChange={(value) => handleChange({ profit_margin: value })} className="text-center" disabled={readOnly} />
       </td>
@@ -16769,25 +16772,40 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
 
   return (
     <ThinScrollArea className="quote-table-shell" scrollClassName="quote-table-freeze-scroll">
-      <table className={`w-full table-fixed border-collapse text-sm ${showSpace ? "min-w-[1430px]" : "min-w-[1320px]"}`}>
+      <table className={`w-full table-fixed border-collapse text-sm ${showSpace ? "min-w-[1461px]" : "min-w-[1349px]"}`}>
+        <colgroup>
+          <col style={{ width: "80px" }} />
+          {showSpace && <col style={{ width: "112px" }} />}
+          <col style={{ width: "248px" }} />
+          <col style={{ width: "139px" }} />
+          <col style={{ width: "51px" }} />
+          <col style={{ width: "143px" }} />
+          <col style={{ width: "51px" }} />
+          <col style={{ width: "144px" }} />
+          <col style={{ width: "88px" }} />
+          <col style={{ width: "59px" }} />
+          <col style={{ width: "59px" }} />
+          <col style={{ width: "152px" }} />
+          <col style={{ width: "135px" }} />
+        </colgroup>
         <thead className="bg-surface-50 text-center text-xs font-semibold text-surface-600">
           <tr>
             <QuoteIndexHeaderCell rowSpan={2} itemKeys={itemKeys} selectedItemKeys={selectedItemKeys} readOnly={readOnly} onToggleAll={onToggleAllItemSelection} />
             {showSpace && <th rowSpan={2} className="w-28 border border-surface-200 px-3 py-1.5">空间/类别</th>}
-            <th rowSpan={2} className="w-52 border border-surface-200 px-3 py-1.5">名称</th>
+            <th rowSpan={2} className="w-[248px] border border-surface-200 px-3 py-1.5">名称</th>
             <th colSpan={5} className="border border-surface-200 px-2 py-1.5">H高×W宽×D深（mm）</th>
-            <th rowSpan={2} className="w-36 border border-surface-200 px-2 py-1.5">数量</th>
-            <th rowSpan={2} className="w-24 border border-surface-200 px-2 py-1.5">平方</th>
-            <th rowSpan={2} className="w-24 border border-surface-200 px-2 py-1.5">单价</th>
-            <th rowSpan={2} className="w-28 border border-surface-200 px-2 py-1.5">金额</th>
-            <th rowSpan={2} className="w-60 border border-surface-200 px-3 py-1.5">备注</th>
+            <th rowSpan={2} className="w-[88px] border border-surface-200 px-2 py-1.5">数量</th>
+            <th rowSpan={2} className="w-[59px] border border-surface-200 px-2 py-1.5">平方</th>
+            <th rowSpan={2} className="w-[59px] border border-surface-200 px-2 py-1.5">单价</th>
+            <th rowSpan={2} className="w-[152px] border border-surface-200 px-2 py-1.5">金额</th>
+            <th rowSpan={2} className="w-[135px] border border-surface-200 px-3 py-1.5">备注</th>
           </tr>
           <tr>
-            <th className="w-24 border border-surface-200 px-2 py-1.5">H高</th>
-            <th className="w-8 border border-surface-200 px-1 py-1.5">×</th>
-            <th className="w-24 border border-surface-200 px-2 py-1.5">W宽</th>
-            <th className="w-8 border border-surface-200 px-1 py-1.5">×</th>
-            <th className="w-24 border border-surface-200 px-2 py-1.5">D深</th>
+            <th className="w-[139px] border border-surface-200 px-2 py-1.5">H高</th>
+            <th className="w-[51px] border border-surface-200 px-0 py-1.5">×</th>
+            <th className="w-[143px] border border-surface-200 px-2 py-1.5">W宽</th>
+            <th className="w-[51px] border border-surface-200 px-0 py-1.5">×</th>
+            <th className="w-[144px] border border-surface-200 px-2 py-1.5">D深</th>
           </tr>
         </thead>
         <tbody>

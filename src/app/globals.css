@@ -35,6 +35,29 @@
   }
 }
 
+html body .dashboard-scale-root .contract-workbench-ui .input-field.contract-project-locked-input,
+html body .dashboard-scale-root .contract-workbench-ui .input-field.contract-project-locked-input:disabled {
+  border-color: #d8dee6 !important;
+  background: #f3f4f6 !important;
+  color: #6b7280 !important;
+  -webkit-text-fill-color: #6b7280 !important;
+  cursor: not-allowed !important;
+  opacity: 1 !important;
+}
+
+html body .dashboard-scale-root .contract-workbench-ui textarea.input-field.contract-remark-textarea {
+  height: 320px !important;
+  min-height: 320px !important;
+}
+
+html body .dashboard-scale-root .contract-workbench-ui button.input-field > svg {
+  width: 15px !important;
+  height: 15px !important;
+  max-width: 15px !important;
+  max-height: 15px !important;
+  flex: 0 0 15px !important;
+}
+
 @media screen and (min-width: 1024px) and (max-width: 1535px) {
   .dashboard-scale-viewport {
     width: 111.111vw;

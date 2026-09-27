@@ -63,30 +63,6 @@ function safeJsonStringify(value: unknown) {
   return JSON.stringify(value ?? {});
 }
 
-function makeTemplateSummary(value: any) {
-  if (!value || typeof value !== "object") return null;
-  return {
-    id: cleanText(value.id || value.template_id),
-    name: cleanText(value.name) || "未命名模板",
-    type: cleanText(value.type) || "半包",
-    remark: cleanText(value.remark || value.description || value.pricingRule),
-    status: cleanText(value.status) || "enabled",
-    createdByName: cleanText(value.createdByName || value.created_by_name || value.creatorName || value.creator) || "系统管理员",
-    autoScope: value.autoScope || value.scope || value.accessScope || null,
-    quoteConfig: value.quoteConfig ? {
-      mode: cleanText(value.quoteConfig.mode) || "list",
-    } : { mode: "list" },
-    createdAt: cleanText(value.createdAt || value.created_at || value.updatedAt),
-    updatedAt: cleanText(value.updatedAt || value.updated_at),
-    spaces: [],
-    projectGroups: [],
-    comprehensiveFeeMode: "formula",
-    comprehensiveFees: [],
-    appendixNote: "",
-    budgetCompilationHtml: "",
-  };
-}
-
 function getActiveOrgOptions(db: Db, companyId: string) {
   const rows = db.prepare(`
     SELECT id, name, type, parent_id, COALESCE(is_active, 1) as is_active
@@ -174,6 +150,60 @@ function normalizeTemplatePayload(
   };
 }
 
+function makeTemplateSummary(
+  row: {
+    template_id?: string | null;
+    name?: string | null;
+    status?: string | null;
+    scope_org_unit_id?: string | null;
+    created_at?: string | null;
+    updated_at?: string | null;
+    template_type?: string | null;
+    remark?: string | null;
+    created_by_name?: string | null;
+    created_by_name_snake?: string | null;
+    quote_config?: string | null;
+    construction_template_config?: string | null;
+    payload_created_at?: string | null;
+    payload_created_at_snake?: string | null;
+    payload_updated_at?: string | null;
+  },
+  branchOptions: ReturnType<typeof getManageableBranchOptions>["branchOptions"],
+) {
+  const scopeOrgUnitId = cleanText(row.scope_org_unit_id);
+  const branch = branchOptions.find((option) => option.id === scopeOrgUnitId);
+  return {
+    id: cleanText(row.template_id),
+    name: cleanText(row.name) || "未命名模板",
+    type: cleanText(row.template_type) || "半包",
+    remark: cleanText(row.remark),
+    status: cleanText(row.status) || "enabled",
+    createdByName: cleanText(row.created_by_name) || cleanText(row.created_by_name_snake),
+    autoScope: branch ? {
+      scopeType: "branch",
+      branchOrgUnitId: branch.id,
+      branchOrgUnitName: branch.name,
+      branchOrgUnitPath: branch.path,
+      orgUnitId: branch.id,
+      orgUnitName: branch.name,
+      orgUnitPath: branch.path,
+      orgUnitType: branch.type || "company",
+    } : null,
+    constructionTemplateConfig: safeJsonParse(row.construction_template_config, {}),
+    quoteConfig: safeJsonParse(row.quote_config, {}),
+    projectGroups: [],
+    comprehensiveFees: [],
+    appendixNote: "",
+    budgetCompilationHtml: "",
+    spaces: [],
+    createdAt: cleanText(row.payload_created_at)
+      || cleanText(row.payload_created_at_snake)
+      || cleanText(row.created_at)
+      || cleanText(row.updated_at),
+    updatedAt: cleanText(row.payload_updated_at) || cleanText(row.updated_at) || cleanText(row.created_at),
+  };
+}
+
 function backfillBranchTemplateScopes(
   db: Db,
   companyId: string,
@@ -210,15 +240,54 @@ export async function GET(req: NextRequest) {
 
   const db = getDb();
   ensureQuotaTemplatesTable(db);
-  const templateId = cleanText(req.nextUrl.searchParams.get("templateId"));
-  const summaryOnly = req.nextUrl.searchParams.get("summary") === "1";
   const { orgOptions, branchOptions } = getManageableBranchOptions(db, auth);
   backfillBranchTemplateScopes(db, auth.companyId, orgOptions, branchOptions);
   const branchIds = branchOptions.map((option) => option.id);
   const branchPlaceholders = branchIds.map(() => "?").join(",");
+  const summaryOnly = cleanText(req.nextUrl.searchParams.get("summary")) === "1";
+  if (summaryOnly) {
+    const rows = db.prepare(`
+      SELECT
+        template_id,
+        name,
+        status,
+        scope_org_unit_id,
+        created_at,
+        updated_at,
+        json_extract(payload, '$.type') AS template_type,
+        COALESCE(
+          json_extract(payload, '$.remark'),
+          json_extract(payload, '$.description'),
+          json_extract(payload, '$.pricingRule')
+        ) AS remark,
+        json_extract(payload, '$.createdByName') AS created_by_name,
+        json_extract(payload, '$.created_by_name') AS created_by_name_snake,
+        json_extract(payload, '$.quoteConfig') AS quote_config,
+        json_extract(payload, '$.constructionTemplateConfig') AS construction_template_config,
+        json_extract(payload, '$.createdAt') AS payload_created_at,
+        json_extract(payload, '$.created_at') AS payload_created_at_snake,
+        json_extract(payload, '$.updatedAt') AS payload_updated_at
+      FROM quota_templates
+      WHERE company_id = ?
+        AND deleted_at IS NULL
+        AND scope_type = 'branch'
+        ${branchIds.length > 0 ? `AND scope_org_unit_id IN (${branchPlaceholders})` : "AND 1 = 0"}
+      ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC, template_id DESC
+    `).all(auth.companyId, ...branchIds) as any[];
+    return NextResponse.json({
+      templates: rows.map((row) => makeTemplateSummary(row, branchOptions)),
+      orgOptions,
+      scopeOptions: branchOptions.map((option) => ({
+        id: option.id,
+        name: option.name,
+        path: option.path,
+        type: option.type || "company",
+      })),
+    });
+  }
 
+  const templateId = cleanText(req.nextUrl.searchParams.get("templateId"));
   if (templateId) {
-    if (branchIds.length === 0) return NextResponse.json({ message: "预算模板不存在" }, { status: 404 });
     const row = db.prepare(`
       SELECT payload
       FROM quota_templates
@@ -226,11 +295,11 @@ export async function GET(req: NextRequest) {
         AND template_id = ?
         AND deleted_at IS NULL
         AND scope_type = 'branch'
-        AND scope_org_unit_id IN (${branchPlaceholders})
+        ${branchIds.length > 0 ? `AND scope_org_unit_id IN (${branchPlaceholders})` : "AND 1 = 0"}
       LIMIT 1
     `).get(auth.companyId, templateId, ...branchIds) as { payload?: string | null } | undefined;
     const template = safeJsonParse(row?.payload, null);
-    if (!template) return NextResponse.json({ message: "预算模板不存在" }, { status: 404 });
+    if (!template) return NextResponse.json({ message: "预算模板不存在或无权查看" }, { status: 404 });
     return NextResponse.json({ template });
   }
 
@@ -245,7 +314,6 @@ export async function GET(req: NextRequest) {
   `).all(auth.companyId, ...branchIds) as Array<{ payload?: string | null }>;
   const templates = rows
     .map((row) => safeJsonParse(row.payload, null))
-    .map((template) => summaryOnly ? makeTemplateSummary(template) : template)
     .filter(Boolean);
   return NextResponse.json({
     templates,
@@ -266,6 +334,7 @@ export async function POST(req: NextRequest) {
   if (!isSameOriginMutation(req)) return NextResponse.json({ message: "非法请求来源" }, { status: 403 });
 
   const body = await req.json().catch(() => ({}));
+  const action = cleanText(body?.action);
   const db = getDb();
   ensureQuotaTemplatesTable(db);
   const { orgOptions, branchOptions } = getManageableBranchOptions(db, auth);
@@ -275,16 +344,15 @@ export async function POST(req: NextRequest) {
   const managedScopeSql = branchIds.length > 0
     ? `scope_type = 'branch' AND scope_org_unit_id IN (${branchPlaceholders})`
     : "1 = 0";
-  const managedScopeParams = branchIds;
-  if (body?.action === "delete") {
-    const templateId = cleanText(body?.templateId);
+  if (action === "delete") {
+    const templateId = cleanText(body?.templateId || body?.template_id);
     if (!templateId) return NextResponse.json({ message: "缺少预算模板 ID" }, { status: 400 });
     db.prepare(`
       UPDATE quota_templates
       SET deleted_at = datetime('now'), updated_at = datetime('now')
       WHERE company_id = ? AND template_id = ? AND deleted_at IS NULL AND ${managedScopeSql}
-    `).run(auth.companyId, templateId, ...managedScopeParams);
-    return NextResponse.json({ deleted: true, templateId });
+    `).run(auth.companyId, templateId, ...branchIds);
+    return NextResponse.json({ success: true, templateId });
   }
 
   const templates = (Array.isArray(body?.templates) ? body.templates : [])
@@ -295,21 +363,21 @@ export async function POST(req: NextRequest) {
   }
 
   const tx = (db as any).transaction(() => {
-    if (body?.action === "replace") {
-      const activeIds = templates.map((template) => String(template.payload.id));
+    const activeIds = templates.map((template) => String(template.payload.id));
+    if (action !== "upsert") {
       if (activeIds.length > 0) {
         const placeholders = activeIds.map(() => "?").join(",");
         db.prepare(`
           UPDATE quota_templates
           SET deleted_at = datetime('now'), updated_at = datetime('now')
           WHERE company_id = ? AND template_id NOT IN (${placeholders}) AND deleted_at IS NULL AND ${managedScopeSql}
-        `).run(auth.companyId, ...activeIds, ...managedScopeParams);
+        `).run(auth.companyId, ...activeIds, ...branchIds);
       } else {
         db.prepare(`
           UPDATE quota_templates
           SET deleted_at = datetime('now'), updated_at = datetime('now')
           WHERE company_id = ? AND deleted_at IS NULL AND ${managedScopeSql}
-        `).run(auth.companyId, ...managedScopeParams);
+        `).run(auth.companyId, ...branchIds);
       }
     }
 

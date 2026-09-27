@@ -741,6 +741,7 @@ export default function SiteQuantityReviewTab({
         actualAmount,
         { currencySymbol: false },
         actualFeeFormulaData.context,
+        comprehensiveFeeItems.map((fee) => ({ ...fee, category: "other" })),
       );
       return acc;
     }, {});

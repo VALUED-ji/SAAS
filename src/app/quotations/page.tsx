@@ -33,6 +33,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent as ReactMouseEvent, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { Plus, Search, Eye, Loader2, X, History, Copy, Send, Trash2, CheckCircle2, Link as LinkIcon, Pencil, RotateCcw, Printer, ReceiptText, Users, Phone, Home, Ruler, FileText, MapPin, UserPlus, Check, GitCompareArrows, ArrowUpRight, Minus, ListFilter } from "lucide-react";
 import { useDeletedQuotations, useQuotations } from "@/lib/queries";
@@ -53,6 +54,11 @@ import {
   QuotationDialogState,
   QuotationSystemDialogModal,
 } from "./quotation-list-dialogs";
+
+const ContractCreateFlowModal = dynamic(
+  () => import("@/components/contracts/ContractCreateFlowModal"),
+  { ssr: false, loading: () => null },
+);
 
 type CreateCustomerSnapshot = {
   phone: string;
@@ -602,6 +608,7 @@ export default function QuotationsPage() {
   const [quickCustomer, setQuickCustomer] = useState<QuickCustomerDraft>(emptyQuickCustomerDraft);
   const [temporaryCustomer, setTemporaryCustomer] = useState({ name: "", designer_name: "", phone: "", weixin: "", address: "", area: "", decoration_type: "" });
   const [createMapPickerOpen, setCreateMapPickerOpen] = useState(false);
+  const [contractCreateTarget, setContractCreateTarget] = useState<{ customerId: string; quotationId: string } | null>(null);
   const [title, setTitle] = useState("装修报价单");
   const [quotationType, setQuotationType] = useState("");
   const [createNotes, setCreateNotes] = useState("");
@@ -2494,6 +2501,13 @@ export default function QuotationsPage() {
                     const softActionClass = `${actionBaseClass} border-[#dce4ef] bg-white text-[#52647b] hover:border-[#cfe0ff] hover:bg-[#f3f7ff] hover:text-[#245ee8] focus-visible:ring-[#407aff]/15`;
                     const dangerActionClass = `${actionBaseClass} border-[#f3c5c0] bg-white text-[#d92d20] hover:border-[#fda29b] hover:bg-[#fff6f5] focus-visible:ring-[#d92d20]/15`;
                     const quotationHref = buildBudgetRecordQuotationHref(record);
+                    const contractDisabledReason = record.is_unbound
+                      ? "临时客户无法提交合同，请先绑定客户"
+                      : !record.customer_id
+                        ? "当前预算记录未关联客户，无法提交合同"
+                        : !isFormalQuotation
+                          ? "请先将该预算报价设为正式，再提交合同"
+                          : "";
                     return (
                       <article key={record.id} className={`quotation-record-card grid min-h-[178px] gap-4 border bg-white p-5 pb-6 xl:grid-cols-[minmax(0,1fr)_minmax(520px,42%)] xl:items-center ${isJustPromotedFormal ? "quotation-record-card-promoted border-[#75d99a]" : "border-[#e2e7ee]"}`}>
                         <div className="quotation-record-main min-w-0">
@@ -2641,7 +2655,7 @@ export default function QuotationsPage() {
                               </span>
                             </div>
                           ) : (
-                            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                               <Link
                                 href={quotationHref}
                                 prefetch
@@ -2655,6 +2669,22 @@ export default function QuotationsPage() {
                               <span className="inline-flex w-full" onMouseEnter={lockedBySignedContract ? (event) => showLockedQuotationTooltip(event) : undefined} onMouseLeave={() => setLockTooltip(null)}>
                                 <button type="button" disabled={busy || lockedBySignedContract} onClick={() => setQuotationStatus(record, isFormalQuotation ? "DRAFT" : "APPROVED")} className={isFormalQuotation ? `${actionBaseClass} border-[#a6e7c0] bg-[#ecfdf3] text-[#027a48] hover:border-[#75d99a] hover:bg-[#dcfae6] focus-visible:ring-[#12b76a]/20` : secondaryActionClass}>
                                   {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}{lockedBySignedContract ? "已签合同" : isFormalQuotation ? "撤销正式" : "设为正式"}
+                                </button>
+                              </span>
+                              <span className="inline-flex w-full" onMouseEnter={contractDisabledReason ? (event) => showLockedQuotationTooltip(event, contractDisabledReason) : undefined} onMouseLeave={() => setLockTooltip(null)}>
+                                <button
+                                  type="button"
+                                  disabled={Boolean(contractDisabledReason)}
+                                  onClick={() => {
+                                    if (!record.customer_id || contractDisabledReason) return;
+                                    setContractCreateTarget({
+                                      customerId: String(record.customer_id),
+                                      quotationId: String(record.id),
+                                    });
+                                  }}
+                                  className={`${secondaryActionClass} border-[#d8d6fe] bg-[#f5f4ff] text-[#5b50df] hover:border-[#bbb5fb] hover:bg-[#efedff] hover:text-[#4338ca]`}
+                                >
+                                  <FileText className="h-3.5 w-3.5" />提交合同
                                 </button>
                               </span>
                               <span className="inline-flex w-full" onMouseEnter={record.is_unbound ? (event) => showLockedQuotationTooltip(event, "临时客户无法发送设计师，需先绑定客户后再发送设计师") : undefined} onMouseLeave={() => setLockTooltip(null)}>
@@ -2695,6 +2725,18 @@ export default function QuotationsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {contractCreateTarget && (
+        <ContractCreateFlowModal
+          customerId={contractCreateTarget.customerId}
+          quotationId={contractCreateTarget.quotationId}
+          onClose={() => setContractCreateTarget(null)}
+          onCreated={() => {
+            setMessage("合同已创建");
+            void refetch();
+          }}
+        />
       )}
 
       {shareLinkDialog && (

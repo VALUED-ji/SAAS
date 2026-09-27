@@ -142,6 +142,8 @@ export default function QuotationSharePage() {
   const [printCabinetColumns, setPrintCabinetColumns] = useState<QuotationCabinetColumnOptions | undefined>(undefined);
   const [includeBudgetCompilation, setIncludeBudgetCompilation] = useState(true);
   const [quotationValidUntil, setQuotationValidUntil] = useState("");
+  const [quotationValiditySaving, setQuotationValiditySaving] = useState(false);
+  const [quotationValidityError, setQuotationValidityError] = useState("");
   const [hasShareDisplayConfig, setHasShareDisplayConfig] = useState(false);
   const [mobileDocumentScale, setMobileDocumentScale] = useState(1);
   const [qrReady, setQrReady] = useState(false);
@@ -168,7 +170,9 @@ export default function QuotationSharePage() {
   };
   const updateQuotationValidity = (value: string) => {
     const nextValue = /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : "";
+    const previousValue = quotationValidUntil;
     setQuotationValidUntil(nextValue);
+    setQuotationValidityError("");
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
     if (nextValue) url.searchParams.set("vu", nextValue);
@@ -177,6 +181,25 @@ export default function QuotationSharePage() {
       url.searchParams.delete("validUntil");
     }
     window.history.replaceState(null, "", url.toString());
+    setQuotationValiditySaving(true);
+    fetch(`/api/quotation-shares/${encodeURIComponent(shareToken)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ quotationValidUntil: nextValue || null }),
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result?.message || "保存报价执行有效期失败");
+      })
+      .catch((error: any) => {
+        setQuotationValidUntil(previousValue);
+        const fallbackUrl = new URL(window.location.href);
+        if (previousValue) fallbackUrl.searchParams.set("vu", previousValue);
+        else fallbackUrl.searchParams.delete("vu");
+        window.history.replaceState(null, "", fallbackUrl.toString());
+        setQuotationValidityError(error?.message || "保存报价执行有效期失败");
+      })
+      .finally(() => setQuotationValiditySaving(false));
   };
   const hasBudgetCompilation = hasReadableRichText(data?.settings?.budgetCompilationHtml || data?.settings?.budgetCompilation);
   const supportsBudgetCompilation = (scope: QuotationPrintScope) => scope === "all" || scope === "all_without_cover" || scope === "fees";
@@ -469,7 +492,9 @@ export default function QuotationSharePage() {
           <div className="quotation-validity-setting">
             <div className="quotation-validity-label">
               <span>报价执行有效期</span>
-              <small>{quotationValidUntil ? "自定义日期" : "默认：当年12月31日"}</small>
+              <small className={quotationValidityError ? "text-red-600" : undefined}>
+                {quotationValidityError || (quotationValiditySaving ? "保存中..." : quotationValidUntil ? "已保存自定义日期" : "默认：当年12月31日")}
+              </small>
             </div>
             <div className="quotation-validity-controls">
               <input
