@@ -2470,6 +2470,7 @@ export default function QuotationsPage() {
                     const isJustPromotedFormal = promotedFormalRecord?.id === String(record.id) && isFormalQuotation;
                     const isSentQuotation = isSentToDesigner(record);
                     const lockedBySignedContract = isFormalQuotation && isUsedBySignedContract(record);
+                    const hasSubmittedContract = Number(record.submitted_quotation_contract_count || 0) > 0;
                     const recordStatusLabel = formatRecordStatus(record);
                     const recordStatusTone = lockedBySignedContract
                       ? "signed"
@@ -2505,6 +2506,8 @@ export default function QuotationsPage() {
                       ? "临时客户无法提交合同，请先绑定客户"
                       : !record.customer_id
                         ? "当前预算记录未关联客户，无法提交合同"
+                        : hasSubmittedContract
+                          ? "该报价已提交过合同，不能重复提交"
                         : !isFormalQuotation
                           ? "请先将该预算报价设为正式，再提交合同"
                           : "";
@@ -2550,7 +2553,7 @@ export default function QuotationsPage() {
 	                                </button>
 	                              )}
 	                            </div>
-	                            <span className={`quotation-record-template-tag inline-flex max-w-full -translate-y-0.5 items-center gap-1.5 rounded-[8px] px-2 py-1 text-xs ${
+                            <span className={`quotation-record-template-tag inline-flex max-w-full -translate-y-0.5 items-center gap-1.5 rounded-[8px] px-2 py-1 text-xs ${
 	                              quotaTemplateName
 	                                ? "bg-[#eef5ff] text-[#315fbb]"
 	                                : "bg-[#f3f5f8] text-[#98a2b3]"
@@ -2562,6 +2565,15 @@ export default function QuotationsPage() {
 	                              }`}>模板</span>
 	                              <span className="max-w-[200px] truncate font-semibold">{quotaTemplateName || "未记录"}</span>
 	                            </span>
+	                            {!showRecycleBin && Number(record.active_editor_count || 0) > 0 ? (
+	                              <span
+	                                className="quotation-record-editor-badge"
+	                                title={(Array.isArray(record.active_editors) ? record.active_editors : []).map((editor: any) => String(editor?.user_name || "未知用户")).join("、")}
+	                              >
+	                                <Users className="h-3.5 w-3.5" />
+	                                {Number(record.active_editor_count || 1)} 人正在编辑
+	                              </span>
+	                            ) : null}
 	                          </div>
 	                          <div className="mt-1 flex max-w-full flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-5 text-[#667085]">
 	                            <span className="shrink-0 tabular-nums">{formatQuoteDateTime(getLatestQuoteDate(record))}</span>
@@ -2626,21 +2638,10 @@ export default function QuotationsPage() {
                           </button>
                         </div>
 
+                        <span className="quotation-status-dot" data-tone={recordStatusTone} data-label={recordStatusLabel} role="img" aria-label={recordStatusLabel} />
                         <div className="quotation-record-action-panel xl:justify-self-end xl:w-full">
                           <div className="quotation-record-action-head mb-2.5 flex items-center justify-between gap-3">
                             <span className="text-xs font-semibold text-[#98a2b3]">{showRecycleBin ? "回收站操作" : "操作"}</span>
-                            <div className="quotation-record-action-badges">
-                              {!showRecycleBin && Number(record.active_editor_count || 0) > 0 ? (
-                                <span
-                                  className="quotation-record-editor-badge"
-                                  title={(Array.isArray(record.active_editors) ? record.active_editors : []).map((editor: any) => String(editor?.user_name || "未知用户")).join("、")}
-                                >
-                                  <Users className="h-3.5 w-3.5" />
-                                  {Number(record.active_editor_count || 1)} 人正在编辑
-                                </span>
-                              ) : null}
-                              <span className="quotation-status-stamp" data-tone={recordStatusTone}>{recordStatusLabel}</span>
-                            </div>
                           </div>
 
                           {showRecycleBin ? (
@@ -2684,7 +2685,7 @@ export default function QuotationsPage() {
                                   }}
                                   className={`${secondaryActionClass} border-[#d8d6fe] bg-[#f5f4ff] text-[#5b50df] hover:border-[#bbb5fb] hover:bg-[#efedff] hover:text-[#4338ca]`}
                                 >
-                                  <FileText className="h-3.5 w-3.5" />提交合同
+                                  <FileText className="h-3.5 w-3.5" />{hasSubmittedContract ? "已提交合同" : "提交合同"}
                                 </button>
                               </span>
                               <span className="inline-flex w-full" onMouseEnter={record.is_unbound ? (event) => showLockedQuotationTooltip(event, "临时客户无法发送设计师，需先绑定客户后再发送设计师") : undefined} onMouseLeave={() => setLockTooltip(null)}>

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "NEXT_DIST_DIR=.next-dev NODE_OPTIONS=--max-old-space-size=1536 next dev --disable-source-maps --port 3459",
+    "dev": "NEXT_DIST_DIR=.next-dev NODE_OPTIONS=--max-old-space-size=1536 next dev --disable-source-maps --hostname 0.0.0.0 --port 3459",
     "build": "bash scripts/build-next.sh",
     "start": "NEXT_DIST_DIR=.next-build next start",
     "lint": "eslint .",

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 RELEASE_PATH="${1:-}"
 APP_DIR="${PROD_APP_DIR:-/var/www/renovation-saas}"
@@ -7,7 +8,6 @@ PM2_NAME="${PROD_PM2_NAME:-}"
 HEALTH_URL="${PROD_HEALTH_URL:-}"
 BACKUP_ROOT="${PROD_BACKUP_ROOT:-/root/deploy-backups/production}"
 WORK_ROOT="${PROD_WORK_ROOT:-/tmp/renovation-production-deploy}"
-INSTALL_DEPS="${PROD_INSTALL_DEPS:-0}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_FILE=""
 DB_BACKUP_FILE=""
@@ -89,6 +89,9 @@ if [ ! -d "$APP_DIR" ]; then
   exit 1
 fi
 
+# Node scripts read from stdin resolve modules relative to /root, not the app directory.
+export NODE_PATH="$APP_DIR/node_modules${NODE_PATH:+:$NODE_PATH}"
+
 mkdir -p "$BACKUP_ROOT" "$WORK_ROOT"
 CANDIDATE_DIR="$WORK_ROOT/candidate-$STAMP"
 ROLLBACK_DIR="$WORK_ROOT/rollback-$STAMP"
@@ -160,6 +163,11 @@ echo "健康检查: $HEALTH_URL"
 
 echo "[3/9] 发布前运行环境检查"
 run_runtime_check "$APP_DIR"
+test -d "$APP_DIR/node_modules"
+if ! cmp -s "$CANDIDATE_DIR/package-lock.json" "$APP_DIR/package-lock.json"; then
+  echo "正式环境依赖锁文件与本地构建不一致，已停止发布；不会在服务器安装或构建。" >&2
+  exit 1
+fi
 
 echo "[4/9] 备份正式数据库、环境、上传文件、源码和旧构建"
 DB_BACKUP_FILE="$BACKUP_ROOT/prod-db-$STAMP.db"
@@ -188,19 +196,10 @@ echo "完整备份: $BACKUP_FILE"
 echo "数据库备份: $DB_BACKUP_FILE"
 echo "PM2 状态: $PM2_STATUS_FILE"
 
-echo "[5/9] 准备候选运行环境"
-if ! run_runtime_check "$APP_DIR"; then
-  if [ "$INSTALL_DEPS" = "1" ]; then
-    echo "运行环境不完整，按 PROD_INSTALL_DEPS=1 安装依赖"
-    cd "$APP_DIR"
-    npm ci
-    npm rebuild better-sqlite3 --build-from-source
-    run_runtime_check "$APP_DIR"
-  else
-    echo "运行环境检查失败，已停止发布。" >&2
-    exit 1
-  fi
-fi
+echo "[5/9] 确认本地构建完整；服务器不安装依赖、不执行构建"
+test -f "$CANDIDATE_DIR/.next-build/BUILD_ID"
+test -d "$CANDIDATE_DIR/.next-build/server"
+test -d "$CANDIDATE_DIR/.next-build/static"
 
 trap 'status=$?; if [ "$status" -ne 0 ]; then rollback || true; fi; exit "$status"' ERR
 
@@ -217,6 +216,7 @@ rsync -a --delete \
   --exclude='releases' \
   --exclude='backups' \
   "$CANDIDATE_DIR/" "$APP_DIR/"
+cmp -s "$CANDIDATE_DIR/.next-build/BUILD_ID" "$APP_DIR/.next-build/BUILD_ID"
 
 echo "[7/9] 重启正式服务并检查 PM2"
 cd "$APP_DIR"
@@ -240,7 +240,7 @@ NODE
 echo "[8/9] 检查正式环境健康状态"
 HTTP_CODE=""
 for attempt in 1 2 3 4 5 6; do
-  HTTP_CODE="$(curl -L -s -o /tmp/renovation-prod-health.html -w '%{http_code}' "$HEALTH_URL" || true)"
+  HTTP_CODE="$(curl -L -s --connect-timeout 5 --max-time 15 -o /tmp/renovation-prod-health.html -w '%{http_code}' "$HEALTH_URL" || true)"
   if [ "$HTTP_CODE" = "200" ]; then break; fi
   sleep 3
 done
@@ -260,5 +260,5 @@ echo "发布包: $RELEASE_PATH"
 echo "发布前完整备份: $BACKUP_FILE"
 echo "发布前数据库备份: $DB_BACKUP_FILE"
 echo "发布前 PM2 状态: $PM2_STATUS_FILE"
-echo "当前旧构建: $APP_DIR/.next-build-previous-*"
+echo "旧构建备份: $BACKUP_FILE 内的 .next-build/"
 echo "健康检查: $HEALTH_URL => $HTTP_CODE"

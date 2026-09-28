@@ -371,6 +371,7 @@ export interface QuotationData {
   signed_contract_count?: number;
   signed_contract_amount?: number;
   signed_quotation_contract_count?: number;
+  submitted_quotation_contract_count?: number;
   version: number;
   created_at: string;
   updated_at?: string | null;

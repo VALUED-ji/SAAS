@@ -9728,131 +9728,80 @@ html body .quotation-contract-ui .quotation-record-action-head {
   white-space: nowrap;
 }
 
-.quotation-record-action-badges {
-  position: absolute;
-  right: 20px;
-  top: 20px;
-  z-index: 2;
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
 .quotation-record-editor-badge svg {
   width: 13px;
   height: 13px;
   flex-shrink: 0;
 }
 
-html body .dashboard-scale-root .fixed .quotation-status-stamp,
-html body .quotation-contract-ui .quotation-status-stamp {
-  --quotation-stamp-color: #667085;
-  --quotation-stamp-bg: #f7f8fa;
-  --quotation-stamp-line: rgba(102, 112, 133, 0.24);
-  --quotation-stamp-mark: rgba(102, 112, 133, 0.48);
-  position: relative;
-  display: inline-flex;
-  height: 25px;
-  min-width: 84px;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  border: 1px solid var(--quotation-stamp-line);
-  border-radius: 999px;
-  padding: 0 11px 0 18px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0) 70%),
-    var(--quotation-stamp-bg);
-  color: var(--quotation-stamp-color);
-  font-size: 10px;
-  font-weight: 750;
-  line-height: 1;
-  letter-spacing: 0.04em;
-  text-align: center;
-  transform: none;
-  opacity: 1;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.62);
+html body .dashboard-scale-root .fixed .quotation-status-dot,
+html body .quotation-contract-ui .quotation-status-dot {
+  position: absolute;
+  top: 15px;
+  right: 15px;
+  z-index: 2;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  cursor: help;
 }
 
-html body .dashboard-scale-root .fixed .quotation-record-action-panel > .quotation-record-action-head .quotation-status-stamp,
-html body .quotation-contract-ui .quotation-record-action-panel > .quotation-record-action-head .quotation-status-stamp {
-  position: static;
+html body .dashboard-scale-root .fixed .quotation-status-dot::before,
+html body .quotation-contract-ui .quotation-status-dot::before {
+  content: "";
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--quotation-status-color, #98a2b3);
+}
+
+html body .dashboard-scale-root .fixed .quotation-status-dot::after,
+html body .quotation-contract-ui .quotation-status-dot::after {
+  content: attr(data-label);
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 6px);
+  z-index: 3;
+  display: none;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: #344054;
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+html body .dashboard-scale-root .fixed .quotation-status-dot:hover::after,
+html body .quotation-contract-ui .quotation-status-dot:hover::after {
+  display: block;
 }
 
 @media (max-width: 640px) {
-  .quotation-record-action-badges {
-    right: 16px;
-    top: 16px;
-    gap: 6px;
-  }
-
   .quotation-record-editor-badge {
     max-width: 132px;
     padding: 0 8px;
   }
 }
 
-html body .dashboard-scale-root .fixed .quotation-status-stamp::before,
-html body .quotation-contract-ui .quotation-status-stamp::before {
-  content: "";
-  position: absolute;
-  left: 9px;
-  top: 50%;
-  width: 5px;
-  height: 5px;
-  border: 1px solid var(--quotation-stamp-mark);
-  border-radius: 999px;
-  background: #ffffff;
-  transform: translateY(-50%);
-  opacity: 0.86;
-  pointer-events: none;
+html body .dashboard-scale-root .fixed .quotation-status-dot[data-tone="formal"],
+html body .quotation-contract-ui .quotation-status-dot[data-tone="formal"] {
+  --quotation-status-color: #c43a2c;
 }
 
-html body .dashboard-scale-root .fixed .quotation-status-stamp::after,
-html body .quotation-contract-ui .quotation-status-stamp::after {
-  content: "";
-  position: absolute;
-  left: 18px;
-  top: 6px;
-  bottom: 6px;
-  width: 1px;
-  background: var(--quotation-stamp-line);
-  pointer-events: none;
+html body .dashboard-scale-root .fixed .quotation-status-dot[data-tone="signed"],
+html body .quotation-contract-ui .quotation-status-dot[data-tone="signed"] {
+  --quotation-status-color: #087443;
 }
 
-html body .dashboard-scale-root .fixed .quotation-status-stamp[data-tone="formal"],
-html body .quotation-contract-ui .quotation-status-stamp[data-tone="formal"] {
-  --quotation-stamp-color: #c43a2c;
-  --quotation-stamp-bg: #fff6f4;
-  --quotation-stamp-line: rgba(196, 58, 44, 0.22);
-  --quotation-stamp-mark: rgba(196, 58, 44, 0.56);
-}
-
-html body .dashboard-scale-root .fixed .quotation-status-stamp[data-tone="signed"],
-html body .quotation-contract-ui .quotation-status-stamp[data-tone="signed"] {
-  --quotation-stamp-color: #087443;
-  --quotation-stamp-bg: #f2fbf6;
-  --quotation-stamp-line: rgba(8, 116, 67, 0.22);
-  --quotation-stamp-mark: rgba(8, 116, 67, 0.54);
-}
-
-html body .dashboard-scale-root .fixed .quotation-status-stamp[data-tone="sent"],
-html body .quotation-contract-ui .quotation-status-stamp[data-tone="sent"] {
-  --quotation-stamp-color: #315fba;
-  --quotation-stamp-bg: #f2f6ff;
-  --quotation-stamp-line: rgba(49, 95, 186, 0.22);
-  --quotation-stamp-mark: rgba(49, 95, 186, 0.52);
-}
-
-html body .dashboard-scale-root .fixed .quotation-status-stamp[data-tone="draft"],
-html body .quotation-contract-ui .quotation-status-stamp[data-tone="draft"] {
-  --quotation-stamp-color: #667085;
-  --quotation-stamp-bg: #f7f8fa;
-  --quotation-stamp-line: rgba(102, 112, 133, 0.22);
-  --quotation-stamp-mark: rgba(102, 112, 133, 0.48);
+html body .dashboard-scale-root .fixed .quotation-status-dot[data-tone="sent"],
+html body .quotation-contract-ui .quotation-status-dot[data-tone="sent"] {
+  --quotation-status-color: #315fba;
 }
 
 html body .dashboard-scale-root .fixed .quotation-record-card.quotation-record-card-promoted,
@@ -26704,15 +26653,18 @@ html body .dashboard-scale-root .quota-management-ui.personalized-template-edito
 
 /* End of personalized-template editor overrides. */
 
-/* Copy quotation dialog: one-piece flat white surface without inherited shadows or dividers. */
-html body .dashboard-scale-root .fixed [class*="copy-quotation-redesign"][class*="max-w-"][class*="bg-white"][class*="border"].flex,
-html body .dashboard-scale-root .fixed [class*="copy-quotation-redesign"][class*="max-w-"][class*="bg-white"][class*="border"].flex * {
+html body .dashboard-scale-root .fixed .copy-quotation-dialog > .copy-quotation-dialog-header {
+  border: 0 !important;
+  border-bottom: 1px solid #e2e7ee !important;
+  border-radius: 0 !important;
   box-shadow: none !important;
 }
 
-html body .dashboard-scale-root .fixed [class*="copy-quotation-redesign"][class*="max-w-"][class*="bg-white"][class*="border"].flex > * {
-  border-top: 0 !important;
-  border-bottom: 0 !important;
+html body .dashboard-scale-root .fixed .copy-quotation-dialog > .copy-quotation-dialog-footer {
+  border: 0 !important;
+  border-top: 1px solid #e2e7ee !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
 }
 
 /* Quotation base quota update dialog */

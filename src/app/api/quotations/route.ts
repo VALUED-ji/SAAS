@@ -1083,21 +1083,26 @@ export async function GET(req: NextRequest) {
   }
 
   const signedQuotationCountById = new Map<string, number>();
+  const submittedQuotationCountById = new Map<string, number>();
   if (!summaryOnly) {
-    const signedContracts = db.prepare(`
-      SELECT content
+    const submittedContracts = db.prepare(`
+      SELECT content, status
       FROM contracts
       WHERE company_id = ?
         AND deleted_at IS NULL
-        AND UPPER(COALESCE(status, '')) IN ('SIGNED', 'RESIGNED')
+        AND UPPER(COALESCE(status, '')) IN ('PENDING_APPROVAL', 'REJECTED', 'SIGNED', 'RESIGNED')
         AND COALESCE(content, '') <> ''
     `).all(auth.companyId) as any[];
     const quotationIdSet = new Set(quotationIds);
-    signedContracts.forEach((contract) => {
+    submittedContracts.forEach((contract) => {
       try {
         const content = JSON.parse(String(contract.content || "{}"));
         const quotationId = String(content?.quotation_id || content?.amount_info?.quotation_id || "").trim();
-        if (quotationIdSet.has(quotationId)) signedQuotationCountById.set(quotationId, Number(signedQuotationCountById.get(quotationId) || 0) + 1);
+        if (!quotationIdSet.has(quotationId)) return;
+        submittedQuotationCountById.set(quotationId, Number(submittedQuotationCountById.get(quotationId) || 0) + 1);
+        if (["SIGNED", "RESIGNED"].includes(String(contract.status || "").toUpperCase())) {
+          signedQuotationCountById.set(quotationId, Number(signedQuotationCountById.get(quotationId) || 0) + 1);
+        }
       } catch {
         // Ignore legacy malformed contract content while building list badges.
       }
@@ -1130,6 +1135,7 @@ export async function GET(req: NextRequest) {
       signed_contract_count: signedByCustomer.get(String(quotation.customer_id || ""))?.count || 0,
       signed_contract_amount: signedByCustomer.get(String(quotation.customer_id || ""))?.amount || 0,
       signed_quotation_contract_count: signedQuotationCountById.get(String(quotation.id || "")) || 0,
+      submitted_quotation_contract_count: submittedQuotationCountById.get(String(quotation.id || "")) || 0,
       quotation_receipt_todo_count: receiptCountByQuotation.get(String(quotation.id || "")) || 0,
       latest_change_at: latestChangeByQuotation.get(String(quotation.id || ""))?.created_at || null,
       latest_change_user_name: latestChangeByQuotation.get(String(quotation.id || ""))?.user_name || null,
