@@ -947,6 +947,12 @@ function addAmountCell(cell: ExcelJS.Cell, bold = false, color = "111827", horiz
   cell.alignment = { vertical: "middle", horizontal };
 }
 
+function addCompactAmountCell(cell: ExcelJS.Cell, bold = false, color = "111827", horizontal: "left" | "center" | "right" = "right") {
+  cell.numFmt = "General";
+  cell.font = { name: EXPORT_FONT_NAME, size: 11, bold, color: { argb: color } };
+  cell.alignment = { vertical: "middle", horizontal };
+}
+
 function addQuotationHeader(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet, quotation: any, branchSettings: any, exportTitle: string, qrDataUrl?: string) {
   const companyPhone = String(branchSettings?.settings?.basicInfo?.contactPhone || "").trim();
   const headerFields = [
@@ -1014,9 +1020,20 @@ function addQuotationHeader(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet
       base64: qrDataUrl.replace(/^data:image\/png;base64,/, ""),
       extension: "png",
     });
+    const qrWidth = 68;
+    const kWidthPx = (sheet.getColumn(11).width ?? 24) * 7;
+    const lWidthPx = (sheet.getColumn(12).width ?? 36) * 7;
+    const qrTopLeft = sheet.name === "报价明细"
+      ? {
+          nativeCol: 11,
+          nativeColOff: Math.round(((kWidthPx + lWidthPx - qrWidth) / 2 - kWidthPx) * 9525),
+          nativeRow: 1,
+          nativeRowOff: 21000,
+        }
+      : { col: 11.08, row: 1.05 };
     sheet.addImage(imageId, {
-      tl: { col: 11.08, row: 1.05 },
-      ext: { width: 68, height: 68 },
+      tl: qrTopLeft as unknown as ExcelJS.Anchor,
+      ext: { width: qrWidth, height: qrWidth },
       editAs: "oneCell",
     });
   }
@@ -1082,17 +1099,17 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
     if (layoutByKey.materialTotal) {
       sheet.getCell(row, layoutByKey.materialTotal.start).value = totals.materialTotal;
       mergeLayoutCells(row, layoutByKey.materialTotal);
-      addAmountCell(sheet.getCell(row, layoutByKey.materialTotal.start), true, "111827", "center");
+      addCompactAmountCell(sheet.getCell(row, layoutByKey.materialTotal.start), true, "111827", "center");
     }
     if (layoutByKey.laborTotal) {
       sheet.getCell(row, layoutByKey.laborTotal.start).value = totals.laborTotal;
       mergeLayoutCells(row, layoutByKey.laborTotal);
-      addAmountCell(sheet.getCell(row, layoutByKey.laborTotal.start), true, "111827", "center");
+      addCompactAmountCell(sheet.getCell(row, layoutByKey.laborTotal.start), true, "111827", "center");
     }
     if (layoutByKey.subtotal) {
       sheet.getCell(row, layoutByKey.subtotal.start).value = totals.subtotal;
       mergeLayoutCells(row, layoutByKey.subtotal);
-      addAmountCell(sheet.getCell(row, layoutByKey.subtotal.start), true, subtotalColor, "center");
+      addCompactAmountCell(sheet.getCell(row, layoutByKey.subtotal.start), true, subtotalColor, "center");
     }
     if (layoutByKey.description) mergeLayoutCells(row, layoutByKey.description);
   };
@@ -1148,7 +1165,7 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
       const values: Record<(typeof columns)[number]["key"], unknown> = {
         sequence,
         name: nameText,
-        quantity: formatQuantity(parts.quantity),
+        quantity: parts.quantity,
         unit: itemText(item.unit),
         materialUnit: parts.materialUnit,
         materialTotal: parts.materialTotal,
@@ -1175,7 +1192,16 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
       columnLayouts.forEach((layout) => {
         const cell = row.getCell(layout.start);
         cell.alignment = { vertical: "middle", horizontal: layout.column.amount ? "center" : layout.column.key === "name" || layout.column.key === "description" ? "left" : "center", wrapText: layout.column.key !== "sequence" };
-        if (layout.column.amount) addAmountCell(cell, layout.column.boldAmount, layout.column.redAmount ? "DC2626" : "344054", "center");
+        if (layout.column.amount) {
+          const compact = layout.column.key === "subtotal"
+            || layout.column.key === "materialUnit"
+            || layout.column.key === "materialTotal"
+            || layout.column.key === "laborUnit"
+            || layout.column.key === "laborTotal";
+          (compact ? addCompactAmountCell : addAmountCell)(cell, layout.column.boldAmount, layout.column.redAmount ? "DC2626" : "344054", "center");
+        } else if (layout.column.key === "quantity") {
+          addCompactAmountCell(cell, false, "344054", "center");
+        }
       });
       rowNumber += 1;
     });
@@ -1253,7 +1279,7 @@ function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: E
         modelText,
         itemText(item.unit),
         getBaseOrMaterialItemUnitPrice(item),
-        formatQuantity(item.quantity),
+        toNumber(item.quantity),
         total,
         remarkText,
         "",
@@ -1272,9 +1298,13 @@ function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: E
         const cell = row.getCell(col);
         applyThinBorder(cell);
         cell.font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "344054" } };
-        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: ![1, 7, 8, 9, 10].includes(col) };
+        cell.alignment = { vertical: "middle", horizontal: col === 2 ? "left" : "center", wrapText: ![1, 7, 8, 9, 10].includes(col) };
       }
-      [8, 10].forEach((col) => addAmountCell(row.getCell(col), col === 10, "111827", "center"));
+      [8, 10].forEach((col) => addCompactAmountCell(row.getCell(col), col === 10, "111827", "center"));
+      addCompactAmountCell(row.getCell(9), false, "344054", "center");
+      [2, 3].forEach((col) => {
+        sheet.getCell(rowNumber, col).alignment = { ...sheet.getCell(rowNumber, col).alignment, horizontal: "left" };
+      });
       rowNumber += 1;
     });
 
@@ -1287,7 +1317,7 @@ function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: E
       font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "344054" } },
       fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_SECTION_FILL } },
     });
-    addAmountCell(sheet.getCell(rowNumber, 10), true, "111827", "center");
+    addCompactAmountCell(sheet.getCell(rowNumber, 10), true, "111827", "center");
     for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
     rowNumber += 1;
   });
@@ -1302,7 +1332,7 @@ function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: E
     font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
     fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_TOTAL_FILL } },
   });
-  addAmountCell(sheet.getCell(rowNumber, 10), true, "DC2626", "center");
+  addCompactAmountCell(sheet.getCell(rowNumber, 10), true, "DC2626", "center");
   for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
   return rowNumber + 1;
 }
@@ -1346,7 +1376,7 @@ function addCustomCabinetSection(sheet: ExcelJS.Worksheet, startRow: number, ite
         sizeText,
         "",
         "",
-        formatQuantity(item.quantity),
+        toNumber(item.quantity),
         area,
         toNumber(item.unit_price),
         total,
@@ -1366,9 +1396,13 @@ function addCustomCabinetSection(sheet: ExcelJS.Worksheet, startRow: number, ite
         const cell = row.getCell(col);
         applyThinBorder(cell);
         cell.font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "344054" } };
-        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: ![1, 7, 8, 9, 10].includes(col) };
+        cell.alignment = { vertical: "middle", horizontal: col === 2 ? "left" : "center", wrapText: ![1, 7, 8, 9, 10].includes(col) };
       }
-      [9, 10].forEach((col) => addAmountCell(row.getCell(col), col === 10, "111827", "center"));
+      [9, 10].forEach((col) => addCompactAmountCell(row.getCell(col), col === 10, "111827", "center"));
+      addCompactAmountCell(row.getCell(7), false, "344054", "center");
+      [2, 3].forEach((col) => {
+        sheet.getCell(rowNumber, col).alignment = { ...sheet.getCell(rowNumber, col).alignment, horizontal: "left" };
+      });
       rowNumber += 1;
     });
 
@@ -1381,7 +1415,7 @@ function addCustomCabinetSection(sheet: ExcelJS.Worksheet, startRow: number, ite
       font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "344054" } },
       fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_SECTION_FILL } },
     });
-    addAmountCell(sheet.getCell(rowNumber, 10), true, "111827", "center");
+    addCompactAmountCell(sheet.getCell(rowNumber, 10), true, "111827", "center");
     for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
     rowNumber += 1;
   });
@@ -1396,7 +1430,7 @@ function addCustomCabinetSection(sheet: ExcelJS.Worksheet, startRow: number, ite
     font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
     fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_TOTAL_FILL } },
   });
-  addAmountCell(sheet.getCell(rowNumber, 10), true, "DC2626", "center");
+  addCompactAmountCell(sheet.getCell(rowNumber, 10), true, "DC2626", "center");
   for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
   return rowNumber + 1;
 }
@@ -2119,7 +2153,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
     { key: "i", width: 12 },
     { key: "j", width: 32 },
     { key: "k", width: 24 },
-    { key: "l", width: 36 },
+    { key: "l", width: sheet.name === "报价明细" ? 96 : 36 },
   ];
 
   addQuotationHeader(workbook, sheet, quotation, branchSettings, exportTitle, qrDataUrl);
@@ -2155,6 +2189,14 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
     addSignatureSection(sheet, rowNumber, signatureLabels);
   }
   applyContentBorders(sheet);
+  if (sheet.name === "报价明细") {
+    sheet.eachRow((row) => {
+      row.eachCell((cell) => {
+        if (cell.type === ExcelJS.ValueType.Merge) return;
+        cell.font = { ...cell.font, size: (cell.font?.size ?? 11) + 1 };
+      });
+    });
+  }
   if (
     outputMode !== "composition"
     && includeBudgetCompilation
