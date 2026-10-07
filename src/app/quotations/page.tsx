@@ -42,6 +42,7 @@ import { useAuth } from "@/lib/auth";
 import { formatDateTime, parseAppDate } from "@/lib/utils";
 import { getQuotationCustomerGroupKey } from "@/lib/quotationCustomerKey";
 import { calculatePackageQuotePrice, formatPricingAmount, toPricingAmount } from "@/lib/quotaTemplatePricing";
+import { buildQuotationTemporaryCustomerPayload } from "@/lib/quotationTemporaryCustomer";
 import DataPagination, { useDataPagination } from "@/components/ui/DataPagination";
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
 import SystemSelect from "@/components/ui/SystemSelect";
@@ -1657,15 +1658,11 @@ export default function QuotationsPage() {
         create_mode: createAsTemporaryCustomer ? "temporary" : "customer",
         customer_id: createAsTemporaryCustomer ? undefined : quotationCustomerId,
         customer_snapshot: createAsTemporaryCustomer ? undefined : quotationCustomerSnapshot,
-        temp_customer: createAsTemporaryCustomer ? {
-          name: isNewCustomerMode ? quickCustomer.name : temporaryCustomer.name,
-          designer_name: isNewCustomerMode ? quickCustomer.designer_name : temporaryCustomer.designer_name,
-          phone: isNewCustomerMode ? quickCustomer.phone : temporaryCustomer.phone,
-          weixin: isNewCustomerMode ? quickCustomer.weixin : temporaryCustomer.weixin,
-          address: isNewCustomerMode ? quickCustomer.address : temporaryCustomer.address,
-          area: isNewCustomerMode ? quickCustomer.area_size : temporaryCustomer.area,
-          decoration_type: isNewCustomerMode ? quickCustomer.decoration_type : temporaryCustomer.decoration_type,
-        } : undefined,
+        temp_customer: createAsTemporaryCustomer ? buildQuotationTemporaryCustomerPayload({
+          isNewCustomerMode,
+          quickCustomer,
+          temporaryCustomer,
+        }) : undefined,
         quotation_org_unit_id: selectedQuotationStoreId || undefined,
         quotation_type: quotationType.trim(),
         notes: createNotes,

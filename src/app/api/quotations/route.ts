@@ -40,6 +40,7 @@ import {
   getStoreOrgByName,
   getUserQuotationAccessibleOrgIds,
 } from "@/lib/quotationOrgAccess";
+import { normalizeQuotationTemporaryCustomer } from "@/lib/quotationTemporaryCustomer";
 
 type DiscountRule = {
   id: string;
@@ -166,19 +167,6 @@ function buildDefaultProjectName(customer: any) {
 function buildDefaultTemporaryQuotationTitle(tempCustomer: any) {
   const houseText = String(tempCustomer?.address || "").trim();
   return houseText ? `${houseText}装修报价单` : "临时报价单";
-}
-
-function normalizeTemporaryCustomer(body: any) {
-  const input = body?.temp_customer && typeof body.temp_customer === "object" ? body.temp_customer : body;
-  return {
-    name: String(input?.name || input?.temp_customer_name || "").trim(),
-    designerName: String(input?.designer_name || input?.temp_customer_designer_name || "").trim(),
-    phone: String(input?.phone || input?.temp_customer_phone || "").trim(),
-    weixin: String(input?.weixin || input?.temp_customer_weixin || "").trim(),
-    address: String(input?.address || input?.temp_customer_address || "").trim(),
-    area: safeNonNegativeNumber(input?.area ?? input?.temp_customer_area),
-    decorationType: String(input?.decoration_type || input?.temp_customer_decoration_type || "").trim(),
-  };
 }
 
 function normalizeCustomerSnapshot(body: any) {
@@ -938,14 +926,16 @@ export async function GET(req: NextRequest) {
       COALESCE(c.phone, q.temp_customer_phone) as customer_phone,
       COALESCE(c.weixin, q.temp_customer_weixin) as customer_weixin,
       COALESCE(c.address, q.temp_customer_address) as customer_address,
-      c.house_address as customer_house_address,
-      c.address_location_name as customer_address_location_name,
-      c.address_location_address as customer_address_location_address,
-      c.address_latitude as customer_address_latitude,
-      c.address_longitude as customer_address_longitude,
-      c.building_no as customer_building_no, c.unit_no as customer_unit_no,
-      c.room_no as customer_room_no, c.no_room_number as customer_no_room_number,
-      c.decoration_type as customer_decoration_type,
+      COALESCE(c.house_address, q.temp_customer_house_address) as customer_house_address,
+      COALESCE(c.address_location_name, q.temp_customer_address_location_name) as customer_address_location_name,
+      COALESCE(c.address_location_address, q.temp_customer_address_location_address) as customer_address_location_address,
+      COALESCE(c.address_latitude, q.temp_customer_address_latitude) as customer_address_latitude,
+      COALESCE(c.address_longitude, q.temp_customer_address_longitude) as customer_address_longitude,
+      COALESCE(c.building_no, q.temp_customer_building_no) as customer_building_no,
+      COALESCE(c.unit_no, q.temp_customer_unit_no) as customer_unit_no,
+      COALESCE(c.room_no, q.temp_customer_room_no) as customer_room_no,
+      COALESCE(c.no_room_number, q.temp_customer_no_room_number, 0) as customer_no_room_number,
+      COALESCE(c.decoration_type, q.temp_customer_decoration_type) as customer_decoration_type,
       COALESCE(c.area_size, q.temp_customer_area) as customer_area_size,
       creator.name as creator_name
     FROM quotations q
@@ -1167,7 +1157,7 @@ export async function POST(req: NextRequest) {
     const projectIdInput = String(body.project_id || "").trim();
     const createMode = String(body.create_mode || body.mode || "").trim();
     const requestedQuotationOrgUnitId = String(body.quotation_org_unit_id || body.quotationOrgUnitId || "").trim();
-    const temporaryCustomer = normalizeTemporaryCustomer(body);
+    const temporaryCustomer = normalizeQuotationTemporaryCustomer(body);
     const hasCustomerSnapshot = Boolean(customerId && body?.customer_snapshot && typeof body.customer_snapshot === "object");
     const customerSnapshot = normalizeCustomerSnapshot(body);
     const isTemporaryQuotation = !customerId && !projectIdInput && (createMode === "temporary" || Boolean(temporaryCustomer.address));
@@ -1374,10 +1364,11 @@ export async function POST(req: NextRequest) {
 	        INSERT INTO quotations (
 	          id, project_id, company_id, title, quotation_type, version, total_amount, discount, final_amount, status, notes, customer_visible_note, terms, settings,
 	          quotation_org_unit_id, quotation_org_unit_name,
-	          temp_customer_name, temp_customer_designer_name, temp_customer_phone, temp_customer_weixin, temp_customer_address, temp_customer_area, temp_customer_decoration_type,
-	          created_by_id, created_at, updated_at
-	        )
-	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+		          temp_customer_name, temp_customer_designer_name, temp_customer_phone, temp_customer_weixin, temp_customer_address, temp_customer_area, temp_customer_decoration_type,
+		          temp_customer_building_no, temp_customer_unit_no, temp_customer_room_no, temp_customer_no_room_number,
+		          created_by_id, created_at, updated_at
+		        )
+		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
 	      `).run(
 	        quotationId,
 	        project?.id || null,
@@ -1401,6 +1392,10 @@ export async function POST(req: NextRequest) {
         isTemporaryQuotation ? temporaryCustomer.address || null : null,
         isTemporaryQuotation ? temporaryCustomer.area || null : null,
         quotationDecorationType || null,
+        isTemporaryQuotation ? temporaryCustomer.buildingNo || null : null,
+        isTemporaryQuotation ? temporaryCustomer.unitNo || null : null,
+        isTemporaryQuotation ? temporaryCustomer.roomNo || null : null,
+        isTemporaryQuotation ? (temporaryCustomer.noRoomNumber ? 1 : 0) : null,
         userId
       );
 
