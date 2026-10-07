@@ -1023,14 +1023,12 @@ function addQuotationHeader(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet
     const qrWidth = 68;
     const kWidthPx = (sheet.getColumn(11).width ?? 24) * 7;
     const lWidthPx = (sheet.getColumn(12).width ?? 36) * 7;
-    const qrTopLeft = sheet.name === "报价明细"
-      ? {
-          nativeCol: 11,
-          nativeColOff: Math.round(((kWidthPx + lWidthPx - qrWidth) / 2 - kWidthPx) * 9525),
-          nativeRow: 1,
-          nativeRowOff: 21000,
-        }
-      : { col: 11.08, row: 1.05 };
+    const qrTopLeft = {
+      nativeCol: 11,
+      nativeColOff: Math.round(((kWidthPx + lWidthPx - qrWidth) / 2 - kWidthPx) * 9525),
+      nativeRow: 1,
+      nativeRowOff: 21000,
+    };
     sheet.addImage(imageId, {
       tl: qrTopLeft as unknown as ExcelJS.Anchor,
       ext: { width: qrWidth, height: qrWidth },
@@ -2153,7 +2151,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
     { key: "i", width: 12 },
     { key: "j", width: 32 },
     { key: "k", width: 24 },
-    { key: "l", width: sheet.name === "报价明细" ? 96 : 36 },
+    { key: "l", width: 96 },
   ];
 
   addQuotationHeader(workbook, sheet, quotation, branchSettings, exportTitle, qrDataUrl);
@@ -2189,14 +2187,12 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
     addSignatureSection(sheet, rowNumber, signatureLabels);
   }
   applyContentBorders(sheet);
-  if (sheet.name === "报价明细") {
-    sheet.eachRow((row) => {
-      row.eachCell((cell) => {
-        if (cell.type === ExcelJS.ValueType.Merge) return;
-        cell.font = { ...cell.font, size: (cell.font?.size ?? 11) + 1 };
-      });
+  sheet.eachRow((row) => {
+    row.eachCell((cell) => {
+      if (cell.type === ExcelJS.ValueType.Merge) return;
+      cell.font = { ...cell.font, size: (cell.font?.size ?? 11) + 1 };
     });
-  }
+  });
   if (
     outputMode !== "composition"
     && includeBudgetCompilation
