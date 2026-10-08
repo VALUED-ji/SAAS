@@ -205,14 +205,27 @@ function buildEditableCustomerFromQuotationRecord(record: any) {
     name: String(record.customer_name || "").trim(),
     phone: String(record.customer_phone || "").trim(),
     weixin: String(record.customer_weixin || "").trim(),
+    source: String(record.customer_source || "").trim(),
     address: String(record.customer_address || record.project_address || "").trim(),
     house_address: String(record.customer_house_address || "").trim(),
+    address_location_name: String(record.customer_address_location_name || "").trim(),
+    address_location_address: String(record.customer_address_location_address || "").trim(),
+    address_latitude: record.customer_address_latitude ?? "",
+    address_longitude: record.customer_address_longitude ?? "",
     building_no: String(record.customer_building_no || "").trim(),
     unit_no: String(record.customer_unit_no || "").trim(),
     room_no: String(record.customer_room_no || "").trim(),
     no_room_number: record.customer_no_room_number === true || record.customer_no_room_number === 1,
     area_size: record.customer_area_size ?? record.project_area ?? "",
+    house_type: String(record.customer_house_type || "").trim(),
     decoration_type: String(record.customer_decoration_type || "").trim(),
+    budget: record.customer_budget ?? "",
+    is_delivered: record.customer_is_delivered ?? "",
+    intention: String(record.customer_intention || "").trim(),
+    requirements: String(record.customer_requirements || "").trim(),
+    remarks: String(record.customer_remarks || "").trim(),
+    service_store: String(record.customer_service_store || "").trim(),
+    inviter_id: String(record.customer_inviter_id || "").trim(),
   };
 }
 
@@ -1850,6 +1863,27 @@ export default function QuotationsPage() {
       setMessage(err.message || "保存客户资料失败");
     } finally {
       setRecordProjectInfoSaving(false);
+    }
+  };
+
+  const handleRecordCustomerEditorSuccess = async () => {
+    const customerId = String(editingRecordCustomer?.id || activeRecordCustomer?.customer_id || "").trim();
+    const previousRecordKey = recordCustomerKey;
+    setEditingRecordCustomer(null);
+    try {
+      const [activeResult, deletedResult] = await Promise.all([refetch(), refetchDeletedQuotations()]);
+      const activeRows = Array.isArray(activeResult.data) ? activeResult.data : quotations || [];
+      const deletedRows = Array.isArray(deletedResult.data) ? deletedResult.data : deletedQuotations || [];
+      const rows = [...activeRows, ...deletedRows];
+      const targetRecord = rows.find((record: any) => String(record?.customer_id || "").trim() === customerId)
+        || rows.find((record: any) => getCustomerKey(record) === previousRecordKey);
+      const nextRecordKey = targetRecord ? getCustomerKey(targetRecord) : customerId || previousRecordKey;
+      if (nextRecordKey) setRecordCustomerKey(nextRecordKey);
+      if (!targetRecord && customerId && selectedOrgUnitId) setSelectedOrgUnitId("");
+      setMessage("已保存客户资料");
+    } catch {
+      if (customerId || previousRecordKey) setRecordCustomerKey(customerId || previousRecordKey);
+      setMessage("已保存客户资料");
     }
   };
 
@@ -4870,11 +4904,7 @@ export default function QuotationsPage() {
       <AddCustomerModal
         isOpen={Boolean(editingRecordCustomer)}
         onClose={() => setEditingRecordCustomer(null)}
-        onSuccess={() => {
-          setEditingRecordCustomer(null);
-          void refetch();
-          void refetchDeletedQuotations();
-        }}
+        onSuccess={handleRecordCustomerEditorSuccess}
         customer={editingRecordCustomer}
       />
 

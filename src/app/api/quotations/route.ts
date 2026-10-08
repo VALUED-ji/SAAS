@@ -935,6 +935,7 @@ export async function GET(req: NextRequest) {
       COALESCE(c.name, q.temp_customer_name) as customer_name,
       COALESCE(c.phone, q.temp_customer_phone) as customer_phone,
       COALESCE(c.weixin, q.temp_customer_weixin) as customer_weixin,
+      c.source as customer_source,
       COALESCE(c.address, q.temp_customer_address) as customer_address,
       COALESCE(c.house_address, q.temp_customer_house_address) as customer_house_address,
       COALESCE(c.address_location_name, q.temp_customer_address_location_name) as customer_address_location_name,
@@ -945,8 +946,15 @@ export async function GET(req: NextRequest) {
       COALESCE(c.unit_no, q.temp_customer_unit_no) as customer_unit_no,
       COALESCE(c.room_no, q.temp_customer_room_no) as customer_room_no,
       COALESCE(c.no_room_number, q.temp_customer_no_room_number, 0) as customer_no_room_number,
+      c.house_type as customer_house_type,
       COALESCE(c.decoration_type, q.temp_customer_decoration_type) as customer_decoration_type,
       COALESCE(c.area_size, q.temp_customer_area) as customer_area_size,
+      c.budget as customer_budget,
+      c.is_delivered as customer_is_delivered,
+      c.intention as customer_intention,
+      c.requirements as customer_requirements,
+      c.remarks as customer_remarks,
+      c.inviter_id as customer_inviter_id,
       creator.name as creator_name
     FROM quotations q
     LEFT JOIN projects p ON q.project_id = p.id
