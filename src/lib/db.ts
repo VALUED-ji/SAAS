@@ -393,6 +393,12 @@ CREATE TABLE IF NOT EXISTS quotation_items (
   fee_scope_space_names TEXT,
   quota_source_id TEXT,
   quota_source_type TEXT,
+  quota_source_name TEXT,
+  quota_source_unit TEXT,
+  quota_source_spec TEXT,
+  quota_source_material_price REAL,
+  quota_source_labor_price REAL,
+  price_manually_edited INTEGER DEFAULT 0,
   sort_order INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now'))
 );
@@ -900,7 +906,6 @@ CREATE INDEX IF NOT EXISTS idx_payment_records_pay_date ON payment_records(pay_d
 CREATE INDEX IF NOT EXISTS idx_follow_ups_deleted_created_id ON follow_ups(deleted_at, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_users_deleted_active_created ON users(deleted_at, is_active, created_at);
 CREATE INDEX IF NOT EXISTS idx_org_units_deleted_parent ON org_units(deleted_at, parent_id);
-CREATE INDEX IF NOT EXISTS idx_suppliers_deleted_status_updated ON suppliers(deleted_at, cooperation_status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_customer_deposit_records_customer ON customer_deposit_records(customer_id, deleted_at);
 CREATE INDEX IF NOT EXISTS idx_customer_deposit_records_company ON customer_deposit_records(company_id, received_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
@@ -1025,6 +1030,12 @@ function ensureDatabaseSchema(database: Database.Database): void {
   ensureColumn(database, "quotation_items", "fee_scope_space_names", "TEXT");
   ensureColumn(database, "quotation_items", "quota_source_id", "TEXT");
   ensureColumn(database, "quotation_items", "quota_source_type", "TEXT");
+  ensureColumn(database, "quotation_items", "quota_source_name", "TEXT");
+  ensureColumn(database, "quotation_items", "quota_source_unit", "TEXT");
+  ensureColumn(database, "quotation_items", "quota_source_spec", "TEXT");
+  ensureColumn(database, "quotation_items", "quota_source_material_price", "REAL");
+  ensureColumn(database, "quotation_items", "quota_source_labor_price", "REAL");
+  ensureColumn(database, "quotation_items", "price_manually_edited", "INTEGER DEFAULT 0");
   ensureColumn(database, "custom_quota_items", "work_type_id", "TEXT");
   ensureColumn(database, "custom_quota_items", "work_type_name", "TEXT");
   ensureColumn(database, "custom_quota_items", "material_category_id", "TEXT");
@@ -1172,6 +1183,7 @@ export function ensureMaterialSystemSchema(database: Database.Database = getDb()
   ensureColumn(database, "suppliers", "settlement_method", "TEXT");
   ensureColumn(database, "suppliers", "main_categories", "TEXT");
   ensureColumn(database, "suppliers", "rating", "TEXT DEFAULT 'UNRATED'");
+  database.exec("CREATE INDEX IF NOT EXISTS idx_suppliers_deleted_status_updated ON suppliers(deleted_at, cooperation_status, updated_at);");
   database.exec(`
     CREATE TABLE IF NOT EXISTS supplier_accounts (
       id TEXT PRIMARY KEY,
@@ -1813,26 +1825,34 @@ export function ensureDefaultRoles(database: Database.Database = getDb()): void 
     CREATE INDEX IF NOT EXISTS idx_roles_company ON roles(company_id);
   `);
 
-  const company = database.prepare("SELECT id FROM companies LIMIT 1").get() as { id?: string } | undefined;
-  const companyId = company?.id || "comp_001";
+  const companies = database.prepare("SELECT id FROM companies WHERE deleted_at IS NULL").all() as { id?: string }[];
+  if (!companies.length) {
+    defaultRolesReady = true;
+    globalDatabaseState.__renovationSaasDefaultRolesReady = true;
+    return;
+  }
   const insert = database.prepare(`
     INSERT OR IGNORE INTO roles (id, company_id, code, name, description, permissions, data_scope, is_system, is_active, sort_order, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, datetime('now'), datetime('now'))
   `);
 
-  for (const role of DEFAULT_ROLES) {
-    insert.run(
-      `ROLE_${role.code}`,
-      companyId,
-      role.code,
-      role.name,
-      role.description,
-      JSON.stringify(defaultPermissionsForRole(role.code)),
-      defaultDataScopeForRole(role.code),
-      role.sort_order
-    );
-    database.prepare("UPDATE roles SET data_scope = COALESCE(data_scope, ?) WHERE code = ? AND deleted_at IS NULL")
-      .run(defaultDataScopeForRole(role.code), role.code);
+  for (const company of companies) {
+    const companyId = String(company.id || "");
+    if (!companyId) continue;
+    for (const role of DEFAULT_ROLES) {
+      insert.run(
+        `ROLE_${companyId}_${role.code}`,
+        companyId,
+        role.code,
+        role.name,
+        role.description,
+        JSON.stringify(defaultPermissionsForRole(role.code)),
+        defaultDataScopeForRole(role.code),
+        role.sort_order
+      );
+      database.prepare("UPDATE roles SET data_scope = COALESCE(data_scope, ?) WHERE company_id = ? AND code = ? AND deleted_at IS NULL")
+        .run(defaultDataScopeForRole(role.code), companyId, role.code);
+    }
   }
   defaultRolesReady = true;
   globalDatabaseState.__renovationSaasDefaultRolesReady = true;

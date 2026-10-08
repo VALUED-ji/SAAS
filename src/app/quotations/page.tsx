@@ -30,12 +30,12 @@ import {
 
 
 
-import { useEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent as ReactMouseEvent, type SetStateAction } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent as ReactMouseEvent, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { Plus, Search, Eye, Loader2, X, History, Copy, Send, Trash2, CheckCircle2, Link as LinkIcon, Pencil, RotateCcw, Printer, ReceiptText, Users, Phone, Home, Ruler, FileText, MapPin, UserPlus, Check, GitCompareArrows, ArrowUpRight, Minus, ListFilter } from "lucide-react";
+import { Plus, Search, Eye, Loader2, X, History, Copy, Send, Trash2, CheckCircle2, Link as LinkIcon, Pencil, RotateCcw, Printer, ReceiptText, Users, Phone, Home, Ruler, FileText, MapPin, UserPlus, Check, GitCompareArrows, ArrowUpRight, Minus, ListFilter, Download } from "lucide-react";
 import { useDeletedQuotations, useQuotations } from "@/lib/queries";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -245,10 +245,57 @@ function getQuotationListCustomerName(record: any) {
 function formatCompareDiff(value: number) {
   const amount = Number(value || 0);
   if (Math.abs(amount) < 0.005) return "持平";
-  return `${amount > 0 ? "+" : "-"}¥ ${formatRecordAmount(Math.abs(amount))}`;
+  return amount < 0 ? `- ${formatRecordAmount(Math.abs(amount))}` : formatRecordAmount(amount);
 }
 
 type QuotationCompareKind = "base" | "main_material" | "custom_cabinet" | "other";
+
+type QuotationCompareTableCell = {
+  present: boolean;
+  quantity: number;
+  unit: string;
+  materialUnit: number;
+  laborUnit: number;
+  unitPrice: number;
+  total: number;
+  formula: string;
+  remark: string;
+};
+
+type QuotationCompareTableRow = {
+  key: string;
+  order: number;
+  space: string;
+  kind: QuotationCompareKind;
+  categoryLabel: string;
+  name: string;
+  unit: string;
+  spec: string;
+  model: string;
+  cells: QuotationCompareTableCell[];
+  changed: boolean;
+  changeType: "same" | "changed" | "missing";
+  diff: number;
+  maxTotal: number;
+  minTotal: number;
+};
+
+type QuotationCompareTableSection = {
+  key: string;
+  space: string;
+  kind: QuotationCompareKind;
+  categoryLabel: string;
+  rows: QuotationCompareTableRow[];
+  subtotals: number[];
+  diff: number;
+  changedCount: number;
+};
+
+type QuotationCompareTable = {
+  sections: QuotationCompareTableSection[];
+  rows: QuotationCompareTableRow[];
+  changedRowCount: number;
+};
 
 function normalizeCompareCategory(category: unknown): QuotationCompareKind {
   const value = String(category || "").trim();
@@ -265,6 +312,23 @@ function getCompareCategoryLabel(kind: QuotationCompareKind) {
   return "综合费用";
 }
 
+function getCompareCategoryOrder(kind: QuotationCompareKind) {
+  if (kind === "base") return 0;
+  if (kind === "main_material") return 1;
+  if (kind === "custom_cabinet") return 2;
+  return 99;
+}
+
+function formatCompareSpaceIndex(index: number) {
+  const numerals = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
+  if (index >= 1 && index <= 10) return numerals[index - 1];
+  return String(index);
+}
+
+function getCompareSectionTitle(section: QuotationCompareTableSection) {
+  return section.kind === "other" ? "综合费用" : section.space;
+}
+
 function getCompareItemAmount(item: any) {
   const category = normalizeCompareCategory(item?.category);
   if (category === "custom_cabinet") {
@@ -278,6 +342,237 @@ function getCompareItemAmount(item: any) {
   const fallback = Number(item?.quantity || 0) * Number(item?.unit_price || 0);
   const amount = Number(item?.total_price ?? fallback);
   return Number.isFinite(amount) ? Math.round(amount * 100) / 100 : 0;
+}
+
+function normalizeCompareText(value: unknown) {
+  return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function compareNumber(value: unknown) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function formatCompareQuantity(value: number) {
+  const number = Number(value || 0);
+  if (Math.abs(number) < 0.0005) return "0";
+  return Number.isInteger(number) ? String(number) : number.toFixed(2).replace(/\.00$/, "").replace(/0$/, "");
+}
+
+function makeEmptyCompareCell(unit = ""): QuotationCompareTableCell {
+  return {
+    present: false,
+    quantity: 0,
+    unit,
+    materialUnit: 0,
+    laborUnit: 0,
+    unitPrice: 0,
+    total: 0,
+    formula: "",
+    remark: "",
+  };
+}
+
+function getCompareItemKey(item: any) {
+  const kind = normalizeCompareCategory(item?.category);
+  const space = normalizeCompareText(item?.space) || "未分空间";
+  const sourceId = normalizeCompareText(item?.quota_source_id || item?.source_item_id || item?.template_item_id);
+  if (sourceId) return `${kind}|${space}|source:${normalizeCompareText(item?.quota_source_type)}:${sourceId}`;
+  return [
+    kind,
+    space,
+    normalizeCompareText(item?.name),
+    normalizeCompareText(item?.unit),
+    normalizeCompareText(item?.spec),
+    normalizeCompareText(item?.material_model),
+  ].join("|");
+}
+
+function getCompareItemUnitPrice(item: any) {
+  const explicitUnitPrice = compareNumber(item?.unit_price);
+  if (Math.abs(explicitUnitPrice) >= 0.005) return explicitUnitPrice;
+  const quantity = compareNumber(item?.quantity);
+  const total = getCompareItemAmount(item);
+  return quantity > 0 ? total / quantity : 0;
+}
+
+function makeCompareCellFromItem(item: any): QuotationCompareTableCell {
+  const quantity = compareNumber(item?.quantity);
+  const total = getCompareItemAmount(item);
+  const materialUnit = compareNumber(item?.material_cost ?? item?.cost_material_unit);
+  const laborUnit = compareNumber(item?.labor_cost ?? item?.cost_labor_unit);
+  return {
+    present: true,
+    quantity,
+    unit: normalizeCompareText(item?.unit),
+    materialUnit,
+    laborUnit,
+    unitPrice: getCompareItemUnitPrice(item),
+    total,
+    formula: normalizeCompareText(item?.quantity_formula),
+    remark: normalizeCompareText(item?.remark),
+  };
+}
+
+function mergeCompareCells(current: QuotationCompareTableCell, next: QuotationCompareTableCell): QuotationCompareTableCell {
+  if (!current.present) return next;
+  const quantity = current.quantity + next.quantity;
+  const currentWeight = current.quantity > 0 ? current.quantity : 1;
+  const nextWeight = next.quantity > 0 ? next.quantity : 1;
+  const weight = currentWeight + nextWeight;
+  return {
+    present: true,
+    quantity,
+    unit: current.unit || next.unit,
+    materialUnit: weight ? ((current.materialUnit * currentWeight) + (next.materialUnit * nextWeight)) / weight : next.materialUnit,
+    laborUnit: weight ? ((current.laborUnit * currentWeight) + (next.laborUnit * nextWeight)) / weight : next.laborUnit,
+    unitPrice: quantity > 0 ? (current.total + next.total) / quantity : next.unitPrice,
+    total: current.total + next.total,
+    formula: current.formula || next.formula,
+    remark: current.remark || next.remark,
+  };
+}
+
+function hasCompareCellChanged(cells: QuotationCompareTableCell[]) {
+  const presentCells = cells.filter((cell) => cell.present);
+  if (presentCells.length !== cells.length) return true;
+  const numericFields: Array<keyof Pick<QuotationCompareTableCell, "quantity" | "materialUnit" | "laborUnit" | "unitPrice" | "total">> = ["quantity", "materialUnit", "laborUnit", "unitPrice", "total"];
+  return numericFields.some((field) => {
+    const values = presentCells.map((cell) => Number(cell[field] || 0));
+    return Math.max(...values) > Math.min(...values) + 0.005;
+  });
+}
+
+function buildQuotationCompareTable(records: any[]): QuotationCompareTable {
+  const rowMap = new Map<string, QuotationCompareTableRow>();
+  let nextRowOrder = 0;
+  records.forEach((record, recordIndex) => {
+    const items = Array.isArray(record?.items) ? record.items : [];
+    items.forEach((item: any) => {
+      const kind = normalizeCompareCategory(item?.category);
+      const space = normalizeCompareText(item?.space) || "未分空间";
+      const key = getCompareItemKey(item);
+      if (!key) return;
+      const current = rowMap.get(key) || {
+        key,
+        order: nextRowOrder++,
+        space,
+        kind,
+        categoryLabel: getCompareCategoryLabel(kind),
+        name: normalizeCompareText(item?.name) || "未命名项目",
+        unit: normalizeCompareText(item?.unit),
+        spec: normalizeCompareText(item?.spec),
+        model: normalizeCompareText(item?.material_model),
+        cells: records.map(() => makeEmptyCompareCell(normalizeCompareText(item?.unit))),
+        changed: false,
+        changeType: "same" as const,
+        diff: 0,
+        maxTotal: 0,
+        minTotal: 0,
+      };
+      current.cells[recordIndex] = mergeCompareCells(current.cells[recordIndex], makeCompareCellFromItem(item));
+      rowMap.set(key, current);
+    });
+  });
+
+  const rows = Array.from(rowMap.values()).map((row) => {
+    const totals = row.cells.map((cell) => (cell.present ? cell.total : 0));
+    const presentCount = row.cells.filter((cell) => cell.present).length;
+    const maxTotal = totals.length ? Math.max(...totals) : 0;
+    const minTotal = totals.length ? Math.min(...totals) : 0;
+    const changed = hasCompareCellChanged(row.cells);
+    const changeType: QuotationCompareTableRow["changeType"] = presentCount === row.cells.length ? (changed ? "changed" : "same") : "missing";
+    return {
+      ...row,
+      unit: row.unit || row.cells.find((cell) => cell.unit)?.unit || "-",
+      maxTotal,
+      minTotal,
+      diff: maxTotal - minTotal,
+      changed,
+      changeType,
+    };
+  }).sort((a, b) => {
+    const categoryOrder = getCompareCategoryOrder(a.kind) - getCompareCategoryOrder(b.kind);
+    if (a.kind === "other" || b.kind === "other") {
+      if (categoryOrder !== 0) return categoryOrder;
+      const order = a.order - b.order;
+      if (order !== 0) return order;
+      return a.name.localeCompare(b.name, "zh-CN");
+    }
+    const spaceOrder = a.space.localeCompare(b.space, "zh-CN");
+    if (spaceOrder !== 0) return spaceOrder;
+    const kindOrder = categoryOrder;
+    if (kindOrder !== 0) return kindOrder;
+    return a.name.localeCompare(b.name, "zh-CN");
+  });
+
+  const sectionMap = new Map<string, QuotationCompareTableSection>();
+  rows.forEach((row) => {
+    const sectionKey = `${row.space}|${row.kind}`;
+    const current = sectionMap.get(sectionKey) || {
+      key: sectionKey,
+      space: row.space,
+      kind: row.kind,
+      categoryLabel: row.categoryLabel,
+      rows: [],
+      subtotals: records.map(() => 0),
+      diff: 0,
+      changedCount: 0,
+    };
+    current.rows.push(row);
+    row.cells.forEach((cell, index) => {
+      current.subtotals[index] += cell.present ? cell.total : 0;
+    });
+    if (row.changed) current.changedCount += 1;
+    const maxSubtotal = Math.max(...current.subtotals);
+    const minSubtotal = Math.min(...current.subtotals);
+    current.diff = maxSubtotal - minSubtotal;
+    sectionMap.set(sectionKey, current);
+  });
+
+  return {
+    sections: Array.from(sectionMap.values()),
+    rows,
+    changedRowCount: rows.filter((row) => row.changed).length,
+  };
+}
+
+function getCompareCellTextClass(row: QuotationCompareTableRow, cell: QuotationCompareTableCell, field: "quantity" | "materialUnit" | "laborUnit" | "total", fallback = "text-[#182230]") {
+  if (!cell.present) return "text-[#98a2b3]";
+  if (field !== "quantity") return fallback;
+  const values = field === "quantity"
+    ? row.cells.map((item) => (item.present ? Number(item.quantity || 0) : 0))
+    : row.cells.filter((item) => item.present).map((item) => Number(item[field] || 0));
+  if (!values.length) return fallback;
+  const maxValue = Math.max(...values);
+  const minValue = Math.min(...values);
+  if (maxValue <= minValue + 0.005) return fallback;
+  return Number(cell[field] || 0) >= maxValue - 0.005 ? "font-bold text-red-600" : fallback;
+}
+
+function isCompareCellMaxQuantity(row: QuotationCompareTableRow, cell: QuotationCompareTableCell) {
+  if (!cell.present) return false;
+  const values = row.cells.map((item) => (item.present ? Number(item.quantity || 0) : 0));
+  if (!values.length) return false;
+  const maxValue = Math.max(...values);
+  const minValue = Math.min(...values);
+  return maxValue > minValue + 0.005 && Number(cell.quantity || 0) >= maxValue - 0.005;
+}
+
+function toSafeExportFileName(value: unknown, fallback = "报价对比") {
+  return String(value || fallback)
+    .replace(/[\\/:*?"<>|]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80) || fallback;
+}
+
+function getExcelTextWidth(value: unknown) {
+  const text = String(value ?? "");
+  return text.split(/\r?\n/).reduce((max, part) => {
+    const width = Array.from(part).reduce((sum, char) => sum + (char.charCodeAt(0) > 255 ? 2 : 1), 0);
+    return Math.max(max, width);
+  }, 0);
 }
 
 function addCompareAmount(map: Map<string, any>, key: string, patch: any) {
@@ -453,7 +748,7 @@ function mergeCustomerSnapshot(customer: any, snapshot: CreateCustomerSnapshot) 
 }
 
 const ENABLE_TEMPORARY_QUOTATION = false;
-const MAX_COMPARE_RECORDS = 4;
+const MAX_COMPARE_RECORDS = 2;
 const BUDGET_RECORD_RETURN_STATE_KEY = "quotationBudgetRecordReturnState";
 const recordDecorationTypeOptions = ["全包", "半包", "清包", "局改", "整装"];
 const quotationShareExpireOptions = [
@@ -639,7 +934,9 @@ export default function QuotationsPage() {
   const [compareLoading, setCompareLoading] = useState(false);
   const [compareError, setCompareError] = useState("");
   const [compareViewMode, setCompareViewMode] = useState<"all" | "changed">("all");
+  const [compareColumnMode, setCompareColumnMode] = useState<"simple" | "full">("simple");
   const [compareProjectSearch, setCompareProjectSearch] = useState("");
+  const [exportingCompare, setExportingCompare] = useState(false);
   const [showRecycleBin, setShowRecycleBin] = useState(false);
   const [lockTooltip, setLockTooltip] = useState<{ top: number; left: number; text: string } | null>(null);
   const [systemDialog, setSystemDialog] = useState<QuotationDialogState | null>(null);
@@ -983,6 +1280,7 @@ export default function QuotationsPage() {
     setCompareDetailMap({});
     setCompareError("");
     setCompareViewMode("all");
+    setCompareColumnMode("simple");
     setCompareProjectSearch("");
   }, [recordCustomerKey, showRecycleBin]);
 
@@ -1026,6 +1324,13 @@ export default function QuotationsPage() {
     const houseText = getHouseText(record);
     return houseText && houseText !== "-" && houseText !== "暂无房号" ? `${houseText}装修报价单` : "装修报价单";
   };
+  const getRecordCustomerTitle = (record: any) => {
+    const houseText = getHouseText(record);
+    return [String(record?.customer_name || "").trim(), houseText]
+      .filter((value) => value && value !== "-")
+      .join(" · ") || "未命名客户";
+  };
+  const getCompareRecordTitle = (record: any) => getRecordQuotationType(record) || getBudgetRecordTitle(record);
   const getContactText = (q: any) => {
     const phone = String(q.customer_phone || "").trim();
     if (phone && phone !== "仅微信联系") return phone;
@@ -1129,12 +1434,7 @@ export default function QuotationsPage() {
     : [];
   const visibleRecordRows = showRecycleBin ? activeDeletedRecordRows : activeRecordRows;
   const activeRecordCustomer = activeRecordRows[0] || activeDeletedRecordRows[0];
-  const activeRecordHeaderHouseText = activeRecordCustomer ? getHouseText(activeRecordCustomer) : "";
-  const activeRecordHeaderTitle = activeRecordCustomer
-    ? [String(activeRecordCustomer.customer_name || "").trim(), activeRecordHeaderHouseText]
-        .filter((value) => value && value !== "-")
-        .join(" · ") || "未命名客户"
-    : "";
+  const activeRecordHeaderTitle = activeRecordCustomer ? getRecordCustomerTitle(activeRecordCustomer) : "";
   const visibleFormalRecordCount = visibleRecordRows.filter((record: any) => isApprovedRecord(record)).length;
   const visibleSentRecordCount = visibleRecordRows.filter((record: any) => isSentToDesigner(record)).length;
   const visibleDraftRecordCount = visibleRecordRows.filter((record: any) => {
@@ -1155,15 +1455,12 @@ export default function QuotationsPage() {
     const shouldRestoreSavedRecords = !shouldOpenRecords && !shouldRefreshRecords && Boolean(savedReturnState);
     const requestKey = [
       shouldOpenRecords || shouldRestoreSavedRecords ? "open" : "refresh",
-      targetCustomerId || targetRecordKey,
+      targetCustomerId,
+      targetRecordKey,
       fromQuotationId,
       params.get("t") || "",
     ].join(":");
     if (!fromQuotationId) {
-      clearQuotationReturnParams(params);
-      return;
-    }
-    if ((shouldOpenRecords || shouldRestoreSavedRecords) && !targetCustomerId && !targetRecordKey) {
       clearQuotationReturnParams(params);
       return;
     }
@@ -1173,15 +1470,6 @@ export default function QuotationsPage() {
       setSelectedOrgUnitId("");
       openRecordsRequestRef.current = "";
       return;
-    }
-    if (shouldOpenRecords || shouldRestoreSavedRecords) {
-      const immediateTargetKey = targetRecordKey || targetCustomerId;
-      if (immediateTargetKey) {
-        setRecordCustomerKey(immediateTargetKey);
-        setShowRecycleBin(false);
-        clearBudgetRecordReturnState();
-        clearQuotationReturnParams(params);
-      }
     }
 
     let cancelled = false;
@@ -1207,17 +1495,16 @@ export default function QuotationsPage() {
       if (shouldOpenRecords || shouldRestoreSavedRecords) {
         const rows = [...activeRows, ...deletedRows];
         const returnedRecord = rows.find((record: any) => String(record?.id || "").trim() === fromQuotationId);
-        const matchedCustomerId = String(returnedRecord?.customer_id || "").trim();
-        const targetRecord = rows.find((record: any) => {
-          const key = getCustomerKey(record);
-          return key === targetRecordKey || String(record?.customer_id || "").trim() === targetCustomerId;
-        });
-        const targetKey = targetRecord ? getCustomerKey(targetRecord) : targetRecordKey || targetCustomerId;
-        if (!targetRecord && isLoading && !didRefreshRecords) {
+        if (!returnedRecord && isLoading && !didRefreshRecords) {
           openRecordsRequestRef.current = "";
           return;
         }
-        if (targetKey && (!returnedRecord || targetRecordKey || !matchedCustomerId || matchedCustomerId === targetCustomerId)) {
+        const targetRecord = returnedRecord || rows.find((record: any) => {
+          const key = getCustomerKey(record);
+          return key === targetRecordKey || String(record?.customer_id || "").trim() === targetCustomerId;
+        });
+        const targetKey = targetRecord ? getCustomerKey(targetRecord) : "";
+        if (targetKey) {
           setRecordCustomerKey(targetKey);
           setShowRecycleBin(false);
         }
@@ -1793,20 +2080,9 @@ export default function QuotationsPage() {
     setCompareDetailMap({});
     setCompareError("");
     setCompareViewMode("all");
+    setCompareColumnMode("simple");
     setCompareProjectSearch("");
     setCompareDialogOpen(true);
-  };
-
-  const resetCompareRecords = () => {
-    setCompareRecords([]);
-    setComparePickerOpen(false);
-    setComparePickerBaseRecord(null);
-    setCompareDraftIds([]);
-    setCompareDialogOpen(false);
-    setCompareDetailMap({});
-    setCompareError("");
-    setCompareViewMode("all");
-    setCompareProjectSearch("");
   };
 
   const sendQuotationToDesigner = (record: any) => runRecordAction(record.id, async () => {
@@ -1988,116 +2264,275 @@ export default function QuotationsPage() {
   const compareDisplayRecords = compareRecords.map((record: any) => compareDetailMap[String(record.id)] || record);
   const compareSummaries = compareDisplayRecords.map((record: any) => buildQuotationCompareSummary(record));
   const compareReady = compareDisplayRecords.length >= 2 && compareSummaries.length === compareDisplayRecords.length;
-  const compareCandidateRows = activeRecordRows.filter((record: any) => !record.is_unbound);
+  const compareCandidateRows = activeRecordRows.filter((record: any) => String(record?.id || "").trim());
   const compareTotalAmounts = compareReady ? compareSummaries.map((summary) => Number(summary.total || 0)) : [];
   const compareMaxTotal = compareTotalAmounts.length ? Math.max(...compareTotalAmounts) : 0;
   const compareMinTotal = compareTotalAmounts.length ? Math.min(...compareTotalAmounts) : 0;
   const compareTotalDiff = compareMaxTotal - compareMinTotal;
   const compareDiscountAmounts = compareReady ? compareSummaries.map((summary) => Number(summary.discount || 0)) : [];
   const compareDiscountDiff = compareDiscountAmounts.length ? Math.max(...compareDiscountAmounts) - Math.min(...compareDiscountAmounts) : 0;
-  const compareGridTemplateColumns = `minmax(220px, 320px) repeat(${compareDisplayRecords.length}, minmax(160px, 1fr)) 130px`;
-  const compareTableMinWidth = 350 + compareDisplayRecords.length * 160;
-  const compareCategoryRows = compareReady
-    ? [
-      { key: "base", label: "基装" },
-      { key: "main_material", label: "产品" },
-      { key: "custom_cabinet", label: "定制柜" },
-      { key: "other", label: "综合费用" },
-      { key: "discount", label: "报价优惠" },
-      { key: "final", label: "报价总费用" },
-    ].map((category) => {
-      const rows = compareSummaries.map((summary) => summary.categoryRows.find((row: any) => row.key === category.key) || null);
-      const amounts = rows.map((row) => Number(row?.amount || 0));
-      const counts = rows.map((row) => Number(row?.count || 0));
-      const maxAmount = Math.max(...amounts);
-      const minAmount = Math.min(...amounts);
-      return {
-        ...category,
-        rows,
-        amounts,
-        counts,
-        diff: maxAmount - minAmount,
-        maxAmount,
-        minAmount,
-        changed: maxAmount > minAmount + 0.005 || new Set(counts).size > 1,
-      };
-    })
-    : [];
-  const compareSpaceKeys = compareReady
-    ? Array.from(new Set(compareSummaries.flatMap((summary) => summary.spaceRows.map((row: any) => row.key))))
-    : [];
-  const compareDetailRows = compareSpaceKeys.map((key) => {
-    const rows = compareSummaries.map((summary) => summary.spaceRows.find((row: any) => row.key === key) || null);
-    const baseRow = rows.find(Boolean);
-    const amounts = rows.map((row) => Number(row?.total || 0));
-    const counts = rows.map((row) => Number(row?.count || 0));
-    const maxAmount = Math.max(...amounts);
-    const minAmount = Math.min(...amounts);
-    return {
-      key,
-      label: baseRow?.label || "-",
-      kind: baseRow?.kind || "base",
-      rows,
-      amounts,
-      counts,
-      diff: maxAmount - minAmount,
-      maxAmount,
-      minAmount,
-      changed: maxAmount > minAmount + 0.005 || new Set(counts).size > 1,
-    };
-  });
-  const compareProjectKeys = compareReady
-    ? Array.from(new Set(compareSummaries.flatMap((summary) => summary.projectRows.map((row: any) => row.key))))
-    : [];
-  const compareProjectRows = compareProjectKeys.map((key) => {
-    const rows = compareSummaries.map((summary) => summary.projectRows.find((row: any) => row.key === key) || null);
-    const baseRow = rows.find(Boolean);
-    const amounts = rows.map((row) => Number(row?.total || 0));
-    const counts = rows.map((row) => Number(row?.count || 0));
-    const maxAmount = Math.max(...amounts);
-    const minAmount = Math.min(...amounts);
-    return {
-      key,
-      label: baseRow?.label || "-",
-      space: baseRow?.space || "-",
-      kind: baseRow?.kind || "base",
-      rows,
-      amounts,
-      counts,
-      diff: maxAmount - minAmount,
-      maxAmount,
-      minAmount,
-      changed: maxAmount > minAmount + 0.005 || new Set(counts).size > 1,
-    };
-  });
+  const compareTable = compareReady ? buildQuotationCompareTable(compareDisplayRecords) : { sections: [], rows: [], changedRowCount: 0 };
+  const compareQuoteColumnCount = compareColumnMode === "full" ? 4 : 2;
+  const compareTableMinWidth = (compareColumnMode === "full" ? 624 : 576) + compareDisplayRecords.length * (compareColumnMode === "full" ? 354 : 182);
   const compareProjectSearchText = compareProjectSearch.trim().toLowerCase();
-  const visibleCompareProjectRows = compareProjectRows.filter((row) => {
-    if (compareViewMode === "changed" && !row.changed) return false;
-    if (!compareProjectSearchText) return true;
-    return `${row.label} ${row.key}`.toLowerCase().includes(compareProjectSearchText);
+  const visibleCompareSections = compareTable.sections.map((section: QuotationCompareTableSection) => {
+    const rows = section.rows.filter((row) => {
+      if (compareViewMode === "changed" && !row.changed) return false;
+      if (!compareProjectSearchText) return true;
+      return `${row.space} ${row.categoryLabel} ${row.name} ${row.unit} ${row.spec} ${row.model}`.toLowerCase().includes(compareProjectSearchText);
+    });
+    return { ...section, rows };
+  }).filter((section: QuotationCompareTableSection) => section.rows.length > 0);
+  const visibleCompareSpaceIndexMap = new Map<string, number>();
+  visibleCompareSections.forEach((section: QuotationCompareTableSection) => {
+    const sectionTitle = getCompareSectionTitle(section);
+    if (!visibleCompareSpaceIndexMap.has(sectionTitle)) {
+      visibleCompareSpaceIndexMap.set(sectionTitle, visibleCompareSpaceIndexMap.size + 1);
+    }
   });
-  const compareSearchMatchedCount = visibleCompareProjectRows.length;
-  const visibleCompareProjectGroups = [
-    { kind: "base" as QuotationCompareKind, label: "基装" },
-    { kind: "main_material" as QuotationCompareKind, label: "产品" },
-    { kind: "custom_cabinet" as QuotationCompareKind, label: "定制柜" },
-  ].map((group) => ({
-    ...group,
-    rows: visibleCompareProjectRows.filter((row) => row.kind === group.kind),
-  })).filter((group) => group.rows.length > 0);
-  const compareChangedCount = compareCategoryRows.filter((row) => row.changed).length + compareProjectRows.filter((row) => row.changed).length;
-  const renderCompareDiffCell = (diff: number, label = "高出") => {
-    const hasDiff = Number(diff || 0) >= 0.005;
-    return (
-      <div className={`quotation-compare-diff-cell h-full px-4 py-2.5 text-right ${hasDiff ? "quotation-compare-diff-cell-hot" : "quotation-compare-diff-cell-flat"}`}>
-        <div className="flex h-full flex-col items-end justify-center">
-          <span className={`text-[11px] font-semibold ${hasDiff ? "text-red-500" : "text-[#8a97aa]"}`}>{hasDiff ? label : "持平"}</span>
-          <span className={`mt-0.5 text-xs font-bold tabular-nums ${hasDiff ? "text-red-600" : "text-[#475467]"}`}>
-            {hasDiff ? formatRecordAmount(diff) : "-"}
-          </span>
-        </div>
-      </div>
-    );
+  const compareSearchMatchedCount = visibleCompareSections.reduce((sum: number, section: QuotationCompareTableSection) => sum + section.rows.length, 0);
+
+  const exportCompareTable = async () => {
+    if (exportingCompare) return;
+    if (!compareReady || visibleCompareSections.length === 0) {
+      setMessage("当前没有可导出的报价对比内容");
+      return;
+    }
+    setExportingCompare(true);
+    setMessage("");
+    try {
+      const ExcelJS = (await import("exceljs")).default;
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = "着急科技";
+      workbook.created = new Date();
+      const exportTitle = `${getRecordCustomerTitle(compareDisplayRecords[0])} 报价对比`;
+      const today = new Date().toISOString().slice(0, 10);
+      const quoteColumnCount = compareColumnMode === "full" ? 4 : 2;
+      const columnCount = 4 + compareDisplayRecords.length * quoteColumnCount + 1;
+      const worksheet = workbook.addWorksheet("报价对比", {
+        views: [{ state: "frozen", ySplit: 3 }],
+      });
+      worksheet.pageSetup = {
+        orientation: "landscape",
+        paperSize: 9,
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 0,
+        horizontalCentered: true,
+        margins: { left: 0.25, right: 0.25, top: 0.35, bottom: 0.35, header: 0.15, footer: 0.15 },
+      };
+      worksheet.properties.defaultRowHeight = 22;
+      worksheet.columns = [
+        { width: 8 },
+        { width: 12 },
+        { width: 32 },
+        { width: 8 },
+        ...compareDisplayRecords.flatMap(() => compareColumnMode === "full"
+          ? [{ width: 10 }, { width: 12 }, { width: 12 }, { width: 14 }]
+          : [{ width: 10 }, { width: 14 }]),
+        { width: 14 },
+      ];
+
+      const colors = {
+        border: { argb: "FF000000" },
+        dark: { argb: "FF182230" },
+        muted: { argb: "FF667085" },
+        red: { argb: "FFDC2626" },
+      };
+      const fills = {
+        white: { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFFFF" } },
+        title: { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFFFFF" } },
+        header: { type: "pattern", pattern: "solid", fgColor: { argb: "FFF3F6FA" } },
+        section: { type: "pattern", pattern: "solid", fgColor: { argb: "FFFBFCFE" } },
+        subtotal: { type: "pattern", pattern: "solid", fgColor: { argb: "FFEEF2F6" } },
+      } as any;
+      const thinBorder = {
+        top: { style: "thin", color: colors.border },
+        left: { style: "thin", color: colors.border },
+        bottom: { style: "thin", color: colors.border },
+        right: { style: "thin", color: colors.border },
+      } as any;
+      const bodyFont = "苹方-简";
+      const styleCell = (cell: any, options: { fill?: any; bold?: boolean; color?: any; align?: "left" | "center" | "right"; size?: number; shrinkToFit?: boolean; wrapText?: boolean } = {}) => {
+        cell.border = thinBorder;
+        cell.fill = options.fill || fills.white;
+        cell.font = { name: bodyFont, size: options.size || 10, bold: Boolean(options.bold), color: options.color || colors.dark };
+        cell.alignment = {
+          vertical: "middle",
+          horizontal: options.align || "left",
+          wrapText: Boolean(options.wrapText),
+          shrinkToFit: options.shrinkToFit ?? true,
+        };
+      };
+      const styleRow = (row: any, options: { fill?: any; bold?: boolean; color?: any; center?: boolean } = {}) => {
+        row.eachCell({ includeEmpty: true }, (cell: any, columnNumber: number) => {
+          const align = options.center ? "center" : [1, 2, 4].includes(columnNumber) ? "center" : columnNumber >= 5 ? "right" : "left";
+          styleCell(cell, { fill: options.fill, bold: options.bold, color: options.color, align });
+          if (typeof cell.value === "number") cell.numFmt = columnNumber === 1 ? "0" : "0.00";
+        });
+      };
+      const mergeAndStyle = (startRow: number, startColumn: number, endRow: number, endColumn: number, options: Parameters<typeof styleCell>[1] = {}) => {
+        worksheet.mergeCells(startRow, startColumn, endRow, endColumn);
+        for (let rowNumber = startRow; rowNumber <= endRow; rowNumber += 1) {
+          for (let columnNumber = startColumn; columnNumber <= endColumn; columnNumber += 1) {
+            styleCell(worksheet.getCell(rowNumber, columnNumber), options);
+          }
+        }
+      };
+
+      worksheet.mergeCells(1, 1, 1, columnCount);
+      const titleCell = worksheet.getCell(1, 1);
+      titleCell.value = exportTitle;
+      styleCell(titleCell, { fill: fills.title, bold: true, align: "center", size: 16 });
+      worksheet.getRow(1).height = 30;
+      for (let columnNumber = 1; columnNumber <= columnCount; columnNumber += 1) {
+        styleCell(worksheet.getCell(1, columnNumber), { fill: fills.title, bold: true, align: "center", size: 16 });
+      }
+
+      const headerTop = 2;
+      const headerBottom = 3;
+      ["序号", "类别", "工程名称", "单位"].forEach((label, index) => {
+        worksheet.getCell(headerTop, index + 1).value = label;
+        mergeAndStyle(headerTop, index + 1, headerBottom, index + 1, { fill: fills.header, bold: true, align: index === 2 ? "left" : "center" });
+      });
+      let currentColumn = 5;
+      compareDisplayRecords.forEach((record: any, index: number) => {
+        const summary = compareSummaries[index];
+        const totalHigher = compareMaxTotal > compareMinTotal + 0.005 && Number(summary.total || 0) >= compareMaxTotal - 0.005;
+        worksheet.getCell(headerTop, currentColumn).value = `报价 ${index + 1}：${getCompareRecordTitle(record)}    金额：${formatRecordAmount(summary.total)}`;
+        mergeAndStyle(headerTop, currentColumn, headerTop, currentColumn + quoteColumnCount - 1, { fill: fills.white, bold: true, color: totalHigher ? colors.red : colors.dark, align: "center", size: 10, shrinkToFit: false, wrapText: true });
+        const subHeaders = compareColumnMode === "full" ? ["数量", "材料单价", "人工单价", "合计"] : ["数量", "合计"];
+        subHeaders.forEach((label, offset) => {
+          worksheet.getCell(headerBottom, currentColumn + offset).value = label;
+          styleCell(worksheet.getCell(headerBottom, currentColumn + offset), { fill: fills.header, bold: true, color: colors.muted, align: "center" });
+        });
+        currentColumn += quoteColumnCount;
+      });
+      worksheet.getCell(headerTop, columnCount).value = "差异";
+      mergeAndStyle(headerTop, columnCount, headerBottom, columnCount, { fill: fills.header, bold: true, color: colors.muted, align: "center" });
+      worksheet.getRow(headerTop).height = 30;
+      worksheet.getRow(headerBottom).height = 22;
+
+      const addSectionRow = (title: string) => {
+        const row = worksheet.addRow([title, ...Array(columnCount - 1).fill("")]);
+        worksheet.mergeCells(row.number, 1, row.number, columnCount);
+        for (let columnNumber = 1; columnNumber <= columnCount; columnNumber += 1) {
+          styleCell(worksheet.getCell(row.number, columnNumber), { fill: fills.section, bold: true, color: colors.muted, align: "left" });
+        }
+        row.height = 24;
+      };
+      const addDataRow = (values: any[], options: { fill?: any; bold?: boolean; quantityHighColumns?: number[] } = {}) => {
+        const row = worksheet.addRow(values);
+        row.height = 22;
+        styleRow(row, { fill: options.fill || fills.white, bold: options.bold });
+        (options.quantityHighColumns || []).forEach((columnNumber) => {
+          row.getCell(columnNumber).font = { name: bodyFont, size: 10, bold: true, color: colors.red };
+        });
+        return row;
+      };
+
+      visibleCompareSections.forEach((section: QuotationCompareTableSection, sectionIndex: number) => {
+        const sectionTitle = getCompareSectionTitle(section);
+        const previousSectionTitle = sectionIndex > 0 ? getCompareSectionTitle(visibleCompareSections[sectionIndex - 1]) : "";
+        if (sectionIndex === 0 || previousSectionTitle !== sectionTitle) {
+          addSectionRow(`${formatCompareSpaceIndex((visibleCompareSpaceIndexMap.get(sectionTitle) || sectionIndex + 1))}、${sectionTitle}`);
+        }
+        section.rows.forEach((row: QuotationCompareTableRow, rowIndex: number) => {
+          const quantityHighColumns: number[] = [];
+          const values: any[] = [rowIndex + 1, row.categoryLabel, row.name, row.unit];
+          row.cells.forEach((cell, index) => {
+            const quantityColumn = 5 + index * quoteColumnCount;
+            values.push(cell.present ? Number(cell.quantity || 0) : "-");
+            if (isCompareCellMaxQuantity(row, cell)) quantityHighColumns.push(quantityColumn);
+            if (compareColumnMode === "full") {
+              values.push(cell.present ? Number(cell.materialUnit || 0) : "-");
+              values.push(cell.present ? Number(cell.laborUnit || 0) : "-");
+            }
+            values.push(cell.present ? Number(cell.total || 0) : "无此项目");
+          });
+          values.push(formatCompareDiff(row.diff));
+          addDataRow(values, { quantityHighColumns });
+        });
+        if (section.kind !== "other") {
+          const values: any[] = ["小计", "", "", ""];
+          section.subtotals.forEach((amount: number) => {
+            values.push("");
+            if (compareColumnMode === "full") {
+              values.push("");
+              values.push("");
+            }
+            values.push(Number(amount || 0));
+          });
+          values.push(formatCompareDiff(section.diff));
+          const subtotalRow = addDataRow(values, { fill: fills.subtotal, bold: true });
+          worksheet.mergeCells(subtotalRow.number, 1, subtotalRow.number, 4);
+          styleCell(subtotalRow.getCell(1), { fill: fills.subtotal, bold: true, color: colors.muted, align: "center" });
+        }
+      });
+
+      const totalValues: any[] = ["合计", "", "", ""];
+      compareSummaries.forEach((summary) => {
+        totalValues.push("");
+        if (compareColumnMode === "full") {
+          totalValues.push("");
+          totalValues.push("");
+        }
+        totalValues.push(Number(summary.total || 0));
+      });
+      totalValues.push(compareTotalDiff < 0.005 ? "持平" : formatRecordAmount(compareTotalDiff));
+      const totalRow = addDataRow(totalValues, { fill: fills.header, bold: true });
+      worksheet.mergeCells(totalRow.number, 1, totalRow.number, 4);
+      styleCell(totalRow.getCell(1), { fill: fills.header, bold: true, align: "center" });
+
+      worksheet.autoFilter = { from: { row: headerBottom, column: 1 }, to: { row: headerBottom, column: columnCount } };
+      worksheet.columns.forEach((column: any, index: number) => {
+        const minWidth = [8, 10, 24, 7][index] || 10;
+        const maxWidth = index === 2 ? 42 : index >= 4 ? 18 : 20;
+        let maxContentWidth = 0;
+        column.eachCell({ includeEmpty: true }, (cell: any) => {
+          if (cell.isMerged) return;
+          const rawValue = typeof cell.value === "object" && cell.value && "richText" in cell.value
+            ? (cell.value.richText || []).map((part: any) => part.text || "").join("")
+            : cell.value;
+          maxContentWidth = Math.max(maxContentWidth, getExcelTextWidth(rawValue));
+        });
+        const baseWidth = Math.min(Math.max(Math.ceil(maxContentWidth * 1.08) + 2, minWidth), maxWidth);
+        column.width = Math.round(baseWidth * 4 / 3 * 10) / 10;
+      });
+      for (let offset = 0; offset < quoteColumnCount; offset += 1) {
+        const quoteColumnIndexes = compareDisplayRecords.map((_, recordIndex) => 5 + recordIndex * quoteColumnCount + offset);
+        const maxQuoteWidth = Math.max(...quoteColumnIndexes.map((columnIndex) => Number(worksheet.getColumn(columnIndex).width || 0)));
+        quoteColumnIndexes.forEach((columnIndex) => {
+          worksheet.getColumn(columnIndex).width = maxQuoteWidth;
+        });
+      }
+      for (let rowNumber = 1; rowNumber <= worksheet.rowCount; rowNumber += 1) {
+        for (let columnNumber = 1; columnNumber <= columnCount; columnNumber += 1) {
+          const cell = worksheet.getCell(rowNumber, columnNumber);
+          cell.border = thinBorder;
+          if (!cell.fill) cell.fill = fills.white;
+          if (!cell.font) cell.font = { name: bodyFont, size: 10, color: colors.dark };
+          if (!cell.alignment) cell.alignment = { vertical: "middle", horizontal: columnNumber >= 5 ? "right" : "left", wrapText: false, shrinkToFit: true };
+        }
+      }
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${toSafeExportFileName(exportTitle)}_${today}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      setMessage("报价对比表已导出");
+    } catch (error: any) {
+      console.error("export quotation compare failed", error);
+      setMessage(error?.message || "导出报价对比失败，请稍后重试");
+    } finally {
+      setExportingCompare(false);
+    }
   };
 
   const renderShareFieldGroup = <Key extends string,>(
@@ -2895,16 +3330,13 @@ export default function QuotationsPage() {
 
       {comparePickerOpen && (
         <div className="fixed inset-0 z-[64] flex items-center justify-center bg-[#0f172a]/28 p-4">
-          <div className="flex max-h-[min(760px,calc(100dvh-48px))] w-full max-w-[780px] flex-col overflow-hidden rounded-[16px] border border-[#d8e0eb] bg-white">
-            <div className="flex shrink-0 items-center justify-between gap-4 border-b border-[#e5eaf2] bg-white px-5 py-4">
+          <div className="max-h-[min(720px,calc(100dvh-48px))] w-full max-w-[760px] overflow-y-auto rounded-[16px] border border-[#d8e0eb] bg-white p-6 shadow-[0_22px_70px_rgba(15,23,42,0.22)]">
+            <div className="flex items-start justify-between gap-4">
               <div className="flex min-w-0 items-center gap-3">
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[10px] border border-[#d6e4ff] bg-[#f6f9ff] text-[#407aff]">
-                  <GitCompareArrows className="h-5 w-5" />
-                </span>
                 <div className="min-w-0">
-                  <h3 className="truncate text-[16px] font-semibold text-[#172033]">选择要对比的报价</h3>
-                  <p className="mt-0.5 truncate text-xs font-medium text-[#667085]">
-                    同一工地内选择 2-{MAX_COMPARE_RECORDS} 份报价，确认后查看详细差异
+                  <h3 className="truncate text-[18px] font-bold leading-7 text-[#172033]">选择要对比的报价</h3>
+                  <p className="mt-1 truncate text-[13px] font-medium text-[#667085]">
+                    同一工地内选择 2 份报价，确认后查看详细差异
                   </p>
                 </div>
               </div>
@@ -2922,19 +3354,15 @@ export default function QuotationsPage() {
               </button>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto bg-white p-4">
-              <div className="mb-3 grid gap-3 rounded-[10px] border border-[#e2e8f0] bg-[#fbfcfe] px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <div className="mt-5">
+              <div className="mb-4 flex items-end justify-between gap-4">
                 <div className="min-w-0">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.04em] text-[#98a2b3]">当前报价</p>
-                  <p className="mt-1 truncate text-xs font-semibold text-[#182230]" title={comparePickerBaseRecord ? getBudgetRecordTitle(comparePickerBaseRecord) : "未选择"}>
-                    {comparePickerBaseRecord ? getBudgetRecordTitle(comparePickerBaseRecord) : "未选择"}
+                  <p className="text-[11px] font-semibold text-[#98a2b3]">当前报价</p>
+                  <p className="mt-1 truncate text-[14px] font-bold text-[#182230]" title={comparePickerBaseRecord ? getRecordCustomerTitle(comparePickerBaseRecord) : "未选择"}>
+                    {comparePickerBaseRecord ? getRecordCustomerTitle(comparePickerBaseRecord) : "未选择"}
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className={`inline-flex h-8 items-center rounded-full border px-3 text-xs font-semibold tabular-nums ${compareDraftIds.length >= 2 ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`}>
-                    已选 {compareDraftIds.length}/{MAX_COMPARE_RECORDS}
-                  </span>
-                </div>
+                <span className="shrink-0 rounded-full bg-[#eff5ff] px-3 py-1 text-xs font-bold tabular-nums text-[#407aff]">已选 {compareDraftIds.length}/{MAX_COMPARE_RECORDS}</span>
               </div>
 
               {compareError ? (
@@ -2943,7 +3371,7 @@ export default function QuotationsPage() {
                 </div>
               ) : null}
 
-              <div className="overflow-hidden rounded-[12px] border border-[#e2e8f0]">
+              <div className="overflow-hidden rounded-[10px] border border-[#e2e8f0] bg-white">
                 {compareCandidateRows.map((record: any, index: number) => {
                   const recordId = String(record.id);
                   const selected = compareDraftIds.includes(recordId);
@@ -2955,22 +3383,22 @@ export default function QuotationsPage() {
                       type="button"
                       disabled={disabled}
                       onClick={() => toggleCompareDraftId(recordId)}
-                      className={`group relative grid w-full grid-cols-[36px_minmax(0,1fr)_auto] items-center gap-3 border-b border-[#edf1f6] px-3.5 py-3 text-left transition last:border-b-0 disabled:cursor-not-allowed disabled:opacity-45 ${
+                      className={`group relative grid w-full grid-cols-[34px_minmax(0,1fr)_auto] items-center gap-3 border-b border-[#edf1f6] px-4 py-3 text-left transition last:border-b-0 disabled:cursor-not-allowed disabled:opacity-45 ${
                         selected
-                          ? "bg-[#f6f9ff]"
+                          ? "bg-[#fbfdff] before:absolute before:bottom-0 before:left-0 before:top-0 before:w-[3px] before:bg-[#407aff]"
                           : "bg-white hover:bg-[#fbfcfe]"
                       }`}
                     >
                       <span className={`flex h-7 w-7 items-center justify-center rounded-full border transition ${
-                        selected ? "border-[#407aff] bg-[#407aff] text-white" : "border-[#cbd5e1] bg-[#f8fafc] text-transparent group-hover:border-[#9fb2cc] group-hover:bg-white"
+                        selected ? "border-[#407aff] bg-[#407aff] text-white" : "border-[#cbd5e1] bg-white text-transparent group-hover:border-[#9fb2cc]"
                       }`}>
                         <Check className="h-3.5 w-3.5" />
                       </span>
                       <span className="min-w-0">
                         <span className="flex min-w-0 items-center gap-2">
-                          <span className="truncate text-sm font-semibold text-[#182230]" title={getBudgetRecordTitle(record)}>{getBudgetRecordTitle(record)}</span>
-                          {isBase ? <span className="shrink-0 rounded-full bg-[#edf4ff] px-2 py-0.5 text-[11px] font-semibold text-[#407aff]">当前</span> : null}
-                          {isApprovedRecord(record) ? <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">正式</span> : null}
+                          <span className="truncate text-sm font-semibold text-[#182230]" title={getCompareRecordTitle(record)}>{getCompareRecordTitle(record)}</span>
+                          {isBase ? <span className="shrink-0 rounded-full border border-[#d6e4ff] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#407aff]">当前</span> : null}
+                          {isApprovedRecord(record) ? <span className="shrink-0 rounded-full border border-emerald-200 bg-white px-2 py-0.5 text-[11px] font-semibold text-emerald-700">正式</span> : null}
                         </span>
                         <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[#667085]">
                           <span className="tabular-nums">{formatQuoteDateTime(getLatestQuoteDate(record))}</span>
@@ -2979,7 +3407,7 @@ export default function QuotationsPage() {
                       </span>
                       <span className="text-right">
                         <span className="block text-[11px] font-semibold text-[#98a2b3]">报价 {index + 1}</span>
-                        <span className="mt-1 block text-sm font-semibold tabular-nums text-red-600">{formatRecordAmount(getRecordAmount(record))}</span>
+                        <span className="mt-1 block text-sm font-bold tabular-nums text-[#182230]">{formatRecordAmount(getRecordAmount(record))}</span>
                       </span>
                     </button>
                   );
@@ -2987,8 +3415,8 @@ export default function QuotationsPage() {
               </div>
             </div>
 
-            <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[#e5eaf2] bg-white px-5 py-3">
-              <p className="text-xs font-medium text-[#667085]">最多同时对比 {MAX_COMPARE_RECORDS} 份，至少选择 2 份。</p>
+            <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+              <p className="text-xs font-medium text-[#667085]">请选择 2 份报价进行对比。</p>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
@@ -2997,7 +3425,7 @@ export default function QuotationsPage() {
                     setComparePickerBaseRecord(null);
                     setCompareError("");
                   }}
-                  className="inline-flex h-9 items-center justify-center gap-1.5 rounded-[9px] border border-[#cfd8e5] bg-[#f8fafc] px-3.5 text-xs font-semibold text-[#475467] transition hover:border-[#b9c5d4] hover:bg-white hover:text-[#182230]"
+                  className="inline-flex h-9 items-center justify-center gap-1.5 rounded-[9px] border border-[#cfd8e5] bg-white px-3.5 text-xs font-semibold text-[#475467] transition hover:border-[#b9c5d4] hover:bg-[#fbfcfe] hover:text-[#182230]"
                 >
                   <X className="h-3.5 w-3.5" />
                   取消
@@ -3027,11 +3455,11 @@ export default function QuotationsPage() {
                 </span>
                 <div className="min-w-0">
                   <h3 className="truncate text-[16px] font-semibold text-[#172033]">报价对比</h3>
-                  <p className="mt-0.5 truncate text-xs font-medium text-[#667085]">对比 {compareDisplayRecords.length} 份报价，红色标记同项最高金额</p>
+                  <p className="mt-0.5 truncate text-xs font-medium text-[#667085]">对比 {compareDisplayRecords.length} 份报价，红色标记同项最高数量</p>
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-	                <span className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-xs font-semibold tabular-nums ${compareTotalDiff < 0.005 ? "bg-[#f2f4f7] text-[#667085]" : "bg-red-50 text-red-600 ring-1 ring-red-100"}`}>
+	                <span className="inline-flex h-8 items-center gap-1.5 rounded-full bg-[#f2f4f7] px-3 text-xs font-semibold tabular-nums text-[#667085]">
 	                  {compareTotalDiff < 0.005 ? <Minus className="h-3.5 w-3.5" /> : <ArrowUpRight className="h-3.5 w-3.5" />}
 	                  最高差 {compareTotalDiff < 0.005 ? "持平" : formatRecordAmount(compareTotalDiff)}
 	                </span>
@@ -3102,113 +3530,155 @@ export default function QuotationsPage() {
                           只看差异
                         </button>
                       </div>
+                      <div className="inline-flex h-8 items-center gap-1 rounded-[10px] bg-[#f6f8fb] p-1 ring-1 ring-inset ring-[#e1e7f0]">
+                        <button type="button" onClick={() => setCompareColumnMode("simple")} className={`relative inline-flex h-6 items-center rounded-[7px] px-2.5 text-xs font-medium transition ${compareColumnMode === "simple" ? "bg-white text-[#172033] ring-1 ring-inset ring-[#d8e1ed]" : "text-[#7a8798] hover:bg-white/70 hover:text-[#344054]"}`}>
+                          清爽
+                        </button>
+                        <button type="button" onClick={() => setCompareColumnMode("full")} className={`relative inline-flex h-6 items-center rounded-[7px] px-2.5 text-xs font-medium transition ${compareColumnMode === "full" ? "bg-white text-[#172033] ring-1 ring-inset ring-[#d8e1ed]" : "text-[#7a8798] hover:bg-white/70 hover:text-[#344054]"}`}>
+                          完整明细
+                        </button>
+                      </div>
                     </div>
                   </div>
 
                   <div className="min-h-0 flex-1 overflow-auto bg-[#f8fafc]">
-                    <div className="quotation-compare-table" style={{ width: "100%", minWidth: `${compareTableMinWidth}px` }}>
-                      <div className="sticky top-0 z-20 grid border-b border-[#d9e2ef] bg-white shadow-[0_8px_18px_rgba(15,23,42,0.05)]" style={{ gridTemplateColumns: compareGridTemplateColumns }}>
-                        <div className="quotation-compare-left-cell quotation-compare-left-head sticky left-0 z-30 flex min-h-[132px] flex-col justify-between border-r border-[#d9e2ef] p-4">
-                          <div>
-                            <p className="text-sm font-semibold text-[#182230]">对比项</p>
-                            <p className="mt-1 text-xs text-[#98a2b3]">{compareChangedCount} 项变化</p>
-                          </div>
-                          <p className="text-xs font-medium text-[#667085]">红色为最高金额</p>
-                        </div>
-                        {compareDisplayRecords.map((record: any, index) => {
-                          const summary = compareSummaries[index];
-                          const totalHigher = compareMaxTotal > compareMinTotal + 0.005 && Number(summary.total || 0) >= compareMaxTotal - 0.005;
-                          return (
-                            <div key={record.id} className={`min-h-[132px] border-r border-[#e5ebf3] bg-white p-4 ${totalHigher ? "bg-red-50/50" : ""}`}>
-                              <div className="mb-2 flex items-center justify-between gap-2">
-                                <span className={`inline-flex h-6 min-w-6 items-center justify-center rounded-full px-2 text-xs font-bold ${totalHigher ? "bg-red-600 text-white" : "bg-[#172033] text-white"}`}>{index + 1}</span>
-                                <span className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold ${getRecordStatusClass(record)}`}>{formatRecordStatus(record)}</span>
-                              </div>
-                              <p className="line-clamp-2 min-h-[32px] text-xs font-semibold leading-4 text-[#182230]" title={getBudgetRecordTitle(record)}>{getBudgetRecordTitle(record)}</p>
-	                              <p className={`mt-2 text-[20px] font-semibold tabular-nums ${totalHigher ? "text-red-600" : "text-[#182230]"}`}>{formatRecordAmount(summary.total)}</p>
-	                              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-medium tabular-nums text-[#8a97aa]">
-	                                <span>{formatQuoteDateTime(getLatestQuoteDate(record))}</span>
-	                                <span className={`${Number(summary.discount || 0) > 0 ? "text-amber-700" : "text-[#98a2b3]"}`}>
-	                                  优惠 {Number(summary.discount || 0) > 0 ? `-${formatRecordAmount(summary.discount)}` : "0.00"}
-	                                </span>
-	                              </div>
-	                            </div>
-                          );
-                        })}
-                        <div className={`quotation-compare-diff-head min-h-[132px] border-l border-[#d9e2ef] p-4 text-right ${compareTotalDiff < 0.005 ? "bg-[#fbfcfe]" : "bg-[#fff7f7]"}`}>
-                          <p className="text-xs font-semibold text-[#667085]">最高差额</p>
-                          <p className={`mt-2 text-lg font-bold tabular-nums ${compareTotalDiff < 0.005 ? "text-[#475467]" : "text-red-600"}`}>{compareTotalDiff < 0.005 ? "持平" : formatRecordAmount(compareTotalDiff)}</p>
-                          <div className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-[#98a2b3]">
-                            {compareTotalDiff < 0.005 ? <Minus className="h-3 w-3" /> : <ArrowUpRight className="h-3 w-3 text-red-500" />}
-                            最高 - 最低
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="grid border-b border-[#d9e2ef] bg-[#eef2f6]" style={{ gridTemplateColumns: compareGridTemplateColumns }}>
-                        <div className="quotation-compare-left-cell quotation-compare-left-section sticky left-0 z-10 border-r border-[#d9e2ef] px-4 py-3 text-sm font-semibold text-[#182230]">价格总览</div>
-                        <div className="col-span-full hidden" />
-                      </div>
-
-                      {compareCategoryRows.map((row) => (
-                        <div key={row.key} className="grid min-h-[48px] items-center border-b border-[#e5ebf3] bg-white text-xs" style={{ gridTemplateColumns: compareGridTemplateColumns }}>
-                          <div className="quotation-compare-left-cell quotation-compare-left-body sticky left-0 z-10 h-full border-r border-[#e5ebf3] px-4 py-3 font-semibold text-[#182230]">{row.label}</div>
-                          {row.amounts.map((amount: number, index: number) => {
-                            const higher = row.maxAmount > row.minAmount + 0.005 && amount >= row.maxAmount - 0.005;
+                    <table className={`quotation-compare-sheet w-full border-collapse text-xs ${compareColumnMode === "full" ? "quotation-compare-full-mode" : "quotation-compare-simple-mode"}`} style={{ minWidth: `${compareTableMinWidth}px` }}>
+                      <colgroup>
+                        <col className="w-[96px]" />
+                        <col className={compareColumnMode === "full" ? "w-[84px]" : "w-[72px]"} />
+                        <col className={compareColumnMode === "full" ? "w-[260px]" : "w-[224px]"} />
+                        <col className="w-[64px]" />
+                        {compareDisplayRecords.map((record: any) => (
+                          <Fragment key={`compare-cols-${record.id}`}>
+                            <col className="w-[72px]" />
+                            {compareColumnMode === "full" ? <col className="w-[86px]" /> : null}
+                            {compareColumnMode === "full" ? <col className="w-[86px]" /> : null}
+                            <col className="w-[110px]" />
+                          </Fragment>
+                        ))}
+                        <col className="w-[120px]" />
+                      </colgroup>
+                      <thead>
+                        <tr className="h-[82px] bg-white text-[#344054]">
+                          <th rowSpan={2} className="quotation-compare-sticky-col quotation-compare-sticky-col-1 sticky top-0 z-40 w-[96px] border-b border-r border-[#d9e2ef] px-3 py-3 text-center font-semibold">序号</th>
+                          <th rowSpan={2} className="quotation-compare-sticky-col quotation-compare-sticky-col-2 sticky top-0 z-40 border-b border-r border-[#d9e2ef] px-3 py-3 text-left font-semibold">类别</th>
+                          <th rowSpan={2} className="quotation-compare-sticky-col quotation-compare-sticky-col-3 sticky top-0 z-40 border-b border-r border-[#d9e2ef] px-3 py-3 text-left font-semibold">
+                            <div className="flex flex-col gap-1">
+                              <span>工程名称</span>
+                            </div>
+                          </th>
+                          <th rowSpan={2} className="sticky top-0 z-30 w-[64px] border-b border-r border-[#d9e2ef] bg-white px-2 py-3 text-center font-semibold">单位</th>
+                          {compareDisplayRecords.map((record: any, index) => {
+                            const summary = compareSummaries[index];
+                            const totalHigher = compareMaxTotal > compareMinTotal + 0.005 && Number(summary.total || 0) >= compareMaxTotal - 0.005;
                             return (
-                              <div key={`${row.key}-${index}`} className={`flex h-full items-center justify-end border-r border-[#edf1f5] px-4 py-3 text-right font-semibold tabular-nums ${higher ? "bg-red-50 text-red-600" : "text-[#182230]"}`}>
-                                {formatRecordAmount(amount)}
-                              </div>
+                              <th key={record.id} colSpan={compareQuoteColumnCount} className="sticky top-0 z-30 border-b border-r border-[#d9e2ef] bg-white px-3 py-3 text-left">
+                                <div className="flex min-w-[168px] items-start justify-between gap-4">
+                                  <div className="min-w-0 space-y-1">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-bold text-white ${totalHigher ? "bg-red-600" : "bg-[#172033]"}`}>{index + 1}</span>
+                                      <span className="text-[11px] font-semibold uppercase tracking-[0.04em] text-[#667085]">报价 {index + 1}</span>
+                                      <span className={`inline-flex shrink-0 items-center rounded-full border px-1.5 py-0.5 text-[10px] font-semibold ${getRecordStatusClass(record)}`}>{formatRecordStatus(record)}</span>
+                                    </div>
+                                    <p className="max-w-[300px] truncate text-sm font-bold leading-5 text-[#182230]" title={getCompareRecordTitle(record)}>{getCompareRecordTitle(record)}</p>
+                                  </div>
+                                  <div className="shrink-0 text-right">
+                                    <span className="block text-[11px] font-semibold text-[#98a2b3]">报价金额</span>
+                                    <p className={`mt-0.5 text-base font-bold tabular-nums ${totalHigher ? "text-red-600" : "text-[#182230]"}`}>{formatRecordAmount(summary.total)}</p>
+                                    <p className="mt-1 text-[11px] font-medium text-[#98a2b3]">优惠：{Number(summary.discount || 0) > 0 ? `-${formatRecordAmount(summary.discount)}` : "0.00"}</p>
+                                  </div>
+                                </div>
+                              </th>
                             );
                           })}
-                          {renderCompareDiffCell(row.diff, row.key === "discount" ? "优惠差" : "高出")}
-                        </div>
-                      ))}
-
-                      {visibleCompareProjectGroups.length > 0 ? visibleCompareProjectGroups.map((group) => (
-                        <div key={group.kind}>
-                          <div className="grid min-h-[42px] items-center border-b border-[#d9e2ef] bg-[#eef2f6] text-xs" style={{ gridTemplateColumns: compareGridTemplateColumns }}>
-                            <div className="quotation-compare-left-cell quotation-compare-left-section sticky left-0 z-10 border-r border-[#d9e2ef] px-4 py-2.5">
-                              <p className="truncate text-sm font-semibold text-[#182230]" title={group.label}>{group.label}</p>
-                              <p className="mt-0.5 text-[11px] font-medium text-[#667085]">{group.rows.length} 项</p>
-                            </div>
-                            {compareDisplayRecords.map((record: any) => (
-                              <div key={`${group.kind}-${record.id}`} className="h-full border-r border-[#d9e2ef] bg-[#eef2f6]" />
-                            ))}
-                            <div className="h-full border-l border-[#d9e2ef] bg-[#eef2f6]" />
-                          </div>
-                          {group.rows.map((row) => (
-                            <div key={row.key} className="grid min-h-[50px] items-center border-b border-[#e5ebf3] bg-white text-xs" style={{ gridTemplateColumns: compareGridTemplateColumns }}>
-                              <div className={`quotation-compare-left-cell quotation-compare-left-body sticky left-0 z-10 h-full border-r border-[#e5ebf3] px-4 py-3 ${row.changed ? "quotation-compare-left-body-white" : "quotation-compare-left-body-muted"}`}>
-                                <p className="font-semibold leading-[18px] text-[#182230]" title={row.label}>{row.label}</p>
-                              </div>
-                              {row.amounts.map((amount: number, index: number) => {
-                                const missing = !row.rows[index] || Number(row.counts[index] || 0) === 0;
-                                const higher = row.maxAmount > row.minAmount + 0.005 && amount >= row.maxAmount - 0.005;
-                                return (
-                                  <div key={`${row.key}-${index}`} className={`flex h-full items-center justify-end border-r border-[#edf1f5] px-4 py-3 text-right font-semibold tabular-nums ${higher ? "bg-red-50 text-red-600" : missing ? "text-[#98a2b3]" : "text-[#182230]"}`}>
-                                    {missing ? "无此项目" : formatRecordAmount(amount)}
+                          <th className="sticky top-0 z-30 w-[120px] border-b border-[#d9e2ef] bg-[#fbfcfe] px-3 py-3 text-right font-semibold text-[#667085]">
+                            <span className="block text-[11px] text-[#667085]">最高差额</span>
+                            <span className="block text-sm tabular-nums">{compareTotalDiff < 0.005 ? "持平" : formatRecordAmount(compareTotalDiff)}</span>
+                          </th>
+                        </tr>
+                        <tr className="bg-[#f3f6fa] text-[11px] font-semibold text-[#667085]">
+                          {compareDisplayRecords.flatMap((record: any) => [
+                            <th key={`${record.id}-qty`} className="sticky top-[82px] z-30 border-b border-r border-[#d9e2ef] bg-[#f3f6fa] px-2 py-2 text-right">数量</th>,
+                            ...(compareColumnMode === "full" ? [<th key={`${record.id}-material`} className="sticky top-[82px] z-30 border-b border-r border-[#d9e2ef] bg-[#f3f6fa] px-2 py-2 text-right">材料单价</th>] : []),
+                            ...(compareColumnMode === "full" ? [<th key={`${record.id}-labor`} className="sticky top-[82px] z-30 border-b border-r border-[#d9e2ef] bg-[#f3f6fa] px-2 py-2 text-right">人工单价</th>] : []),
+                            <th key={`${record.id}-total`} className="sticky top-[82px] z-30 border-b border-r border-[#d9e2ef] bg-[#f3f6fa] px-2 py-2 text-right">合计</th>,
+                          ])}
+                          <th className="sticky top-[82px] z-30 border-b border-[#d9e2ef] bg-[#f3f6fa] px-3 py-2 text-right">差异</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {visibleCompareSections.length > 0 ? visibleCompareSections.map((section: QuotationCompareTableSection, sectionIndex: number) => {
+                          const sectionTitle = getCompareSectionTitle(section);
+                          const previousSectionTitle = sectionIndex > 0 ? getCompareSectionTitle(visibleCompareSections[sectionIndex - 1]) : "";
+                          const showSpaceHeader = sectionIndex === 0 || previousSectionTitle !== sectionTitle;
+                          const spaceIndex = visibleCompareSpaceIndexMap.get(sectionTitle) || sectionIndex + 1;
+                          return (
+                          <Fragment key={section.key}>
+                            {showSpaceHeader ? (
+                              <tr className="bg-white text-xs">
+                                <td colSpan={5 + compareDisplayRecords.length * compareQuoteColumnCount} className="border-b border-t border-[#d9e2ef] bg-[#fbfcfe] px-5 py-2.5 text-left font-bold text-[#475467]">
+                                  {formatCompareSpaceIndex(spaceIndex)}、{sectionTitle}
+                                </td>
+                              </tr>
+                            ) : null}
+                            {section.rows.map((row: QuotationCompareTableRow, rowIndex: number) => (
+                              <tr key={row.key} className="bg-white text-xs">
+                                <td className="quotation-compare-sticky-col quotation-compare-sticky-col-1 sticky z-10 border-b border-r border-[#e5ebf3] bg-inherit px-3 py-2 text-center tabular-nums text-[#667085]">{rowIndex + 1}</td>
+                                <td className="quotation-compare-sticky-col quotation-compare-sticky-col-2 sticky z-10 border-b border-r border-[#e5ebf3] bg-inherit px-3 py-2 text-[#667085]">{row.categoryLabel}</td>
+                                <td className="quotation-compare-sticky-col quotation-compare-sticky-col-3 sticky z-10 border-b border-r border-[#e5ebf3] bg-inherit px-3 py-2">
+                                  <div className="flex min-w-0 flex-col gap-1">
+                                    <div className="flex items-center gap-2">
+                                      <span className="truncate font-semibold leading-5 text-[#182230]" title={row.name}>{row.name}</span>
+                                    </div>
                                   </div>
-                                );
-                              })}
-                              {renderCompareDiffCell(row.diff)}
-                            </div>
-                          ))}
-                        </div>
-                      )) : (
-                        <div className="flex min-h-[180px] items-center justify-center bg-white text-sm font-semibold text-[#667085]">
-                          {compareProjectSearchText ? "没有找到匹配项目" : compareViewMode === "changed" ? "没有工程项目差异" : "暂无工程项目明细"}
-                        </div>
-                      )}
-                    </div>
+                                </td>
+                                <td className="border-b border-r border-[#edf1f5] px-2 py-2 text-center font-medium text-[#667085]">{row.unit}</td>
+                                {row.cells.flatMap((cell, index) => {
+                                  return [
+                                    <td key={`${row.key}-${index}-qty`} className={`border-b border-r border-[#edf1f5] px-2 py-2 text-right tabular-nums ${getCompareCellTextClass(row, cell, "quantity")}`}>{cell.present ? formatCompareQuantity(cell.quantity) : "-"}</td>,
+                                    ...(compareColumnMode === "full" ? [<td key={`${row.key}-${index}-material`} className={`border-b border-r border-[#edf1f5] px-2 py-2 text-right tabular-nums ${getCompareCellTextClass(row, cell, "materialUnit")}`}>{cell.present ? formatRecordAmount(cell.materialUnit) : "-"}</td>] : []),
+                                    ...(compareColumnMode === "full" ? [<td key={`${row.key}-${index}-labor`} className={`border-b border-r border-[#edf1f5] px-2 py-2 text-right tabular-nums ${getCompareCellTextClass(row, cell, "laborUnit")}`}>{cell.present ? formatRecordAmount(cell.laborUnit) : "-"}</td>] : []),
+                                    <td key={`${row.key}-${index}-total`} className={`border-b border-r border-[#edf1f5] px-2 py-2 text-right font-bold tabular-nums ${cell.present ? "text-[#182230]" : "text-[#98a2b3]"}`}>{cell.present ? formatRecordAmount(cell.total) : "无此项目"}</td>,
+                                  ];
+                                })}
+                                <td className="border-b border-[#e5ebf3] px-3 py-2 text-right font-bold tabular-nums text-[#667085]">{formatCompareDiff(row.diff)}</td>
+                              </tr>
+                            ))}
+                            {section.kind !== "other" ? (
+                              <tr className="bg-[#eef2f6] text-xs">
+                                <td colSpan={4} className="quotation-compare-sticky-col quotation-compare-sticky-col-1 sticky z-20 border-b border-r border-[#d9e2ef] bg-[#eef2f6] px-3 py-2 text-center font-bold text-[#475467]">小计</td>
+                                {section.subtotals.flatMap((amount: number, index: number) => [
+                                  <td key={`${section.key}-${index}-qty`} className="border-b border-r border-[#d9e2ef] bg-[#eef2f6] px-2 py-2" />,
+                                  ...(compareColumnMode === "full" ? [<td key={`${section.key}-${index}-material`} className="border-b border-r border-[#d9e2ef] bg-[#eef2f6] px-2 py-2" />] : []),
+                                  ...(compareColumnMode === "full" ? [<td key={`${section.key}-${index}-labor`} className="border-b border-r border-[#d9e2ef] bg-[#eef2f6] px-2 py-2" />] : []),
+                                  <td key={`${section.key}-${index}-total`} className="border-b border-r border-[#d9e2ef] bg-[#eef2f6] px-2 py-2 text-right font-bold tabular-nums text-[#182230]">{formatRecordAmount(amount)}</td>,
+                                ])}
+                                <td className="border-b border-[#d9e2ef] bg-[#eef2f6] px-3 py-2 text-right font-bold tabular-nums text-[#667085]">{formatCompareDiff(section.diff)}</td>
+                              </tr>
+                            ) : null}
+                          </Fragment>
+                          );
+                        }) : (
+                          <tr>
+                            <td colSpan={5 + compareDisplayRecords.length * compareQuoteColumnCount} className="h-[180px] border-b border-[#e5ebf3] bg-white text-center text-sm font-semibold text-[#667085]">
+                              {compareProjectSearchText ? "没有找到匹配项目" : compareViewMode === "changed" ? "没有工程项目差异" : "暂无工程项目明细"}
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               ) : null}
             </div>
 
             <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[#dfe6f0] bg-white px-5 py-3">
-              <p className="text-xs font-medium text-[#667085]">差额按同项最高价减最低价计算，红色表示该项金额最高。</p>
+              <p className="text-xs font-medium text-[#667085]">差额按同项最高值减最低值计算，红色仅标记同项数量更高。</p>
               <div className="flex items-center gap-2">
+                <button type="button" onClick={exportCompareTable} disabled={exportingCompare || compareLoading || !compareReady || visibleCompareSections.length === 0} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-[9px] border border-[#bfd2ff] bg-[#f3f7ff] px-3.5 text-xs font-semibold text-[#245ee8] transition hover:border-[#9db8ff] hover:bg-white disabled:cursor-not-allowed disabled:opacity-50">
+                  {exportingCompare ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                  导出表格
+                </button>
                 <button type="button" onClick={() => { setCompareDialogOpen(false); setComparePickerOpen(true); setCompareDraftIds(compareRecords.map((record: any) => String(record.id))); }} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-[9px] border border-[#cfd8e5] bg-[#f8fafc] px-3.5 text-xs font-semibold text-[#475467] transition hover:border-[#b9c5d4] hover:bg-white hover:text-[#182230]">
                   <RotateCcw className="h-3.5 w-3.5" />
                   重新选择

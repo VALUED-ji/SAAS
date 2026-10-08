@@ -95,7 +95,12 @@ function ensureQuotationItemColumns(db: any) {
   if (!names.has("cost_source")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_source TEXT").run();
   if (!names.has("quota_source_id")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_id TEXT").run();
   if (!names.has("quota_source_type")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_type TEXT").run();
+  if (!names.has("quota_source_name")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_name TEXT").run();
+  if (!names.has("quota_source_unit")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_unit TEXT").run();
+  if (!names.has("quota_source_spec")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_spec TEXT").run();
   if (!names.has("quota_source_synced_at")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_synced_at TEXT").run();
+  if (!names.has("quota_source_material_price")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_material_price REAL").run();
+  if (!names.has("quota_source_labor_price")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_labor_price REAL").run();
   if (!names.has("price_manually_edited")) db.prepare("ALTER TABLE quotation_items ADD COLUMN price_manually_edited INTEGER DEFAULT 0").run();
   if (!names.has("quantity_formula")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quantity_formula TEXT").run();
   ensureProjectCostControlSchema(db);
@@ -746,7 +751,12 @@ function buildTemplateQuotationItems(template: any) {
           cost_source: isStandardQuotaSource ? (quotaCode ? `quota:${quotaCode}` : "quota") : null,
           quota_source_id: isStandardQuotaSource ? quotaSourceId || null : null,
           quota_source_type: isStandardQuotaSource ? "standard" : null,
+          quota_source_name: isStandardQuotaSource ? name : null,
+          quota_source_unit: isStandardQuotaSource ? String(quota?.unit || "").trim() : null,
+          quota_source_spec: isStandardQuotaSource ? constructionDescription : null,
           quota_source_synced_at: isStandardQuotaSource ? new Date().toISOString() : null,
+          quota_source_material_price: isStandardQuotaSource ? materialPrice : null,
+          quota_source_labor_price: isStandardQuotaSource ? laborPrice : null,
           sort_order: sortOrder++,
         });
       });
@@ -1401,8 +1411,8 @@ export async function POST(req: NextRequest) {
 
       if (normalizedTemplateItems.length > 0) {
         const insertItem = db.prepare(`
-          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, quantity_formula, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, price_manually_edited, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, quantity_formula, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_name, quota_source_unit, quota_source_spec, quota_source_synced_at, quota_source_material_price, quota_source_labor_price, price_manually_edited, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         normalizedTemplateItems.forEach((item) => {
           insertItem.run(
@@ -1439,7 +1449,12 @@ export async function POST(req: NextRequest) {
             (item as any).cost_source || null,
             isBaseCategory(item.category) ? String((item as any).quota_source_id || "").trim() || null : null,
             isBaseCategory(item.category) && String((item as any).quota_source_type || "").trim() ? String((item as any).quota_source_type || "").trim() : null,
+            isBaseCategory(item.category) ? String((item as any).quota_source_name || "").trim() || null : null,
+            isBaseCategory(item.category) ? String((item as any).quota_source_unit || "").trim() || null : null,
+            isBaseCategory(item.category) ? String((item as any).quota_source_spec || "").trim() || null : null,
             isBaseCategory(item.category) ? String((item as any).quota_source_synced_at || "").trim() || null : null,
+            isBaseCategory(item.category) && (item as any).quota_source_material_price != null ? Number((item as any).quota_source_material_price) : null,
+            isBaseCategory(item.category) && (item as any).quota_source_labor_price != null ? Number((item as any).quota_source_labor_price) : null,
             Math.max(0, Math.min(3, Number((item as any).price_manually_edited || 0))),
             item.sort_order
           );

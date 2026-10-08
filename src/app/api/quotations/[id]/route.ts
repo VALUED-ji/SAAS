@@ -62,6 +62,9 @@ type ItemInput = {
   cost_source?: string | null;
   quota_source_id?: string | null;
   quota_source_type?: string | null;
+  quota_source_name?: string | null;
+  quota_source_unit?: string | null;
+  quota_source_spec?: string | null;
   quota_source_synced_at?: string | null;
   quota_source_material_price?: number | null;
   quota_source_labor_price?: number | null;
@@ -126,6 +129,9 @@ function ensureQuotationItemColumns(db: any) {
   if (!names.has("cost_source")) db.prepare("ALTER TABLE quotation_items ADD COLUMN cost_source TEXT").run();
   if (!names.has("quota_source_id")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_id TEXT").run();
   if (!names.has("quota_source_type")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_type TEXT").run();
+  if (!names.has("quota_source_name")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_name TEXT").run();
+  if (!names.has("quota_source_unit")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_unit TEXT").run();
+  if (!names.has("quota_source_spec")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_spec TEXT").run();
   if (!names.has("quota_source_synced_at")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_synced_at TEXT").run();
   if (!names.has("quota_source_material_price")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_material_price REAL").run();
   if (!names.has("quota_source_labor_price")) db.prepare("ALTER TABLE quotation_items ADD COLUMN quota_source_labor_price REAL").run();
@@ -621,23 +627,6 @@ function isDirectItemCategory(category: unknown) {
   return !isOtherCategory(category);
 }
 
-function getCategoryKey(category: unknown) {
-  if (isBaseCategory(category)) return "base";
-  if (isOtherCategory(category)) return "other";
-  if (isCustomCabinetCategory(category)) return "custom_cabinet";
-  if (isMainMaterialCategory(category)) return "main_material";
-  return String(category || "").trim();
-}
-
-function getCategoryLabel(category: unknown) {
-  const key = getCategoryKey(category);
-  if (key === "base") return "基装";
-  if (key === "main_material") return "产品";
-  if (key === "custom_cabinet") return "定制柜";
-  if (key === "other") return "综合费用";
-  return String(category || "").trim();
-}
-
 function getFeeScopeCategoryKey(category: unknown) {
   const name = String(category || "").trim();
   if (isBaseCategory(name)) return "base";
@@ -1054,12 +1043,14 @@ function calculate(items: any[], settings: any, houseArea = 0) {
 }
 
 const quotaSyncFields = [
-  { key: "name", label: "工程项目名称", itemKey: "name", quotaKey: "name" },
-  { key: "unit", label: "单位", itemKey: "unit", quotaKey: "unit" },
-  { key: "material_cost", label: "材料单价", itemKey: "material_cost", quotaKey: "material_price" },
-  { key: "labor_cost", label: "人工单价", itemKey: "labor_cost", quotaKey: "labor_price" },
-  { key: "spec", label: "施工工艺及材料说明", itemKey: "spec", quotaKey: "construction_description" },
+  { key: "name", label: "工程项目名称", itemKey: "name", quotaKey: "name", snapshotKey: "quota_source_name", valueType: "text" },
+  { key: "unit", label: "单位", itemKey: "unit", quotaKey: "unit", snapshotKey: "quota_source_unit", valueType: "text" },
+  { key: "material_cost", label: "材料单价", itemKey: "material_cost", quotaKey: "material_price", snapshotKey: "quota_source_material_price", valueType: "money" },
+  { key: "labor_cost", label: "人工单价", itemKey: "labor_cost", quotaKey: "labor_price", snapshotKey: "quota_source_labor_price", valueType: "money" },
+  { key: "spec", label: "施工工艺及材料说明", itemKey: "spec", quotaKey: "construction_description", snapshotKey: "quota_source_spec", valueType: "multiline" },
 ] as const;
+
+type QuotaSyncField = (typeof quotaSyncFields)[number];
 
 function normalizeComparableText(value: unknown) {
   return String(value ?? "").trim();
@@ -1127,6 +1118,49 @@ function hasStandardQuotaChangedAfter(db: any, companyId: string, quotaItemId: s
   return Boolean(row?.changed);
 }
 
+function normalizeQuotaSyncValue(value: unknown, valueType: QuotaSyncField["valueType"]) {
+  if (valueType === "money") return String(normalizeComparableMoney(value));
+  if (valueType === "multiline") return normalizeMultilineText(value);
+  return normalizeComparableText(value);
+}
+
+function getQuotaPayloadFieldValue(payload: any, quotaKey: QuotaSyncField["quotaKey"]) {
+  if (quotaKey === "material_price") return payload?.materialPrice ?? payload?.material_price;
+  if (quotaKey === "labor_price") return payload?.laborPrice ?? payload?.labor_price;
+  if (quotaKey === "construction_description") return payload?.constructionDescription ?? payload?.construction_description;
+  return payload?.[quotaKey];
+}
+
+function getQuotaSourceFieldSnapshot(db: any, companyId: string, item: any, quota: any, baseline: string, field: QuotaSyncField) {
+  const explicitValue = item?.[field.snapshotKey];
+  if (explicitValue !== undefined && explicitValue !== null && String(explicitValue).trim() !== "") {
+    return normalizeQuotaSyncValue(explicitValue, field.valueType);
+  }
+  const normalizedQuotaItemId = String(quota?.id || item?.quota_source_id || "").trim();
+  if (!normalizedQuotaItemId) return "";
+  const normalizedBaseline = String(baseline || "").trim() || "1970-01-01 00:00:00";
+  const firstChange = db.prepare(`
+    SELECT before_payload
+    FROM standard_quota_item_change_logs
+    WHERE company_id = ?
+      AND quota_item_id = ?
+      AND action = 'updated'
+      AND datetime(created_at) > datetime(?)
+    ORDER BY datetime(created_at) ASC, id ASC
+    LIMIT 1
+  `).get(companyId, normalizedQuotaItemId, normalizedBaseline) as { before_payload?: string | null } | undefined;
+  const beforePayload = parseJsonObject(firstChange?.before_payload);
+  const beforeValue = getQuotaPayloadFieldValue(beforePayload, field.quotaKey);
+  if (beforeValue === undefined || beforeValue === null || String(beforeValue).trim() === "") return "";
+  return normalizeQuotaSyncValue(beforeValue, field.valueType);
+}
+
+function shouldSyncQuotaItemField(db: any, companyId: string, item: any, quota: any, baseline: string, field: QuotaSyncField) {
+  const snapshotValue = getQuotaSourceFieldSnapshot(db, companyId, item, quota, baseline, field);
+  if (!snapshotValue) return false;
+  return normalizeQuotaSyncValue(item?.[field.itemKey], field.valueType) === snapshotValue;
+}
+
 function getQuotaUpdateCandidates(db: any, quotationId: string, companyId: string, itemIds?: string[]) {
   const items = db.prepare(`
     SELECT * FROM quotation_items
@@ -1170,6 +1204,7 @@ function getQuotaUpdateCandidates(db: any, quotationId: string, companyId: strin
       if (!hasStandardQuotaChangedAfter(db, companyId, quota.id, baseline)) return null;
       const differences = quotaSyncFields
         .map((field) => {
+          if (!shouldSyncQuotaItemField(db, companyId, item, quota, baseline, field)) return null;
           const current = field.key === "material_cost" || field.key === "labor_cost"
             ? normalizeComparableMoney(item[field.itemKey])
             : normalizeComparableText(item[field.itemKey]);
@@ -1325,6 +1360,9 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
     isBaseCategory(item.category)
       ? {
         ...item,
+        quota_source_name: item.quota_source_name ?? null,
+        quota_source_unit: item.quota_source_unit ?? null,
+        quota_source_spec: item.quota_source_spec ?? null,
         quota_source_material_price: item.quota_source_material_price ?? safeNonNegativeNumber(item.material_cost),
         quota_source_labor_price: item.quota_source_labor_price ?? safeNonNegativeNumber(item.labor_cost),
       }
@@ -1440,29 +1478,61 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
           labor_cost = ?,
           quota_source_id = ?,
           quota_source_type = 'standard',
+          quota_source_name = ?,
+          quota_source_unit = ?,
+          quota_source_spec = ?,
           quota_source_synced_at = datetime('now'),
           quota_source_material_price = ?,
           quota_source_labor_price = ?,
-          price_manually_edited = 0
+          price_manually_edited = ?
         WHERE id = ? AND quotation_id = ?
       `);
       const tx = (db as any).transaction(() => {
         candidates.forEach(({ item, quota }) => {
           const materialCost = safeNonNegativeNumber(quota.material_price);
           const laborCost = safeNonNegativeNumber(quota.labor_price);
-          const unitPrice = toMoney(materialCost + laborCost);
           const quantity = safeNonNegativeNumber(item.quantity);
+          const baseline = String(item.quota_source_synced_at || item.created_at || "").trim();
+          const nameField = quotaSyncFields.find((field) => field.key === "name")!;
+          const unitField = quotaSyncFields.find((field) => field.key === "unit")!;
+          const specField = quotaSyncFields.find((field) => field.key === "spec")!;
+          const materialField = quotaSyncFields.find((field) => field.key === "material_cost")!;
+          const laborField = quotaSyncFields.find((field) => field.key === "labor_cost")!;
+          const syncName = shouldSyncQuotaItemField(db, auth.companyId, item, quota, baseline, nameField);
+          const syncUnit = shouldSyncQuotaItemField(db, auth.companyId, item, quota, baseline, unitField);
+          const syncSpec = shouldSyncQuotaItemField(db, auth.companyId, item, quota, baseline, specField);
+          const syncMaterial = shouldSyncQuotaItemField(db, auth.companyId, item, quota, baseline, materialField);
+          const syncLabor = shouldSyncQuotaItemField(db, auth.companyId, item, quota, baseline, laborField);
+          const nextName = syncName
+            ? String(quota.name || "").trim()
+            : String(item.name || "").trim();
+          const nextSpec = syncSpec
+            ? String(quota.construction_description || "").trim()
+            : String(item.spec || "").trim();
+          const nextUnit = syncUnit
+            ? String(quota.unit || "").trim()
+            : String(item.unit || "").trim();
+          const nextMaterialCost = syncMaterial ? materialCost : safeNonNegativeNumber(item.material_cost);
+          const nextLaborCost = syncLabor ? laborCost : safeNonNegativeNumber(item.labor_cost);
+          const nextUnitPrice = toMoney(nextMaterialCost + nextLaborCost);
+          const nextPriceEditMask = normalizeManualPriceEditMask(item.price_manually_edited)
+            & (syncMaterial ? ~1 : -1)
+            & (syncLabor ? ~2 : -1);
           updateItem.run(
-            String(quota.name || "").trim(),
-            String(quota.construction_description || "").trim(),
-            String(quota.unit || "").trim(),
-            unitPrice,
-            toMoney(quantity * unitPrice),
-            materialCost,
-            laborCost,
+            nextName,
+            nextSpec,
+            nextUnit,
+            nextUnitPrice,
+            toMoney(quantity * nextUnitPrice),
+            nextMaterialCost,
+            nextLaborCost,
             quota.id,
+            String(quota.name || "").trim(),
+            String(quota.unit || "").trim(),
+            String(quota.construction_description || "").trim(),
             materialCost,
             laborCost,
+            nextPriceEditMask,
             item.id,
             params.id,
           );
@@ -2044,8 +2114,8 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
           .get(targetQuotationId) as any;
         let nextSortOrder = Number(maxSortRow?.max_sort || 0);
         const insertItem = db.prepare(`
-          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, quantity_formula, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, quota_source_material_price, quota_source_labor_price, price_manually_edited, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, quantity_formula, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_name, quota_source_unit, quota_source_spec, quota_source_synced_at, quota_source_material_price, quota_source_labor_price, price_manually_edited, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         sourceItems.forEach((item: any) => {
           nextSortOrder += 1;
@@ -2084,9 +2154,12 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             String(item.cost_source || "").trim() || null,
             isBaseCategory(item.category) ? String(item.quota_source_id || "").trim() || null : null,
             isBaseCategory(item.category) && String(item.quota_source_type || "").trim() ? String(item.quota_source_type || "").trim() : null,
+            isBaseCategory(item.category) ? String(item.quota_source_name || "").trim() || null : null,
+            isBaseCategory(item.category) ? String(item.quota_source_unit || "").trim() || null : null,
+            isBaseCategory(item.category) ? String(item.quota_source_spec || "").trim() || null : null,
             isBaseCategory(item.category) ? String(item.quota_source_synced_at || item.created_at || "").trim() || null : null,
-            isBaseCategory(item.category) ? Number(item.quota_source_material_price ?? item.material_cost ?? 0) : null,
-            isBaseCategory(item.category) ? Number(item.quota_source_labor_price ?? item.labor_cost ?? 0) : null,
+            isBaseCategory(item.category) && item.quota_source_material_price != null ? Number(item.quota_source_material_price) : null,
+            isBaseCategory(item.category) && item.quota_source_labor_price != null ? Number(item.quota_source_labor_price) : null,
             normalizeManualPriceEditMask(item.price_manually_edited),
             nextSortOrder,
           );
@@ -2264,8 +2337,8 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
         );
 
         const insertItem = db.prepare(`
-          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, quantity_formula, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, quota_source_material_price, quota_source_labor_price, price_manually_edited, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, quantity_formula, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_name, quota_source_unit, quota_source_spec, quota_source_synced_at, quota_source_material_price, quota_source_labor_price, price_manually_edited, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         sourceItems.forEach((item) => {
           const copiedItemId = copiedItemIdBySourceId.get(String(item.id)) || makeId("QITEM");
@@ -2303,6 +2376,9 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             item.cost_source || null,
             item.quota_source_id || null,
             item.quota_source_type || null,
+            item.quota_source_name || null,
+            item.quota_source_unit || null,
+            item.quota_source_spec || null,
             item.quota_source_synced_at || item.created_at || null,
             item.quota_source_material_price ?? null,
             item.quota_source_labor_price ?? null,
@@ -2507,6 +2583,8 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
     const body = await req.json();
     const items = Array.isArray(body.items) ? body.items as ItemInput[] : [];
     const existingSettings = parseSettings(existing.settings);
+    const incomingQuotationType = String(body.quotation_type ?? body.settings?.quotationType ?? "").trim().slice(0, 20);
+    const existingQuotationType = String(existing.quotation_type || existingSettings.quotationType || "").trim().slice(0, 20);
     const settings = {
       managementFeeRate: 0,
 	      taxRate: Number(body.settings?.taxRate || 0),
@@ -2526,7 +2604,7 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
       quotaTemplateName: String(body.settings?.quotaTemplateName ?? existingSettings.quotaTemplateName ?? "").trim(),
       comprehensiveFeeMode: body.settings?.comprehensiveFeeMode === "formula" || existingSettings.comprehensiveFeeMode === "formula" ? "formula" : "standard",
       formulaFinalFeeItemId: String(body.settings?.formulaFinalFeeItemId ?? existingSettings.formulaFinalFeeItemId ?? "").trim(),
-      quotationType: String(body.quotation_type ?? body.settings?.quotationType ?? existingSettings.quotationType ?? existing.quotation_type ?? "").trim().slice(0, 20),
+      quotationType: incomingQuotationType || existingQuotationType,
       quotationDecorationType: String(body.settings?.quotationDecorationType ?? existingSettings.quotationDecorationType ?? existing.temp_customer_decoration_type ?? "").trim(),
       appendixNote: String(body.settings?.appendixNote ?? existingSettings.appendixNote ?? "").trim(),
       budgetCompilationHtml: String(body.settings?.budgetCompilationHtml ?? existingSettings.budgetCompilationHtml ?? "").trim(),
@@ -2594,13 +2672,12 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           cost_source: String(item.cost_source || "").trim() || null,
           quota_source_id: isBase ? String(item.quota_source_id || "").trim() || null : null,
           quota_source_type: isBase && String(item.quota_source_type || "").trim() ? String(item.quota_source_type || "").trim() : null,
+          quota_source_name: isBase && String(item.quota_source_name || "").trim() ? String(item.quota_source_name || "").trim() : null,
+          quota_source_unit: isBase && String(item.quota_source_unit || "").trim() ? String(item.quota_source_unit || "").trim() : null,
+          quota_source_spec: isBase && String(item.quota_source_spec || "").trim() ? String(item.quota_source_spec || "").trim() : null,
           quota_source_synced_at: isBase && String(item.quota_source_synced_at || "").trim() ? String(item.quota_source_synced_at || "").trim() : null,
-          quota_source_material_price: isBase && item.quota_source_material_price != null
-            ? safeNonNegativeNumber(item.quota_source_material_price)
-            : isBase ? finalMaterialCost : null,
-          quota_source_labor_price: isBase && item.quota_source_labor_price != null
-            ? safeNonNegativeNumber(item.quota_source_labor_price)
-            : isBase ? finalLaborCost : null,
+          quota_source_material_price: isBase && item.quota_source_material_price != null ? safeNonNegativeNumber(item.quota_source_material_price) : null,
+          quota_source_labor_price: isBase && item.quota_source_labor_price != null ? safeNonNegativeNumber(item.quota_source_labor_price) : null,
           price_manually_edited: isBase || isMainMaterialCategory(category) ? normalizeManualPriceEditMask(item.price_manually_edited) : 0,
           profit_margin: profitMargin,
           row_color: normalizeRowColor(item.row_color),
@@ -2658,8 +2735,8 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
     const tx = (db as any).transaction(() => {
       db.prepare("DELETE FROM quotation_items WHERE quotation_id = ?").run(params.id);
       const insertItem = db.prepare(`
-        INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, quantity_formula, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_synced_at, quota_source_material_price, quota_source_labor_price, price_manually_edited, sort_order, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        INSERT INTO quotation_items (id, quotation_id, category, space, work_type_id, work_type_name, material_category_id, material_category_name, name, spec, material_model, remark, unit, quantity, quantity_formula, unit_price, total_price, material_cost, labor_cost, profit_margin, row_color, fee_calc_method, fee_calc_base, fee_rate, fee_scope_mode, fee_scope_space_ids, fee_scope_space_names, cost_material_unit, cost_labor_unit, cost_loss_rate, cost_source, quota_source_id, quota_source_type, quota_source_name, quota_source_unit, quota_source_spec, quota_source_synced_at, quota_source_material_price, quota_source_labor_price, price_manually_edited, sort_order, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       `);
       normalizedItems.forEach((item) => {
         insertItem.run(
@@ -2696,6 +2773,9 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           item.cost_source || null,
           item.quota_source_id || null,
           item.quota_source_type || null,
+          item.quota_source_name || null,
+          item.quota_source_unit || null,
+          item.quota_source_spec || null,
           item.quota_source_synced_at || null,
           item.quota_source_material_price ?? null,
           item.quota_source_labor_price ?? null,

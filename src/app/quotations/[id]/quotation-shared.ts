@@ -31,6 +31,9 @@ export type QuotationItem = {
   cost_source?: string | null;
   quota_source_id?: string | null;
   quota_source_type?: string | null;
+  quota_source_name?: string | null;
+  quota_source_unit?: string | null;
+  quota_source_spec?: string | null;
   quota_source_synced_at?: string | null;
   quota_source_material_price?: number | null;
   quota_source_labor_price?: number | null;

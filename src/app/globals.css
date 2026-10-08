@@ -20135,6 +20135,52 @@ html body .dashboard-scale-root .quotation-compare-table > .grid.text-xs {
   font-size: 12px !important;
 }
 
+html body .quotation-compare-sheet,
+html body .dashboard-scale-root .quotation-compare-sheet {
+  border-spacing: 0 !important;
+  table-layout: fixed !important;
+}
+
+html body .quotation-compare-sheet th,
+html body .quotation-compare-sheet td,
+html body .dashboard-scale-root .quotation-compare-sheet th,
+html body .dashboard-scale-root .quotation-compare-sheet td {
+  font-size: 12px !important;
+  line-height: 18px !important;
+  vertical-align: middle !important;
+}
+
+html body .quotation-compare-sheet .quotation-compare-sticky-col,
+html body .dashboard-scale-root .quotation-compare-sheet .quotation-compare-sticky-col {
+  background-clip: padding-box !important;
+  box-shadow: none !important;
+}
+
+html body .quotation-compare-sheet .text-red-600,
+html body .dashboard-scale-root .quotation-compare-sheet .text-red-600 {
+  color: #dc2626 !important;
+}
+
+html body .quotation-compare-sheet .quotation-compare-sticky-col-1,
+html body .dashboard-scale-root .quotation-compare-sheet .quotation-compare-sticky-col-1 {
+  left: 0 !important;
+}
+
+html body .quotation-compare-sheet .quotation-compare-sticky-col-2,
+html body .dashboard-scale-root .quotation-compare-sheet .quotation-compare-sticky-col-2 {
+  left: 96px !important;
+}
+
+html body .quotation-compare-sheet .quotation-compare-sticky-col-3,
+html body .dashboard-scale-root .quotation-compare-sheet .quotation-compare-sticky-col-3 {
+  left: 168px !important;
+}
+
+html body .quotation-compare-sheet.quotation-compare-full-mode .quotation-compare-sticky-col-3,
+html body .dashboard-scale-root .quotation-compare-sheet.quotation-compare-full-mode .quotation-compare-sticky-col-3 {
+  left: 180px !important;
+}
+
 /* Final polish for the quota template space/category sidebar. */
 html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-space-sidebar {
   overflow: hidden !important;

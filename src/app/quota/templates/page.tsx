@@ -76,7 +76,6 @@ import {
   hasTemplateDraftContent,
   initialTemplates,
   isBuiltinProjectGroup,
-  excludeOverriddenQuotaFields,
   findDuplicateDiscountFee,
   loadQuotaLibraryItems as loadCachedQuotaLibraryItems,
   loadTemplatesFromStorage,
@@ -229,6 +228,39 @@ function formatQuotaSourceValue(field: string, value: any) {
   if (["laborPrice", "materialPrice", "totalPrice"].includes(field)) return formatAmount(value);
   if (field === "isSpecialPrice") return Boolean(value) ? "是" : "否";
   return String(value ?? "").trim() || "-";
+}
+
+function getQuotaSourceSnapshot(item: TemplateSpaceQuota) {
+  return item.sourceSnapshot || item;
+}
+
+function isQuotaSourceFieldChanged(field: QuotaSourceField, source: Partial<TemplateSpaceQuota>, latest: QuotaLibraryItem) {
+  return comparableQuotaSourceValue(field, (source as any)[field]) !== comparableQuotaSourceValue(field, (latest as any)[field]);
+}
+
+function isTemplateQuotaFieldManuallyEdited(item: TemplateSpaceQuota, field: QuotaSourceField) {
+  const source = getQuotaSourceSnapshot(item);
+  return comparableQuotaSourceValue(field, (item as any)[field]) !== comparableQuotaSourceValue(field, (source as any)[field]);
+}
+
+function shouldPreserveTemplateQuotaField(item: TemplateSpaceQuota, field: QuotaSourceField) {
+  if (item.sourceSnapshot) return isTemplateQuotaFieldManuallyEdited(item, field);
+  return new Set(item.overriddenFields || []).has(field);
+}
+
+function makeQuotaSourceSnapshot(quota: QuotaLibraryItem) {
+  return {
+    code: quota.code,
+    category: quota.category,
+    priceScene: quota.priceScene,
+    name: quota.name,
+    constructionDescription: quota.constructionDescription,
+    unit: quota.unit,
+    laborPrice: quota.laborPrice,
+    materialPrice: quota.materialPrice,
+    totalPrice: quota.totalPrice,
+    isSpecialPrice: quota.isSpecialPrice,
+  };
 }
 
 function TemplateProjectGroupIcon({
@@ -901,18 +933,18 @@ export default function QuotaTemplatesPage() {
         if (!quotaId) return;
         const latest = quotaById.get(quotaId);
         if (!latest) return;
-        const base = item.sourceSnapshot || item;
+        const base = getQuotaSourceSnapshot(item);
         const rawChangedFields = quotaSourceComparableFields
           .map(([field]) => field)
-          .filter((field) => comparableQuotaSourceValue(field, (base as any)[field]) !== comparableQuotaSourceValue(field, (latest as any)[field]));
-        const overrideSet = new Set(item.overriddenFields || []);
-        const changedFields = excludeOverriddenQuotaFields(rawChangedFields, Array.from(overrideSet));
+          .filter((field) => isQuotaSourceFieldChanged(field, base, latest));
+        const preservedFields = rawChangedFields.filter((field) => shouldPreserveTemplateQuotaField(item, field));
+        const changedFields = rawChangedFields.filter((field) => !preservedFields.includes(field));
         if (changedFields.length === 0) return;
         updates.push({
           spaceId: space.id,
           itemId: item.id,
           changedFields,
-          preservedFields: rawChangedFields.filter((field) => overrideSet.has(field)),
+          preservedFields,
           latest,
         });
       });
@@ -928,8 +960,7 @@ export default function QuotaTemplatesPage() {
         const space = editingTemplate.spaces.find((item) => item.id === update.spaceId);
         const item = space?.quotaItems.find((quotaItem) => quotaItem.id === update.itemId);
         if (!space || !item) return null;
-        const source = item.sourceSnapshot || item;
-        const overrideSet = new Set(item.overriddenFields || []);
+        const source = getQuotaSourceSnapshot(item);
         const hasPriceInputChange = update.changedFields.includes("laborPrice") || update.changedFields.includes("materialPrice");
         const visibleChangedFields = update.changedFields.filter((field) => field !== "totalPrice" || !hasPriceInputChange);
         if (visibleChangedFields.length === 0) return null;
@@ -942,7 +973,7 @@ export default function QuotaTemplatesPage() {
             label: labelByField.get(field) || field,
             before: formatQuotaSourceValue(field, (source as any)[field]),
             after: formatQuotaSourceValue(field, (update.latest as any)[field]),
-            preserved: overrideSet.has(field),
+            preserved: shouldPreserveTemplateQuotaField(item, field),
           })),
         };
       })
@@ -2074,30 +2105,17 @@ export default function QuotaTemplatesPage() {
         quotaItems: space.quotaItems.map((item) => {
           const update = updateMap.get(`${space.id}:${item.id}`);
           if (!update) return item;
-          const overrideSet = new Set(item.overriddenFields || []);
           const patch: Partial<TemplateSpaceQuota> = {};
-          const hasPriceOverride = overrideSet.has("laborPrice") || overrideSet.has("materialPrice");
+          const hasPriceOverride = shouldPreserveTemplateQuotaField(item, "laborPrice") || shouldPreserveTemplateQuotaField(item, "materialPrice");
           update.changedFields.forEach((field) => {
             if (field === "totalPrice" && hasPriceOverride) return;
-            if (!overrideSet.has(field)) (patch as any)[field] = (update.latest as any)[field];
+            if (!shouldPreserveTemplateQuotaField(item, field)) (patch as any)[field] = (update.latest as any)[field];
           });
-          const latestSnapshot = {
-            code: update.latest.code,
-            category: update.latest.category,
-            priceScene: update.latest.priceScene,
-            name: update.latest.name,
-            constructionDescription: update.latest.constructionDescription,
-            unit: update.latest.unit,
-            laborPrice: update.latest.laborPrice,
-            materialPrice: update.latest.materialPrice,
-            totalPrice: update.latest.totalPrice,
-            isSpecialPrice: update.latest.isSpecialPrice,
-          };
           return {
             ...item,
             ...patch,
             sourceVersion: update.latest.updatedAt || item.sourceVersion,
-            sourceSnapshot: latestSnapshot,
+            sourceSnapshot: makeQuotaSourceSnapshot(update.latest),
           };
         }),
       })),
