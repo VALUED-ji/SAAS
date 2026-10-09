@@ -1854,10 +1854,19 @@ export default function QuotationsPage() {
         area_size: toPricingAmount(recordProjectInfoForm.areaSize),
         decoration_type: recordProjectInfoForm.decorationType.trim(),
       });
+      const customerId = String(editingRecordProjectInfo?.customer_id || "").trim();
+      const previousRecordKey = recordCustomerKey;
       setEditingRecordProjectInfo(null);
       setRecordProjectInfoForm(emptyRecordProjectInfoForm);
-      await refetch();
-      await refetchDeletedQuotations();
+      const [activeResult, deletedResult] = await Promise.all([refetch(), refetchDeletedQuotations()]);
+      const activeRows = Array.isArray(activeResult.data) ? activeResult.data : quotations || [];
+      const deletedRows = Array.isArray(deletedResult.data) ? deletedResult.data : deletedQuotations || [];
+      const rows = [...activeRows, ...deletedRows];
+      const targetRecord = rows.find((record: any) => String(record?.customer_id || "").trim() === customerId)
+        || rows.find((record: any) => getCustomerKey(record) === previousRecordKey);
+      const nextRecordKey = targetRecord ? getCustomerKey(targetRecord) : customerId || previousRecordKey;
+      if (nextRecordKey) setRecordCustomerKey(nextRecordKey);
+      if (!targetRecord && customerId && selectedOrgUnitId) setSelectedOrgUnitId("");
       setMessage("已保存客户资料");
     } catch (err: any) {
       setMessage(err.message || "保存客户资料失败");
