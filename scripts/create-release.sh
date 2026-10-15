@@ -16,6 +16,8 @@ COPYFILE_DISABLE=1 tar --no-xattrs \
   --exclude='._*' \
   --exclude='*.backup' \
   --exclude='*.backup-*' \
+  --exclude='*.bak' \
+  --exclude='*.bak-*' \
   --exclude='*backup-before*' \
   --exclude='* 2' \
   --exclude='* 2.*' \
@@ -24,7 +26,6 @@ COPYFILE_DISABLE=1 tar --no-xattrs \
   --exclude='prisma/*.db-*' \
   --exclude='prisma/backups' \
   -czf "${ARCHIVE_PATH}" \
-  AGENTS.md \
   README.md \
   src \
   public \
@@ -55,6 +56,8 @@ if [ "${INCLUDE_BUILD}" = "1" ]; then
     --exclude='._*' \
     --exclude='*.backup' \
     --exclude='*.backup-*' \
+    --exclude='*.bak' \
+    --exclude='*.bak-*' \
     --exclude='*backup-before*' \
     --exclude='* 2' \
     --exclude='* 2.*' \
@@ -64,7 +67,6 @@ if [ "${INCLUDE_BUILD}" = "1" ]; then
     --exclude='prisma/backups' \
     --exclude='.next-build/cache' \
     -czf "${tmp_archive}" \
-    AGENTS.md \
     README.md \
     src \
     public \
