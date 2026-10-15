@@ -14,6 +14,7 @@ export type QuotaItem = {
   name: string;
   constructionDescription: string;
   unit: string;
+  pricingMode?: "split" | "single";
   laborPrice: number;
   materialPrice: number;
   internalLaborCost: number;
@@ -83,6 +84,7 @@ export function normalizeQuotaItem(value: any): QuotaItem | null {
     name: String(value.name || ""),
     constructionDescription: String(value.constructionDescription || ""),
     unit: String(value.unit || ""),
+    pricingMode: value.pricingMode === "single" ? "single" : "split",
     laborPrice: Number.isFinite(laborPrice) ? Math.max(0, laborPrice) : 0,
     materialPrice: Number.isFinite(materialPrice) ? Math.max(0, materialPrice) : 0,
     internalLaborCost: Number.isFinite(internalLaborCost) ? Math.max(0, internalLaborCost) : 0,
@@ -144,7 +146,8 @@ export function recoverQuotaItemsFromTemplates() {
             name,
             constructionDescription: String(item?.constructionDescription || "").trim(),
             unit,
-            laborPrice: Number.isFinite(laborPrice) ? Math.max(0, laborPrice) : 0,
+            pricingMode: item.pricingMode === "single" ? "single" : "split",
+    laborPrice: Number.isFinite(laborPrice) ? Math.max(0, laborPrice) : 0,
             materialPrice: Number.isFinite(materialPrice) ? Math.max(0, materialPrice) : 0,
             internalLaborCost: 0,
             internalMaterialCost: 0,
@@ -435,7 +438,7 @@ export function isQuotaCodeLike(value: string) {
   return /^[A-Z0-9]{2,6}\d{10}$/i.test(text) || /^DE-\d{4}-\d+$/i.test(text);
 }
 
-export function parseQuotaImport(text: string, existingItems: QuotaItem[], allScopes: string[] = [], fallbackScope = "") {
+export function parseQuotaImport(text: string, existingItems: QuotaItem[], allScopes: string[] = [], fallbackScope = "", singleCustomerPrice = false) {
   const rawRows = text.split(/\r?\n/).filter((line) => line.trim());
   const rows = rawRows.map(parseImportLine);
   const headerRowIndex = findQuotaImportHeaderRowIndex(rows);
@@ -472,6 +475,8 @@ export function parseQuotaImport(text: string, existingItems: QuotaItem[], allSc
     const rowNumber = rowIndex + (hasHeader ? headerRowIndex + 2 : 1);
     const legacyNoHeaderRow = !hasHeader && row.length - fallbackDataOffset <= quotaImportHeaders.length - 1;
     const scope = readScope(row);
+    const single = singleCustomerPrice || (hasHeader && findHeaderIndex(["客户单价"]) >= 0 && !readCell(row, 6, ["人工费", "人工单价"]).trim() && !readCell(row, 5, ["材料费", "材料单价"]).trim());
+    const customerCell = readCell(row, 5, ["客户单价"]);
     const priceScene = legacyNoHeaderRow ? DEFAULT_PRICE_SCENE : readCell(row, 0, ["价格场景", "业务场景", "报价场景", "价格类型"]).trim() || DEFAULT_PRICE_SCENE;
     const category = readCell(row, legacyNoHeaderRow ? 0 : 1, ["分类", "定额分类", "专业"]).trim() || "未分类";
     const name = readCell(row, legacyNoHeaderRow ? 1 : 2, ["项目名称", "名称", "定额名称"]).trim();
@@ -482,6 +487,7 @@ export function parseQuotaImport(text: string, existingItems: QuotaItem[], allSc
       isDisallowedQuotaScope(scope) ? "请选择导入门店，且不能为全部门店通用" : "",
       !name ? "项目名称不能为空" : "",
       !unit ? "单位不能为空" : "",
+      single && (!customerCell.trim() || !Number.isFinite(Number(customerCell)) || Number(customerCell) < 0) ? "客户单价必填，且必须为非负数字" : "",
       isNegativeImportAmount(readCell(row, 5, ["材料费", "材料单价"])) ? "材料单价不能为负数" : "",
       isNegativeImportAmount(readCell(row, legacyNoHeaderRow ? 4 : 6, ["人工费", "人工单价"])) ? "人工单价不能为负数" : "",
     ].filter(Boolean);
@@ -514,7 +520,8 @@ export function parseQuotaImport(text: string, existingItems: QuotaItem[], allSc
       internalLaborCost,
       internalMaterialCost,
       costLossRate,
-      totalPrice: laborPrice + materialPrice,
+      pricingMode: single ? "single" : "split",
+      totalPrice: single ? parseImportAmount(customerCell) : laborPrice + materialPrice,
       isSpecialPrice,
       status: "enabled",
       updatedAt: new Date().toISOString().slice(0, 10),
@@ -568,8 +575,8 @@ export function buildQuotaExportRows(items: QuotaItem[]) {
     item.category,
     item.name,
     item.unit,
-    item.materialPrice,
-    item.laborPrice,
+    item.pricingMode === "single" ? "" : item.materialPrice,
+    item.pricingMode === "single" ? "" : item.laborPrice,
     item.totalPrice,
     item.constructionDescription,
     item.scope || DEFAULT_QUOTA_SCOPE,
@@ -631,6 +638,7 @@ export async function downloadQuotaItems(items: QuotaItem[], fileName = "基装�
   });
   const rows = [quotaExportHeaders, ...buildQuotaExportRows(items)];
   sheet.addRows(rows as any[][]);
+  if (items.length && items.every((item) => item.pricingMode === "single")) { sheet.getColumn(5).hidden = true; sheet.getColumn(6).hidden = true; }
   sheet.autoFilter = {
     from: { row: 1, column: 1 },
     to: { row: Math.max(1, rows.length), column: quotaExportHeaders.length },
@@ -704,6 +712,7 @@ export function buildQuotaImportPreviewData(text: string) {
     { header: "项目名称", fallbackIndex: 2, labels: ["项目名称", "名称", "定额名称"] },
     { header: "施工说明", fallbackIndex: 3, labels: ["施工说明", "施工描述", "工艺说明", "说明"] },
     { header: "单位", fallbackIndex: 4, labels: ["单位", "计量单位"] },
+    { header: "客户单价", fallbackIndex: 5, labels: ["客户单价", "销售单价", "总价"] },
     { header: "材料单价", fallbackIndex: 5, labels: ["材料费", "材料单价"] },
     { header: "人工单价", fallbackIndex: 6, labels: ["人工费", "人工单价"] },
     { header: "内部人工成本", fallbackIndex: 7, labels: ["内部人工成本", "人工成本", "成本人工单价"] },
@@ -717,6 +726,7 @@ export function buildQuotaImportPreviewData(text: string) {
     { header: "施工说明", fallbackIndex: 2, labels: ["施工说明", "施工描述", "工艺说明", "说明"] },
     { header: "单位", fallbackIndex: 3, labels: ["单位", "计量单位"] },
     { header: "人工单价", fallbackIndex: 4, labels: ["人工费", "人工单价"] },
+    { header: "客户单价", fallbackIndex: 5, labels: ["客户单价", "销售单价", "总价"] },
     { header: "材料单价", fallbackIndex: 5, labels: ["材料费", "材料单价"] },
     { header: "内部人工成本", fallbackIndex: 6, labels: ["内部人工成本", "人工成本", "成本人工单价"] },
     { header: "内部材料成本", fallbackIndex: 7, labels: ["内部材料成本", "材料成本", "成本材料单价"] },
@@ -798,7 +808,9 @@ export async function readExcelFileAsImportText(file: File) {
   throw new Error("请上传 Excel 文件（.xlsx 或 .xls）");
 }
 
-export async function downloadQuotaImportTemplate() {
+export async function downloadQuotaImportTemplate(singleCustomerPrice = false) {
+  const quotaImportHeaders = singleCustomerPrice ? ["价格类型", "分类", "项目名称", "施工说明", "单位", "客户单价", "内部人工成本", "内部材料成本", "损耗率", "是否特价"] : ["价格类型", "分类", "项目名称", "施工说明", "单位", "材料单价", "人工单价", "内部人工成本", "内部材料成本", "损耗率", "是否特价"];
+  const requiredQuotaImportHeaders = new Set(singleCustomerPrice ? ["项目名称", "单位", "客户单价"] : ["项目名称", "单位", "人工单价", "材料单价"]);
   const ExcelJS = (await import("exceljs")).default;
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("定额导入模板", {
@@ -810,6 +822,7 @@ export async function downloadQuotaImportTemplate() {
     "项目名称": "必填。填写定额项目名称，如墙砖铺贴 300x600。",
     "施工说明": "选填。填写施工范围、工艺要求、验收口径。",
     "单位": "必填。如 ㎡、m、项、个、套。",
+    "客户单价": "必填。项目对客户的完整单价，可填0，不区分人工和材料销售价。",
     "人工单价": "必填。客户报价中的人工单价，可填 0，不能为负数。",
     "材料单价": "必填。客户报价中的材料单价，可填 0，不能为负数。",
     "内部人工成本": "选填。用于内部成本管控；填写大于 0 时系统要求选择工种。",
@@ -845,8 +858,9 @@ export async function downloadQuotaImportTemplate() {
       }
     });
   });
-  ["人工单价", "材料单价", "内部人工成本", "内部材料成本", "损耗率"].forEach((header) => {
+  ["客户单价", "人工单价", "材料单价", "内部人工成本", "内部材料成本", "损耗率"].forEach((header) => {
     const columnIndex = quotaImportHeaders.indexOf(header) + 1;
+    if (columnIndex <= 0) return;
     if (columnIndex <= 0) return;
     for (let rowNumber = 2; rowNumber <= 1000; rowNumber += 1) {
       sheet.getCell(rowNumber, columnIndex).dataValidation = {
@@ -880,7 +894,7 @@ export async function downloadQuotaImportTemplate() {
     ["项目名称", "必填", "填写定额项目名称，如墙砖铺贴 300x600。"],
     ["施工说明", "选填", "填写施工范围、工艺要求、验收口径等。"],
     ["单位", "必填", "如 ㎡、m、个、项；不能为空。"],
-    ["材料单价/人工单价", "必填", "可填写 0，不能为负数，客户单价由系统自动合计。"],
+    [singleCustomerPrice ? "客户单价" : "材料单价/人工单价", "必填", singleCustomerPrice ? "可填写0，不能为负数，直接填写完整客户单价。" : "可填写 0，不能为负数，客户单价由系统自动合计。"],
     ["内部人工成本/内部材料成本", "数字", "用于工地成本管控预算核算，不会展示给客户。"],
     ["损耗率", "数字", "材料预算成本会按内部材料成本 × 数量 ×（1 + 损耗率）计算。"],
     ["是否特价", "选填", "填写“是”表示特价项目；填写“否”或留空表示普通项目。"],

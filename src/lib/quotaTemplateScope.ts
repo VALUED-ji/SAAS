@@ -66,8 +66,8 @@ export type QuotaTemplateMatchContext = {
 
 const pricingModeLabels: Record<string, string> = {
   list: "清单报价模式",
-  package: "一口价模式",
-  area: "平方报价模式",
+  package: "套餐一口价模式",
+  area: "套餐平方报价模式",
   foundation_material_area: "基装+主材平方模式",
 };
 

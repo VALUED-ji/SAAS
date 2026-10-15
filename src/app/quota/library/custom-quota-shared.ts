@@ -15,6 +15,7 @@ export type CustomQuotaItem = {
   name: string;
   constructionDescription: string;
   unit: string;
+  pricingMode?: "single" | "split";
   laborPrice: number;
   materialPrice: number;
   totalPrice: number;

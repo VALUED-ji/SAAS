@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { getQuotationPrintSettingsForOrgUnit } from "@/lib/branchSettingsLookup";
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { getAuthContext, hasPermission } from "@/lib/security/authorization";
@@ -53,6 +54,7 @@ function ensureCustomQuotaItemsTable(db: Db) {
   `);
   const columns = db.prepare("PRAGMA table_info(custom_quota_items)").all() as { name: string }[];
   const names = new Set(columns.map((column) => column.name));
+  if (!names.has("pricing_mode")) db.prepare("ALTER TABLE custom_quota_items ADD COLUMN pricing_mode TEXT DEFAULT 'split'").run();
   if (!names.has("created_by_id")) db.prepare("ALTER TABLE custom_quota_items ADD COLUMN created_by_id TEXT REFERENCES users(id)").run();
   if (!names.has("work_type_id")) db.prepare("ALTER TABLE custom_quota_items ADD COLUMN work_type_id TEXT").run();
   if (!names.has("work_type_name")) db.prepare("ALTER TABLE custom_quota_items ADD COLUMN work_type_name TEXT").run();
@@ -122,6 +124,17 @@ function getQuotationStoreName(db: Db, companyId: string, quotationId?: string |
   return normalizeText(row?.store_name);
 }
 
+function customPricingMode(db: Db, companyId: string, orgId: string | null, incoming: unknown) {
+  return getQuotationPrintSettingsForOrgUnit(db, orgId || "", companyId).splitCustomerPrice === false || incoming === "single" ? "single" : "split";
+}
+
+function customerPrice(body: any) {
+  const raw = body.totalPrice ?? body.total_price;
+  const price = Number(raw);
+  if (raw == null || String(raw).trim() === "" || !Number.isFinite(price) || price < 0) throw new Error("客户单价必须为大于或等于零的数字");
+  return price;
+}
+
 function mapCustomQuotaItem(row: any) {
   const storeName = normalizeText(row.store_name) || normalizeText(row.source_store_name);
   return {
@@ -142,6 +155,7 @@ function mapCustomQuotaItem(row: any) {
     laborPrice: toAmount(row.labor_price),
     materialPrice: toAmount(row.material_price),
     totalPrice: toAmount(row.total_price),
+    pricingMode: row.pricing_mode === "single" ? "single" : "split",
     isSpecialPrice: Boolean(row.is_special_price),
     status: String(row.status || "enabled"),
     sourceQuotationId: row.source_quotation_id ? String(row.source_quotation_id) : "",
@@ -222,7 +236,7 @@ export async function GET(req: NextRequest) {
     LIMIT 1000
   `).all(...params);
 
-  return NextResponse.json({ items: rows.map(mapCustomQuotaItem) });
+  return NextResponse.json({ items: rows.map((row: any) => mapCustomQuotaItem({ ...row, pricing_mode: customPricingMode(db, auth.companyId, row.org_unit_id, row.pricing_mode) })) });
 }
 
 export async function POST(req: NextRequest) {
@@ -278,7 +292,7 @@ export async function POST(req: NextRequest) {
     const category = normalizeText(body.category) || "未分类";
     const laborPrice = toAmount(body.laborPrice ?? body.labor_price);
     const materialPrice = toAmount(body.materialPrice ?? body.material_price);
-    const totalPrice = toAmount(body.totalPrice ?? body.total_price) || laborPrice + materialPrice;
+
     const sourceQuotationId = normalizeText(body.sourceQuotationId || body.source_quotation_id) || null;
     const sourceQuotationItemId = normalizeText(body.sourceQuotationItemId || body.source_quotation_item_id || body.itemId) || null;
     const sourceStoreName = getQuotationStoreName(db, auth.companyId, sourceQuotationId);
@@ -328,14 +342,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, duplicated: true, item: mapCustomQuotaItem(row) });
     }
 
+    const pricingMode = customPricingMode(db, auth.companyId, orgUnitId, body.pricingMode);
+    const totalPrice = pricingMode === "single" ? customerPrice(body) : laborPrice + materialPrice;
     const nextId = makeId("CQUOTA");
     db.prepare(`
       INSERT INTO custom_quota_items (
         id, company_id, org_unit_id, store_name, category, work_type_id, work_type_name, material_category_id, material_category_name, name, construction_description, unit,
-        labor_price, material_price, total_price, is_special_price, status,
+        labor_price, material_price, total_price, pricing_mode, is_special_price, status,
         source_quotation_id, source_quotation_item_id, created_by_id, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'enabled', ?, ?, ?, datetime('now'), datetime('now'))
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'enabled', ?, ?, ?, datetime('now'), datetime('now'))
     `).run(
       nextId,
       auth.companyId,
@@ -352,6 +368,7 @@ export async function POST(req: NextRequest) {
       laborPrice,
       materialPrice,
       totalPrice,
+      pricingMode,
       body.isSpecialPrice || body.is_special_price ? 1 : 0,
       sourceQuotationId,
       sourceQuotationItemId,
@@ -382,12 +399,13 @@ export async function PUT(req: NextRequest) {
     const unit = normalizeText(body.unit);
     if (!name) return NextResponse.json({ message: "请填写项目名称" }, { status: 400 });
     if (!unit) return NextResponse.json({ message: "请填写单位" }, { status: 400 });
-    const laborPrice = toAmount(body.laborPrice ?? body.labor_price);
-    const materialPrice = toAmount(body.materialPrice ?? body.material_price);
+    const pricingMode = customPricingMode(db, auth.companyId, existing.org_unit_id, body.pricingMode);
+    const laborPrice = pricingMode === "single" ? toAmount(existing.labor_price) : toAmount(body.laborPrice ?? body.labor_price);
+    const materialPrice = pricingMode === "single" ? toAmount(existing.material_price) : toAmount(body.materialPrice ?? body.material_price);
     db.prepare(`
       UPDATE custom_quota_items
       SET store_name = ?, category = ?, work_type_id = ?, work_type_name = ?, material_category_id = ?, material_category_name = ?, name = ?, construction_description = ?, unit = ?,
-          labor_price = ?, material_price = ?, total_price = ?, is_special_price = ?,
+          labor_price = ?, material_price = ?, total_price = ?, pricing_mode = ?, is_special_price = ?,
           status = CASE WHEN status = 'promoted' THEN status ELSE ? END,
           updated_at = datetime('now')
       WHERE id = ? AND company_id = ? AND deleted_at IS NULL
@@ -403,7 +421,8 @@ export async function PUT(req: NextRequest) {
       unit,
       laborPrice,
       materialPrice,
-      toAmount(body.totalPrice ?? body.total_price) || laborPrice + materialPrice,
+      pricingMode === "single" ? customerPrice(body) : laborPrice + materialPrice,
+      pricingMode,
       body.isSpecialPrice || body.is_special_price ? 1 : 0,
       normalizeText(body.status) === "disabled" ? "disabled" : "enabled",
       id,

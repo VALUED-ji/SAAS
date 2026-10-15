@@ -952,7 +952,7 @@ export function initializeDatabase(): void {
   globalDatabaseState.__renovationSaasSchemaReady = true;
 }
 
-function ensureDatabaseSchema(database: Database.Database): void {
+export function ensureDatabaseSchema(database: Database.Database): void {
   database.exec(SCHEMA_SQL);
   ensureColumn(database, "users", "avatar", "TEXT");
   ensureUserLoginColumns(database);
@@ -1015,6 +1015,7 @@ function ensureDatabaseSchema(database: Database.Database): void {
   database.exec("CREATE INDEX IF NOT EXISTS idx_attachments_customer ON attachments(customer_id);");
   database.exec("CREATE INDEX IF NOT EXISTS idx_attachments_followup ON attachments(followup_id);");
   ensureColumn(database, "quotation_items", "space", "TEXT");
+  ensureColumn(database, "quotation_items", "package_scope", "TEXT");
   ensureColumn(database, "quotation_items", "work_type_id", "TEXT");
   ensureColumn(database, "quotation_items", "work_type_name", "TEXT");
   ensureColumn(database, "quotation_items", "material_category_id", "TEXT");
@@ -1036,6 +1037,7 @@ function ensureDatabaseSchema(database: Database.Database): void {
   ensureColumn(database, "quotation_items", "quota_source_material_price", "REAL");
   ensureColumn(database, "quotation_items", "quota_source_labor_price", "REAL");
   ensureColumn(database, "quotation_items", "price_manually_edited", "INTEGER DEFAULT 0");
+  ensureColumn(database, "custom_quota_items", "pricing_mode", "TEXT DEFAULT 'split'");
   ensureColumn(database, "custom_quota_items", "work_type_id", "TEXT");
   ensureColumn(database, "custom_quota_items", "work_type_name", "TEXT");
   ensureColumn(database, "custom_quota_items", "material_category_id", "TEXT");

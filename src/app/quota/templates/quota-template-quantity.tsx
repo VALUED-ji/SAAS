@@ -15,6 +15,7 @@ export type TemplateQuantityEditorState = {
   spaceId: string;
   itemId: string;
   scope: TemplateSpaceQuotaScope;
+  packageScope?: "included" | "extra";
   text: string;
   lastInsertedRange: { start: number; end: number } | null;
 };
@@ -36,14 +37,18 @@ export function TemplateQuantityInput({
   item,
   onChange,
   onOpenFormula,
+  placeholderWhenZero = false,
 }: {
   item: TemplateSpaceQuota;
   onChange: (quantity: number) => void;
   onOpenFormula: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  placeholderWhenZero?: boolean;
 }) {
   const hasFormula = Boolean(parseQuotationQuantityFormula(item.quantityFormula));
   const [draft, setDraft] = useState<string | null>(null);
-  const displayValue = Number(item.quantity || 0).toFixed(2);
+  const numericDisplayValue = Number(item.quantity || 0).toFixed(2);
+  const shouldShowPlaceholder = placeholderWhenZero && Number(item.quantity || 0) === 0;
+  const displayValue = shouldShowPlaceholder ? "-" : numericDisplayValue;
 
   const commit = () => {
     if (draft === null) return;
@@ -59,9 +64,10 @@ export function TemplateQuantityInput({
         type="text"
         inputMode="decimal"
         value={draft ?? displayValue}
+        data-placeholder={draft === null && shouldShowPlaceholder ? "true" : undefined}
         onFocus={(event) => {
           const input = event.currentTarget;
-          setDraft(displayValue);
+          setDraft(numericDisplayValue);
           window.requestAnimationFrame(() => input.select());
         }}
         onChange={(event) => {

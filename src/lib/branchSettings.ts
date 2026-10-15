@@ -77,6 +77,7 @@ export type BranchSettings = {
     auxiliaryTemplates: OrderTemplate[];
   };
   printSettings: {
+    splitCustomerPrice?: boolean;
     quotationLogoUrl: string;
     quotationSignatureLabels: string[];
   };
@@ -854,6 +855,7 @@ function normalizePrintSettings(value: unknown): BranchSettings["printSettings"]
   return {
     ...defaultBranchSettings.printSettings,
     ...raw,
+    splitCustomerPrice: raw.splitCustomerPrice !== false,
     quotationLogoUrl: String(raw.quotationLogoUrl || "").trim(),
     quotationSignatureLabels: normalizeQuotationSignatureLabels(raw.quotationSignatureLabels),
   };

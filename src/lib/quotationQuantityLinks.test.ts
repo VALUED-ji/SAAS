@@ -5,11 +5,14 @@ import {
   formatQuotationQuantityFormulaRows,
   formatQuotationQuantityFormulaNames,
   getQuotationQuantityFormulaError,
+  normalizeManualQuantityExpression,
+  parseManualQuantityFormula,
   parseQuotationQuantityFormulaRows,
   parseQuotationQuantityFormula,
   parseQuotationQuantityConstantTerms,
   remapQuotationQuantityFormulaIds,
   repairQuotationQuantityLinksAfterDeletion,
+  serializeManualQuantityFormula,
   type QuotationQuantityLinkItem,
 } from "./quotationQuantityLinks";
 
@@ -83,6 +86,20 @@ describe("quotation quantity links", () => {
     expect(formatQuotationQuantityFormulaRows([
       item({ id: "a" }),
     ], parseQuotationQuantityFormula('{"baseItemId":"a","operator":"subtract","itemId":"a"}'))).toBe("=[1]-[1]");
+  });
+
+  it("normalizes manual arithmetic quantity formulas", () => {
+    expect(normalizeManualQuantityExpression("（44+3）*2")).toBe("(44+3)*2");
+    expect(serializeManualQuantityFormula("（44+3）×2")).toBe(JSON.stringify({
+      version: 1,
+      type: "manual_arithmetic",
+      expression: "(44+3)*2",
+    }));
+    expect(parseManualQuantityFormula(JSON.stringify({
+      version: 1,
+      type: "manual_arithmetic",
+      expression: "（44+3）÷2",
+    }))).toBe("(44+3)/2");
   });
 
   it("supports simple row-number formulas like Excel", () => {

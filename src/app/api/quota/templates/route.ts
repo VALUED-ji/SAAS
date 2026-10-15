@@ -196,11 +196,11 @@ function makeTemplateSummary(
     appendixNote: "",
     budgetCompilationHtml: "",
     spaces: [],
-    createdAt: cleanText(row.payload_created_at)
+    createdAt: cleanText(row.created_at)
+      || cleanText(row.payload_created_at)
       || cleanText(row.payload_created_at_snake)
-      || cleanText(row.created_at)
       || cleanText(row.updated_at),
-    updatedAt: cleanText(row.payload_updated_at) || cleanText(row.updated_at) || cleanText(row.created_at),
+    updatedAt: cleanText(row.updated_at) || cleanText(row.payload_updated_at) || cleanText(row.created_at),
   };
 }
 

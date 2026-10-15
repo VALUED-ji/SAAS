@@ -39,6 +39,7 @@ export type QuotaPickerTarget = {
   spaceId: string;
   quoteScope: TemplateSpaceQuotaScope;
   quotaItemId?: string;
+  packageScope?: "included" | "extra";
 } | null;
 
 export type DragOverQuotaState = {
@@ -106,6 +107,14 @@ export type CombinedAreaPricingTier = {
   materialUnitPrice: number;
 };
 
+export type AreaOverageRule = {
+  id: string;
+  name: string;
+  includedQuantity: number;
+  unit: string;
+  unitPrice: number;
+};
+
 export type TemplateComprehensiveFee = {
   id: string;
   name: string;
@@ -131,11 +140,13 @@ export type QuoteConfig = {
   foundationUnitPrice: number;
   materialUnitPrice: number;
   combinedAreaTiers: CombinedAreaPricingTier[];
+  overageRules: AreaOverageRule[];
   minChargeAmount: number;
   calculationNote: string;
 };
 
 export type TemplateSpaceQuota = {
+  packageScope?: "included" | "extra";
   id: string;
   quotaId: string;
   code: string;
@@ -148,6 +159,7 @@ export type TemplateSpaceQuota = {
   quantity: number;
   quantityFormula?: string | null;
   quoteScope: TemplateSpaceQuotaScope;
+  pricingMode?: "split" | "single";
   laborPrice: number;
   materialPrice: number;
   totalPrice: number;
@@ -163,12 +175,14 @@ export type TemplateSpaceQuota = {
     | "laborPrice"
     | "materialPrice"
     | "totalPrice"
+    | "pricingMode"
     | "isSpecialPrice"
   >>;
   overriddenFields?: string[];
 };
 
 export type TemplateSpace = {
+  packageScope?: "included" | "extra";
   id: string;
   name: string;
   projectGroupIds?: TemplateSpaceQuotaScope[];
@@ -226,6 +240,7 @@ export type QuotaLibraryItem = {
   name: string;
   constructionDescription: string;
   unit: string;
+  pricingMode?: "split" | "single";
   laborPrice: number;
   materialPrice: number;
   totalPrice: number;
@@ -237,6 +252,7 @@ export type QuotaLibraryItem = {
 export type CustomQuotaDraft = {
   name: string;
   unit: string;
+  pricingMode?: "split" | "single";
   laborPrice: number;
   materialPrice: number;
   totalPrice: number;
@@ -260,8 +276,8 @@ export type TemplateEditMode = "create" | "edit";
 export type SpaceAutoSaveStatus = "idle" | "pending" | "saving" | "saved" | "draft" | "error";
 export const pricingModeOptions: Array<{ value: PricingMode; label: string; description: string }> = [
   { value: "list", label: "清单报价模式", description: "按空间中配置的报价项目逐项累计，适合明细清单报价。" },
-  { value: "package", label: "一口价模式", description: "固定套餐价，限制面积，超出部分按每平方加价。" },
-  { value: "area", label: "平方报价模式", description: "按面积区间配置每平方单价，适合阶梯平方报价。" },
+  { value: "area", label: "套餐平方报价模式", description: "按面积区间配置每平方单价，适合阶梯平方报价。" },
+  { value: "package", label: "套餐一口价模式", description: "固定套餐价，限制面积，超出部分按每平方加价。" },
   { value: "foundation_material_area", label: "基装+主材平方模式", description: "基装和主材分别按面积计价，系统自动汇总每平方合计价。" },
 ];
 
@@ -585,6 +601,17 @@ export function makeCombinedAreaPricingTier(partial?: Partial<CombinedAreaPricin
   };
 }
 
+export function makeAreaOverageRule(partial?: Partial<AreaOverageRule>): AreaOverageRule {
+  return {
+    id: `area-overage-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    name: "",
+    includedQuantity: 0,
+    unit: "个",
+    unitPrice: 0,
+    ...(partial || {}),
+  };
+}
+
 export function normalizePackagePricingTiers(value: any, fallback?: { includedArea?: number; extraAreaPrice?: number }) {
   if (Array.isArray(value) && value.length > 0) {
     return value.map((tier, index) => makePackagePricingTier({
@@ -635,6 +662,18 @@ export function normalizeCombinedAreaPricingTiers(value: any, fallback?: { found
   })];
 }
 
+export function normalizeAreaOverageRules(value: any) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((rule, index) => makeAreaOverageRule({
+      id: String(rule?.id || `area-overage-${Date.now()}-${index}`),
+      name: String(rule?.name || "").trim(),
+      includedQuantity: toAmount(rule?.includedQuantity),
+      unit: String(rule?.unit || "个").trim() || "个",
+      unitPrice: toAmount(rule?.unitPrice),
+    }));
+}
+
 export function makeDefaultQuoteConfig(partial?: Partial<QuoteConfig>): QuoteConfig {
   const mode: PricingMode = partial?.mode === "area"
     || partial?.mode === "list"
@@ -660,6 +699,7 @@ export function makeDefaultQuoteConfig(partial?: Partial<QuoteConfig>): QuoteCon
     packageTiers: normalizePackagePricingTiers(partial?.packageTiers, { includedArea, extraAreaPrice }),
     areaTiers: normalizeAreaPricingTiers(partial?.areaTiers, { areaUnitPrice }),
     combinedAreaTiers: normalizeCombinedAreaPricingTiers(partial?.combinedAreaTiers, { foundationUnitPrice, materialUnitPrice }),
+    overageRules: normalizeAreaOverageRules(partial?.overageRules),
     mode,
   };
 }
@@ -870,8 +910,9 @@ export function getCombinedAreaTierTotalPrice(tier: CombinedAreaPricingTier) {
   return toAmount(tier.foundationUnitPrice) + toAmount(tier.materialUnitPrice);
 }
 
-export function makeSpace(name = ""): TemplateSpace {
+export function makeSpace(name = "", packageScope?: "included" | "extra"): TemplateSpace {
   return {
+    ...(packageScope ? { packageScope } : {}),
     id: `space-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     name,
     projectGroupIds: [],
@@ -967,6 +1008,7 @@ export function makeQuotaItemFromLibrary(quota: QuotaLibraryItem, quoteScope?: T
     constructionDescription: quota.constructionDescription,
     unit: quota.unit,
     quoteScope: quoteScope || normalizeQuotaScope("", `${quota.category}${quota.name}${quota.constructionDescription}`),
+    pricingMode: quota.pricingMode,
     laborPrice: quota.laborPrice,
     materialPrice: quota.materialPrice,
     totalPrice: quota.totalPrice,
@@ -979,7 +1021,8 @@ export function makeQuotaItemFromLibrary(quota: QuotaLibraryItem, quoteScope?: T
       name: quota.name,
       constructionDescription: quota.constructionDescription,
       unit: quota.unit,
-      laborPrice: quota.laborPrice,
+      pricingMode: quota.pricingMode,
+    laborPrice: quota.laborPrice,
       materialPrice: quota.materialPrice,
       totalPrice: quota.totalPrice,
       isSpecialPrice: quota.isSpecialPrice,
@@ -1053,9 +1096,11 @@ export function normalizeSpaceQuotaItem(value: any, index: number): TemplateSpac
     laborPrice: toAmount(value.sourceSnapshot.laborPrice),
     materialPrice: toAmount(value.sourceSnapshot.materialPrice),
     totalPrice: toAmount(value.sourceSnapshot.totalPrice),
+    pricingMode: value.sourceSnapshot.pricingMode === "single" ? "single" as const : "split" as const,
     isSpecialPrice: Boolean(value.sourceSnapshot.isSpecialPrice),
   } : undefined;
   return {
+    packageScope: value?.packageScope === "extra" ? "extra" : "included",
     id: String(value?.id || `space-quota-${Date.now()}-${index}`),
     quotaId: String(value?.quotaId || value?.quota_id || ""),
     code: String(value?.code || ""),
@@ -1068,6 +1113,7 @@ export function normalizeSpaceQuotaItem(value: any, index: number): TemplateSpac
     quantity: toAmount(value?.quantity),
     quantityFormula: serializeQuotationQuantityFormula(value?.quantityFormula || value?.quantity_formula) || null,
     quoteScope: normalizeQuotaScope(value?.quoteScope, `${value?.category || ""}${value?.name || value?.quotaName || ""}${value?.constructionDescription || value?.description || ""}`),
+    pricingMode: value?.pricingMode === "single" ? "single" : "split",
     laborPrice: toAmount(value?.laborPrice),
     materialPrice: toAmount(value?.materialPrice),
     totalPrice: toAmount(value?.totalPrice ?? (toAmount(value?.laborPrice) + toAmount(value?.materialPrice))),
@@ -1085,6 +1131,11 @@ export function excludeOverriddenQuotaFields<T extends string>(fields: readonly 
 
 export function normalizeSpace(value: any, index: number): TemplateSpace {
   return {
+    ...(value?.packageScope === "extra" || value?.package_scope === "extra"
+      ? { packageScope: "extra" as const }
+      : value?.packageScope === "included" || value?.package_scope === "included"
+        ? { packageScope: "included" as const }
+        : {}),
     id: String(value?.id || `space-${Date.now()}-${index}`),
     name: String(value?.name || `空间${index + 1}`),
     projectGroupIds: Array.isArray(value?.projectGroupIds) ? uniqueProjectGroupIds(value.projectGroupIds) : undefined,
@@ -1177,6 +1228,7 @@ export function loadQuotaLibraryItems() {
           name: String(item.name || ""),
           constructionDescription: String(item.constructionDescription || ""),
           unit: String(item.unit || ""),
+          pricingMode: item.pricingMode === "single" ? "single" : "split",
           laborPrice: toAmount(item.laborPrice),
           materialPrice: toAmount(item.materialPrice),
           totalPrice: toAmount(item.totalPrice ?? (toAmount(item.laborPrice) + toAmount(item.materialPrice))),
@@ -1209,7 +1261,7 @@ export function getSpaceConfigModeCopy(mode: PricingMode) {
   }
   if (mode === "package") {
     return {
-      modeName: "一口价模式",
+      modeName: "套餐一口价模式",
       title: "套餐包含项目",
       description: "按空间配置一口价包含的施工项目，销售价以上方一口价配置为准。",
       notice: "当前模式下，空间定额用于说明套餐包含范围，不再按定额价格自动累加销售价。",
@@ -1217,22 +1269,22 @@ export function getSpaceConfigModeCopy(mode: PricingMode) {
       emptyText: "该空间暂无套餐项目",
       emptyHelp: "添加项目后，可说明一口价套餐包含哪些施工范围。",
       priceHeader: "参考单价",
-      priceTitle: "一口价模式下仅作项目价格参考",
+      priceTitle: "套餐一口价模式下仅作项目价格参考",
       priceClassName: "relative px-2 py-2 pr-5 text-right font-semibold tabular-nums text-surface-700",
       showScope: false,
     };
   }
   if (mode === "area") {
     return {
-      modeName: "平方报价模式",
-      title: "平方报价包含项目",
-      description: "按空间配置平方单价包含的施工项目，销售价以上方平方阶梯配置为准。",
-      notice: "当前模式下，空间定额用于说明每平方单价包含范围，不再按定额价格自动累加销售价。",
-      addButtonText: "添加平方项目",
-      emptyText: "该空间暂无平方项目",
-      emptyHelp: "添加项目后，可说明平方报价包含哪些施工范围。",
-      priceHeader: "参考单价",
-      priceTitle: "平方报价模式下仅作项目价格参考",
+      modeName: "套餐平方报价模式",
+      title: "套餐项目",
+      description: "按空间配置套餐内包含项目与套餐外另计项目。",
+      notice: "套餐内项目包含在平方套餐价中；套餐外项目按数量和客户单价另外计费。",
+      addButtonText: "添加套餐项目",
+      emptyText: "该空间暂无套餐项目",
+      emptyHelp: "先选择套餐内或套餐外分区，再添加对应项目。",
+      priceHeader: "客户单价",
+      priceTitle: "套餐内项目不重复计入金额；套餐外项目按客户单价另计",
       priceClassName: "relative px-2 py-2 pr-5 text-right font-semibold tabular-nums text-surface-700",
       showScope: false,
     };

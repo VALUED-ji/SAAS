@@ -18,6 +18,12 @@ export type QuotationQuantityFormula = {
   expression: QuotationQuantityFormulaNode;
 };
 
+export type QuotationManualQuantityFormula = {
+  version: 1;
+  type: "manual_arithmetic";
+  expression: string;
+};
+
 export type QuotationQuantityFormulaTerm = {
   operator: QuotationQuantityFormulaAdjustmentOperator;
   itemId?: string;
@@ -34,6 +40,15 @@ export type QuotationQuantityLinkItem = {
   quantity?: number | null;
   quantity_formula?: unknown;
 };
+
+export function normalizeManualQuantityExpression(value: unknown) {
+  return String(value || "")
+    .replace(/（/g, "(")
+    .replace(/）/g, ")")
+    .replace(/×/g, "*")
+    .replace(/÷/g, "/")
+    .trim();
+}
 
 type FormulaEvaluation = {
   value: number | null;
@@ -129,6 +144,33 @@ export function parseQuotationQuantityFormula(value: unknown): QuotationQuantity
 export function serializeQuotationQuantityFormula(value: unknown) {
   const formula = parseQuotationQuantityFormula(value);
   return formula ? JSON.stringify(formula) : "";
+}
+
+export function parseManualQuantityFormula(value: unknown): string {
+  let raw = value;
+  if (typeof raw === "string") {
+    const text = raw.trim();
+    if (!text) return "";
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      return "";
+    }
+  }
+  if (!raw || typeof raw !== "object") return "";
+  const source = raw as Record<string, unknown>;
+  if (Number(source.version) !== 1 || source.type !== "manual_arithmetic") return "";
+  return normalizeManualQuantityExpression(source.expression);
+}
+
+export function serializeManualQuantityFormula(expression: unknown) {
+  const text = normalizeManualQuantityExpression(expression);
+  if (!text) return "";
+  return JSON.stringify({ version: 1, type: "manual_arithmetic", expression: text } satisfies QuotationManualQuantityFormula);
+}
+
+export function serializeQuantityFormulaValue(value: unknown) {
+  return serializeQuotationQuantityFormula(value) || serializeManualQuantityFormula(parseManualQuantityFormula(value));
 }
 
 export function getQuantityLinkItemId(item: QuotationQuantityLinkItem) {
@@ -442,7 +484,7 @@ export function getQuotationQuantityLinkDependents(items: QuotationQuantityLinkI
 
 export function remapQuotationQuantityFormulaIds(value: unknown, idMap: Map<string, string>) {
   const formula = parseQuotationQuantityFormula(value);
-  if (!formula) return null;
+  if (!formula) return serializeManualQuantityFormula(parseManualQuantityFormula(value)) || null;
   const expression = mapFormulaReferences(formula.expression, (itemId) => idMap.get(itemId) || null);
   return expression ? JSON.stringify({ version: 2, expression }) : null;
 }

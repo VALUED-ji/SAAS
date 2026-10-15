@@ -41,6 +41,7 @@ interface AddCustomerModalProps {
   onClose: () => void;
   onSuccess: () => void;
   customer?: EditableCustomer | null;
+  hideDecorationType?: boolean;
 }
 
 const sourceOptions = ["门店", "转介绍", "小程序", "广告投放", "抖音", "小红书", "其它"];
@@ -305,7 +306,7 @@ function budgetWanToYuan(value: string) {
   return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 10000 * 100) / 100 : null;
 }
 
-export default function AddCustomerModal({ isOpen, onClose, onSuccess, customer = null }: AddCustomerModalProps) {
+export default function AddCustomerModal({ isOpen, onClose, onSuccess, customer = null, hideDecorationType = false }: AddCustomerModalProps) {
   const { user } = useAuth();
   const [form, setForm] = useState<FormData>(initialForm);
   const [orgUnits, setOrgUnits] = useState<OrgUnit[]>([]);
@@ -731,13 +732,13 @@ export default function AddCustomerModal({ isOpen, onClose, onSuccess, customer 
                 <p className="mt-1 text-xs font-normal leading-5 text-[#667085]">记录客户预算、交房状态、意向度和补充说明。</p>
               </div>
               <div className={sectionBodyClass}>
-                <div>
+                {!hideDecorationType && <div>
                   <label className={labelClass}>装修类型</label>
                   <SystemSelect value={form.decoration_type} onChange={(e) => set("decoration_type", e.target.value)} className={inputClass} menuClassName={selectMenuClass} optionClassName={selectOptionClass}>
                     <option value="">请选择装修类型</option>
                     {decorationTypeOptions.map((o) => <option key={o} value={o}>{o}</option>)}
                   </SystemSelect>
-                </div>
+                </div>}
 
                 <div>
                   <label className={labelClass}>装修预算（万元）</label>
@@ -818,11 +819,13 @@ export default function AddCustomerModal({ isOpen, onClose, onSuccess, customer 
 export function AmapLocationPicker({
   initialKeyword,
   mobile = false,
+  layered = false,
   onClose,
   onConfirm,
 }: {
   initialKeyword: string;
   mobile?: boolean;
+  layered?: boolean;
   onClose: () => void;
   onConfirm: (location: LocationPick) => void;
 }) {
@@ -1193,8 +1196,14 @@ export function AmapLocationPicker({
   }
 
   return (
-    <div className="fixed inset-0 z-[1300] flex items-center justify-center bg-slate-900/24 px-4 py-6 backdrop-blur-[1px]">
-      <div className="customer-entry-map-modal-shell flex max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-none border border-[#DCE4EF] bg-white">
+    <div
+      className="fixed inset-0 z-[1300] flex items-center justify-center bg-slate-900/24 px-4 py-6 backdrop-blur-[1px]"
+      style={layered ? { backgroundColor: "rgba(15, 23, 42, 0.48)", backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)" } : undefined}
+    >
+      <div
+        className="customer-entry-map-modal-shell flex max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-none border border-[#DCE4EF] bg-white"
+        style={layered ? { borderRadius: 18, boxShadow: "0 24px 80px rgba(15, 23, 42, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.2)" } : undefined}
+      >
         <div className="flex items-center justify-between border-b border-[#E5EAF2] bg-white px-5 py-4">
           <div>
             <h3 className="text-base font-semibold text-[#1F2937]">地图选择小区/楼盘</h3>

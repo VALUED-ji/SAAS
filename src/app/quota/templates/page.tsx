@@ -1,9 +1,10 @@
 "use client";
+import TemplateTimestamp from "./TemplateTimestamp";
 
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent as ReactChangeEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, Building2, Check, ChevronDown, ClipboardList, Copy, GripVertical, HardHat, Layers3, LayoutGrid, LayoutTemplate, Loader2, Package, Pencil, Plus, Power, Search, SlidersHorizontal, Sofa, Star, Tags, Trash2, X } from "lucide-react";
+import { AlertTriangle, ArrowRightLeft, Building2, Check, ChevronDown, ClipboardList, Copy, GripVertical, HardHat, Layers3, LayoutGrid, LayoutTemplate, Loader2, Package, Pencil, Plus, Power, Search, SlidersHorizontal, Sofa, Star, Tags, Trash2, X } from "lucide-react";
 import DataPagination, { useDataPagination } from "@/components/ui/DataPagination";
 import ThinScrollArea from "@/components/ui/ThinScrollArea";
 import BudgetCompilationEditor from "@/components/BudgetCompilationEditor";
@@ -46,6 +47,7 @@ import {
   DEFAULT_PRICING_MODE,
   DEFAULT_TEMPLATE_CREATOR,
   QUOTA_TEMPLATE_DRAFT_STORAGE_KEY,
+  type AreaOverageRule,
   applyTemplateSpaceQuantityLinks,
   buildTemplateFeeFormulaContext,
   buildTemplateFeeScopeReferences,
@@ -81,6 +83,7 @@ import {
   loadTemplatesFromStorage,
   makeCombinedAreaPricingTier,
   makeComprehensiveFeeItem,
+  makeAreaOverageRule,
   makeCustomQuotaDraft,
   makeDefaultConstructionTemplateConfig,
   makeDefaultQuoteConfig,
@@ -91,6 +94,7 @@ import {
   makeSpaceCopy,
   makeSpaceQuotaItem,
   normalizeAreaPricingTiers,
+  normalizeAreaOverageRules,
   normalizeCombinedAreaPricingTiers,
   normalizeComprehensiveFees,
   normalizeConstructionTemplateOption,
@@ -110,6 +114,35 @@ import {
 } from "./quota-templates-shared";
 
 const TEMPLATE_FEE_SUGGESTION_DROPDOWN_ID = "quota-template-fee-suggestion";
+type TemplatePackageScope = "included" | "extra";
+
+const packageScopeOptions: Array<{
+  value: TemplatePackageScope;
+  title: string;
+  description: string;
+}> = [
+  { value: "included", title: "套餐内项目", description: "包含在平方套餐价中，不另外计入客户金额" },
+  { value: "extra", title: "套餐外另计常用项目", description: "可提前预设常用个性化增项；未预设的项目，做报价时也可手动额外添加" },
+];
+
+function normalizeTemplatePackageScope(value: unknown): TemplatePackageScope {
+  return value === "extra" ? "extra" : "included";
+}
+
+function templateSpaceBelongsToPackageScope(space: TemplateSpace, packageScope: TemplatePackageScope) {
+  if (space.packageScope === "included" || space.packageScope === "extra") {
+    return space.packageScope === packageScope;
+  }
+  if (space.quotaItems.length === 0) return packageScope === "included";
+  return space.quotaItems.some((item) => normalizeTemplatePackageScope(item.packageScope) === packageScope);
+}
+
+function getTemplateSpaceFallbackPackageScope(space: TemplateSpace): TemplatePackageScope {
+  if (space.packageScope === "extra") return "extra";
+  if (space.packageScope === "included") return "included";
+  const scopes = new Set(space.quotaItems.map((item) => normalizeTemplatePackageScope(item.packageScope)));
+  return scopes.size === 1 && scopes.has("extra") ? "extra" : "included";
+}
 
 import type {
   CombinedAreaPricingTier,
@@ -151,14 +184,26 @@ function normalizeTemplateScopeName(value: unknown) {
   return String(value || "").trim().toLocaleLowerCase("zh-CN");
 }
 
-function getTemplateScopeNameConflicts(template: Pick<QuotaTemplate, "spaces" | "projectGroups">) {
+function getTemplateScopeNameConflicts(template: Pick<QuotaTemplate, "spaces" | "projectGroups" | "quoteConfig">) {
   const entries = [
-    ...template.spaces.map((space) => ({ type: "space" as const, id: space.id, name: space.name })),
-    ...getTemplateProjectGroups(template).map((group) => ({ type: "category" as const, id: group.id, name: group.name })),
+    ...template.spaces.map((space) => ({
+      type: "space" as const,
+      id: space.id,
+      name: space.name,
+      groupKey: template.quoteConfig.mode === "area"
+        ? `space:${getTemplateSpaceFallbackPackageScope(space)}:${normalizeTemplateScopeName(space.name)}`
+        : `scope:${normalizeTemplateScopeName(space.name)}`,
+    })),
+    ...getTemplateProjectGroups(template).map((group) => ({
+      type: "category" as const,
+      id: group.id,
+      name: group.name,
+      groupKey: `scope:${normalizeTemplateScopeName(group.name)}`,
+    })),
   ].filter((entry) => String(entry.name || "").trim());
   const groups = new Map<string, typeof entries>();
   entries.forEach((entry) => {
-    const key = normalizeTemplateScopeName(entry.name);
+    const key = entry.groupKey;
     groups.set(key, [...(groups.get(key) || []), entry]);
   });
   return Array.from(groups.values())
@@ -256,6 +301,7 @@ function makeQuotaSourceSnapshot(quota: QuotaLibraryItem) {
     name: quota.name,
     constructionDescription: quota.constructionDescription,
     unit: quota.unit,
+    pricingMode: quota.pricingMode,
     laborPrice: quota.laborPrice,
     materialPrice: quota.materialPrice,
     totalPrice: quota.totalPrice,
@@ -448,6 +494,8 @@ export default function QuotaTemplatesPage() {
   const [editingMode, setEditingMode] = useState<TemplateEditMode>("edit");
   const [activeSpaceId, setActiveSpaceId] = useState("");
   const [activeQuotaScope, setActiveQuotaScope] = useState<TemplateSpaceQuotaScope>("foundation");
+  const [activePackageScope, setActivePackageScope] = useState<TemplatePackageScope>("included");
+  const [splitCustomerPrice, setSplitCustomerPrice] = useState(true);
   const [quotaLibraryItems, setQuotaLibraryItems] = useState<QuotaLibraryItem[]>([]);
   const [quotaLibraryStoreOptions, setQuotaLibraryStoreOptions] = useState<Array<{ id: string; name: string; itemCount: number }>>([]);
   const [quotaLibraryLoading, setQuotaLibraryLoading] = useState(false);
@@ -722,6 +770,7 @@ export default function QuotaTemplatesPage() {
               name: String(item.name || ""),
               constructionDescription: String(item.constructionDescription || ""),
               unit: String(item.unit || ""),
+              pricingMode: item.pricingMode === "single" ? "single" : "split",
               laborPrice: Number.isFinite(laborPrice) ? Math.max(0, laborPrice) : 0,
               materialPrice: Number.isFinite(materialPrice) ? Math.max(0, materialPrice) : 0,
               totalPrice: Number.isFinite(Number(item.totalPrice)) ? Math.max(0, Number(item.totalPrice)) : Math.max(0, laborPrice + materialPrice),
@@ -732,6 +781,7 @@ export default function QuotaTemplatesPage() {
           })
           .filter((item: QuotaLibraryItem | null): item is QuotaLibraryItem => Boolean(item?.id && item.name && item.status !== "disabled"))
         : [];
+      setSplitCustomerPrice(data?.splitCustomerPrice !== false);
       setQuotaLibraryItems(items);
       setQuotaLibraryStoreOptions(Array.isArray(data?.storeOptions)
         ? data.storeOptions
@@ -909,7 +959,25 @@ export default function QuotaTemplatesPage() {
   }, [branchScopeFilter, pricingModeFilter, search, statusFilter, templateScopeOptions, visibleTemplates]);
 
   const pagination = useDataPagination(filteredTemplates, [search, pricingModeFilter, statusFilter, branchScopeFilter].join("|"));
-  const activeSpace = editingTemplate?.spaces.find((space) => space.id === activeSpaceId) || editingTemplate?.spaces[0] || null;
+  const isAreaPackageMode = editingTemplate?.quoteConfig.mode === "area";
+  const visibleTemplateSpaces = useMemo(() => {
+    const spaces = editingTemplate?.spaces || [];
+    if (!isAreaPackageMode) return spaces;
+    return spaces.filter((space) => templateSpaceBelongsToPackageScope(space, activePackageScope));
+  }, [activePackageScope, editingTemplate?.spaces, isAreaPackageMode]);
+  const activeSpace = visibleTemplateSpaces.find((space) => space.id === activeSpaceId) || visibleTemplateSpaces[0] || null;
+
+  useEffect(() => {
+    if (!editingTemplate) return;
+    if (!isAreaPackageMode) {
+      if (!activeSpaceId && editingTemplate.spaces[0]) setActiveSpaceId(editingTemplate.spaces[0].id);
+      return;
+    }
+    if (visibleTemplateSpaces.some((space) => space.id === activeSpaceId)) return;
+    setActiveSpaceId(visibleTemplateSpaces[0]?.id || "");
+    setActiveQuotaScope("foundation");
+    setTemplateQuantityEditor(null);
+  }, [activeSpaceId, editingTemplate, isAreaPackageMode, visibleTemplateSpaces]);
 
   const quotaSourceUpdates = useMemo(() => {
     if (!editingTemplate || quotaLibraryItems.length === 0) return [] as Array<{
@@ -936,6 +1004,7 @@ export default function QuotaTemplatesPage() {
         const base = getQuotaSourceSnapshot(item);
         const rawChangedFields = quotaSourceComparableFields
           .map(([field]) => field)
+          .filter((field) => !((item.pricingMode === "single" || latest.pricingMode === "single") && ["laborPrice", "materialPrice"].includes(field)))
           .filter((field) => isQuotaSourceFieldChanged(field, base, latest));
         const preservedFields = rawChangedFields.filter((field) => shouldPreserveTemplateQuotaField(item, field));
         const changedFields = rawChangedFields.filter((field) => !preservedFields.includes(field));
@@ -1058,6 +1127,15 @@ export default function QuotaTemplatesPage() {
     || editingTemplate?.quoteConfig.mode === "area"
     || editingTemplate?.quoteConfig.mode === "foundation_material_area";
   const spaceConfigCopy = getSpaceConfigModeCopy(editingTemplate?.quoteConfig.mode || DEFAULT_PRICING_MODE);
+  const packageScopeItemCounts = useMemo(() => {
+    const counts: Record<TemplatePackageScope, number> = { included: 0, extra: 0 };
+    (editingTemplate?.spaces || []).forEach((space) => {
+      space.quotaItems.forEach((item) => {
+        counts[normalizeTemplatePackageScope(item.packageScope)] += 1;
+      });
+    });
+    return counts;
+  }, [editingTemplate?.spaces]);
   const templateProjectGroups = getTemplateProjectGroups(editingTemplate);
   const activeSpaceProjectGroups = getSpaceProjectGroups(activeSpace, templateProjectGroups);
   const templateQuantityEditorSpace = templateQuantityEditor
@@ -1069,7 +1147,11 @@ export default function QuotaTemplatesPage() {
   const templateQuantityLinkItems = useMemo<Array<TemplateSpaceQuota & QuotationQuantityLinkItem>>(() => {
     if (!templateQuantityEditorSpace || !templateQuantityEditor) return [];
     return templateQuantityEditorSpace.quotaItems
-      .filter((item) => normalizeQuotaScope(item.quoteScope) === normalizeQuotaScope(templateQuantityEditor.scope))
+      .filter((item) => {
+        if (normalizeQuotaScope(item.quoteScope) !== normalizeQuotaScope(templateQuantityEditor.scope)) return false;
+        if (!templateQuantityEditor.packageScope) return true;
+        return normalizeTemplatePackageScope(item.packageScope) === templateQuantityEditor.packageScope;
+      })
       .map((item) => ({
         ...item,
         category: normalizeQuotaScope(item.quoteScope),
@@ -1222,6 +1304,7 @@ export default function QuotaTemplatesPage() {
     openedTemplatePayloadRef.current = getTemplateDirtyPayload(template);
     setEditingMode("create");
     setEditingTemplate(template);
+    setActivePackageScope("included");
     setActiveSpaceId(template.spaces[0]?.id || "");
     setActiveQuotaScope("foundation");
     setQuotaPickerTarget(null);
@@ -1239,6 +1322,7 @@ export default function QuotaTemplatesPage() {
     openedTemplatePayloadRef.current = getTemplateDirtyPayload(template);
     setEditingMode("edit");
     setEditingTemplate(template);
+    setActivePackageScope("included");
     setActiveSpaceId(template.spaces[0]?.id || "");
     setActiveQuotaScope("foundation");
     setQuotaPickerTarget(null);
@@ -1532,6 +1616,59 @@ export default function QuotaTemplatesPage() {
           ...current.quoteConfig,
           areaTiers: nextTiers.length > 0 ? nextTiers : normalizeAreaPricingTiers([], current.quoteConfig),
           areaUnitPrice: nextTiers[0]?.unitPrice ?? current.quoteConfig.areaUnitPrice,
+        }),
+      };
+    });
+  };
+
+  const updateAreaOverageRule = (ruleId: string, patch: Partial<AreaOverageRule>) => {
+    setEditingTemplate((current) => {
+      if (!current) return current;
+      const overageRules = current.quoteConfig.overageRules.map((rule) => {
+        if (rule.id !== ruleId) return rule;
+        return {
+          ...rule,
+          ...patch,
+          name: patch.name !== undefined ? String(patch.name || "").trimStart() : rule.name,
+          includedQuantity: patch.includedQuantity !== undefined ? toAmount(patch.includedQuantity) : rule.includedQuantity,
+          unit: patch.unit !== undefined ? String(patch.unit || "").trimStart() : rule.unit,
+          unitPrice: patch.unitPrice !== undefined ? toAmount(patch.unitPrice) : rule.unitPrice,
+        };
+      });
+      return {
+        ...current,
+        quoteConfig: makeDefaultQuoteConfig({
+          ...current.quoteConfig,
+          overageRules,
+        }),
+      };
+    });
+  };
+
+  const addAreaOverageRule = () => {
+    setEditingTemplate((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        quoteConfig: makeDefaultQuoteConfig({
+          ...current.quoteConfig,
+          overageRules: [
+            ...current.quoteConfig.overageRules,
+            makeAreaOverageRule({ name: "卫生间超标加价", includedQuantity: 1, unit: "个", unitPrice: 0 }),
+          ],
+        }),
+      };
+    });
+  };
+
+  const removeAreaOverageRule = (ruleId: string) => {
+    setEditingTemplate((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        quoteConfig: makeDefaultQuoteConfig({
+          ...current.quoteConfig,
+          overageRules: current.quoteConfig.overageRules.filter((rule) => rule.id !== ruleId),
         }),
       };
     });
@@ -1851,17 +1988,18 @@ export default function QuotaTemplatesPage() {
   };
 
   const addSpace = () => {
+    const scopedSpaces = isAreaPackageMode ? visibleTemplateSpaces : (editingTemplate?.spaces || []);
     const existingNames = new Set([
-      ...(editingTemplate?.spaces || []).map((space) => normalizeTemplateScopeName(space.name)),
+      ...scopedSpaces.map((space) => normalizeTemplateScopeName(space.name)),
       ...getTemplateProjectGroups(editingTemplate).map((group) => normalizeTemplateScopeName(group.name)),
     ].filter(Boolean));
-    let index = (editingTemplate?.spaces.length || 0) + 1;
+    let index = scopedSpaces.length + 1;
     let nextName = `空间${index}`;
     while (existingNames.has(normalizeTemplateScopeName(nextName))) {
       index += 1;
       nextName = `空间${index}`;
     }
-    const nextSpace = makeSpace(nextName);
+    const nextSpace = makeSpace(nextName, isAreaPackageMode ? activePackageScope : undefined);
     setEditingTemplate((current) => current ? {
       ...current,
       spaces: [...current.spaces, nextSpace],
@@ -1872,7 +2010,11 @@ export default function QuotaTemplatesPage() {
   const copySpace = (spaceId: string) => {
     const source = editingTemplate?.spaces.find((space) => space.id === spaceId);
     if (!source || !editingTemplate) return;
-    const nextSpace = makeSpaceCopy(source, editingTemplate.spaces);
+    const scopedSpaces = isAreaPackageMode ? visibleTemplateSpaces : editingTemplate.spaces;
+    const nextSpace = {
+      ...makeSpaceCopy(source, scopedSpaces),
+      ...(isAreaPackageMode ? { packageScope: activePackageScope } : {}),
+    };
     setEditingTemplate((current) => {
       if (!current) return current;
       const sourceIndex = current.spaces.findIndex((space) => space.id === spaceId);
@@ -1959,8 +2101,13 @@ export default function QuotaTemplatesPage() {
   const getSpaceNameConflictMessage = (spaceId: string, value: string) => {
     const nextName = normalizeTemplateScopeName(value);
     if (!nextName) return "空间名称不能为空";
+    const currentSpace = editingTemplate?.spaces.find((space) => space.id === spaceId) || null;
+    const currentPackageScope = currentSpace ? getTemplateSpaceFallbackPackageScope(currentSpace) : activePackageScope;
+    const spacesForConflict = isAreaPackageMode
+      ? (editingTemplate?.spaces || []).filter((space) => templateSpaceBelongsToPackageScope(space, currentPackageScope))
+      : (editingTemplate?.spaces || []);
     const duplicate = (
-      (editingTemplate?.spaces || []).some((space) => (
+      spacesForConflict.some((space) => (
         space.id !== spaceId && normalizeTemplateScopeName(space.name) === nextName
       ))
       || getTemplateProjectGroups(editingTemplate).some((group) => normalizeTemplateScopeName(group.name) === nextName)
@@ -2020,7 +2167,7 @@ export default function QuotaTemplatesPage() {
   };
 
   const removeSpace = (spaceId: string) => {
-    const remainingSpaces = editingTemplate?.spaces.filter((space) => space.id !== spaceId) || [];
+    const remainingSpaces = visibleTemplateSpaces.filter((space) => space.id !== spaceId);
     setEditingTemplate((current) => current ? {
       ...current,
       spaces: current.spaces.filter((space) => space.id !== spaceId),
@@ -2032,11 +2179,13 @@ export default function QuotaTemplatesPage() {
   const addQuotaToSpace = (spaceId: string, quoteScope: TemplateSpaceQuotaScope) => {
     setActiveSpaceId(spaceId);
     setActiveQuotaScope(quoteScope);
+    const packageScope = editingTemplate?.quoteConfig.mode === "area" ? activePackageScope : undefined;
     if (quoteScope !== "foundation") {
       const groupName = getProjectGroupName(templateProjectGroups, quoteScope);
       const nextItem = makeSpaceQuotaItem({
         category: groupName,
         quoteScope,
+        packageScope,
       });
       setEditingTemplate((current) => current ? {
         ...current,
@@ -2057,13 +2206,13 @@ export default function QuotaTemplatesPage() {
     setQuotaLibraryItems([]);
     setQuotaLibraryStoreOptions([]);
     setQuotaLibraryError("");
-    setQuotaPickerTarget({ spaceId, quoteScope });
     setQuotaPickerSearch("");
     setQuotaPickerCategory("");
     setQuotaPickerPriceScene("");
     setQuotaPickerStore("");
     setPickedQuotaIds([]);
     resetCustomQuotaDraft();
+    setQuotaPickerTarget({ spaceId, quoteScope, packageScope });
     void loadQuotaLibraryOptions(editingTemplateBranchId);
   };
 
@@ -2095,6 +2244,67 @@ export default function QuotaTemplatesPage() {
     } : current);
   };
 
+  const moveSpaceQuotaToPackageScope = (
+    sourceSpaceId: string,
+    quotaItemId: string,
+    targetPackageScope: TemplatePackageScope,
+  ) => {
+    let nextActiveSpaceId = "";
+    let nextActiveQuotaScope = activeQuotaScope;
+    setEditingTemplate((current) => {
+      if (!current) return current;
+      const sourceSpace = current.spaces.find((space) => space.id === sourceSpaceId);
+      const sourceItem = sourceSpace?.quotaItems.find((item) => item.id === quotaItemId);
+      if (!sourceSpace || !sourceItem) return current;
+
+      const movedItem = { ...sourceItem, packageScope: targetPackageScope };
+      const sourceNameKey = normalizeTemplateScopeName(sourceSpace.name);
+      const existingTargetSpace = current.spaces.find((space) => (
+        space.id !== sourceSpaceId
+        && templateSpaceBelongsToPackageScope(space, targetPackageScope)
+        && normalizeTemplateScopeName(space.name) === sourceNameKey
+      ));
+      const targetSpaceId = existingTargetSpace?.id || `space-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      nextActiveSpaceId = targetSpaceId;
+      nextActiveQuotaScope = normalizeQuotaScope(sourceItem.quoteScope);
+      let insertedTarget = false;
+      const nextSpaces = current.spaces.flatMap((space) => {
+        if (space.id === sourceSpaceId) {
+          const nextSource = repairTemplateSpaceQuantityLinksAfterDeletion({
+            ...space,
+            quotaItems: space.quotaItems.filter((item) => item.id !== quotaItemId),
+          }, new Set([quotaItemId]));
+          const sourceEntries = nextSource.quotaItems.length > 0 || !isAreaPackageMode ? [nextSource] : [];
+          if (existingTargetSpace) return sourceEntries;
+          insertedTarget = true;
+          return [
+            ...sourceEntries,
+            {
+              id: targetSpaceId,
+              name: space.name,
+              packageScope: targetPackageScope,
+              projectGroupIds: uniqueProjectGroupIds([...(space.projectGroupIds || []), normalizeQuotaScope(sourceItem.quoteScope)]),
+              quotaItems: [movedItem],
+            },
+          ];
+        }
+        if (existingTargetSpace && space.id === existingTargetSpace.id) {
+          return [{
+            ...withSpaceProjectGroup(space, normalizeQuotaScope(sourceItem.quoteScope)),
+            packageScope: targetPackageScope,
+            quotaItems: [...space.quotaItems, movedItem],
+          }];
+        }
+        return [space];
+      });
+      return { ...current, spaces: insertedTarget ? nextSpaces : nextSpaces };
+    });
+    setActivePackageScope(targetPackageScope);
+    if (nextActiveSpaceId) setActiveSpaceId(nextActiveSpaceId);
+    setActiveQuotaScope(nextActiveQuotaScope);
+    setTemplateQuantityEditor(null);
+  };
+
   const applyQuotaSourceUpdates = () => {
     if (quotaSourceUpdates.length === 0) return;
     const updateMap = new Map(quotaSourceUpdates.map((update) => [`${update.spaceId}:${update.itemId}`, update]));
@@ -2106,7 +2316,7 @@ export default function QuotaTemplatesPage() {
           const update = updateMap.get(`${space.id}:${item.id}`);
           if (!update) return item;
           const patch: Partial<TemplateSpaceQuota> = {};
-          const hasPriceOverride = shouldPreserveTemplateQuotaField(item, "laborPrice") || shouldPreserveTemplateQuotaField(item, "materialPrice");
+          const hasPriceOverride = item.pricingMode === "single" ? shouldPreserveTemplateQuotaField(item, "totalPrice") : shouldPreserveTemplateQuotaField(item, "laborPrice") || shouldPreserveTemplateQuotaField(item, "materialPrice");
           update.changedFields.forEach((field) => {
             if (field === "totalPrice" && hasPriceOverride) return;
             if (!shouldPreserveTemplateQuotaField(item, field)) (patch as any)[field] = (update.latest as any)[field];
@@ -2145,8 +2355,15 @@ export default function QuotaTemplatesPage() {
     const item = space?.quotaItems.find((quotaItem) => quotaItem.id === quotaItemId);
     if (!space || !item) return;
     const scope = normalizeQuotaScope(item.quoteScope);
+    const packageScope = editingTemplate?.quoteConfig.mode === "area"
+      ? normalizeTemplatePackageScope(item.packageScope)
+      : undefined;
     const scopedItems = space.quotaItems
-      .filter((quotaItem) => normalizeQuotaScope(quotaItem.quoteScope) === scope)
+      .filter((quotaItem) => {
+        if (normalizeQuotaScope(quotaItem.quoteScope) !== scope) return false;
+        if (!packageScope) return true;
+        return normalizeTemplatePackageScope(quotaItem.packageScope) === packageScope;
+      })
       .map((quotaItem) => ({
         ...quotaItem,
         category: scope,
@@ -2159,6 +2376,7 @@ export default function QuotaTemplatesPage() {
       spaceId,
       itemId: quotaItemId,
       scope,
+      packageScope,
       text: formula ? formatQuotationQuantityFormulaRows(scopedItems, formula).replace(/^=/, "") : "",
       lastInsertedRange: null,
     });
@@ -2683,7 +2901,8 @@ export default function QuotaTemplatesPage() {
       constructionDescription: quota.constructionDescription,
       unit: quota.unit,
       quoteScope: quoteScope || normalizeQuotaScope("", `${quota.category}${quota.name}${quota.constructionDescription}`),
-      laborPrice: quota.laborPrice,
+      pricingMode: quota.pricingMode,
+    laborPrice: quota.laborPrice,
       materialPrice: quota.materialPrice,
       totalPrice: quota.totalPrice,
       isSpecialPrice: quota.isSpecialPrice,
@@ -2695,7 +2914,8 @@ export default function QuotaTemplatesPage() {
         name: quota.name,
         constructionDescription: quota.constructionDescription,
         unit: quota.unit,
-        laborPrice: quota.laborPrice,
+        pricingMode: quota.pricingMode,
+    laborPrice: quota.laborPrice,
         materialPrice: quota.materialPrice,
         totalPrice: quota.totalPrice,
         isSpecialPrice: quota.isSpecialPrice,
@@ -2731,7 +2951,10 @@ export default function QuotaTemplatesPage() {
       spaces: current.spaces.map((space) => {
         if (space.id !== quotaPickerTarget.spaceId) return space;
         const nextItems = pickedQuotas
-          .map((quota) => makeQuotaItemFromLibrary(quota, quotaPickerTarget.quoteScope));
+          .map((quota) => ({
+            ...makeQuotaItemFromLibrary(quota, quotaPickerTarget.quoteScope),
+            packageScope: quotaPickerTarget.packageScope,
+          }));
         return { ...withSpaceProjectGroup(space, quotaPickerTarget.quoteScope), quotaItems: [...space.quotaItems, ...nextItems] };
       }),
     } : current);
@@ -2758,9 +2981,11 @@ export default function QuotaTemplatesPage() {
       constructionDescription: customQuotaDraft.constructionDescription.trim(),
       unit: customQuotaDraft.unit.trim(),
       quoteScope: quotaPickerTarget.quoteScope,
+      packageScope: quotaPickerTarget.packageScope,
       laborPrice,
       materialPrice,
-      totalPrice: typedTotalPrice > 0 ? typedTotalPrice : laborPrice + materialPrice,
+      pricingMode: splitCustomerPrice ? "split" : "single",
+      totalPrice: splitCustomerPrice ? (typedTotalPrice > 0 ? typedTotalPrice : laborPrice + materialPrice) : typedTotalPrice,
       isSpecialPrice: customQuotaDraft.isSpecialPrice,
     });
 
@@ -3097,6 +3322,15 @@ export default function QuotaTemplatesPage() {
             foundationUnitPrice: toAmount(tier.foundationUnitPrice),
             materialUnitPrice: toAmount(tier.materialUnitPrice),
           })),
+        overageRules: normalizeAreaOverageRules(editingTemplate.quoteConfig.overageRules)
+          .map((rule) => ({
+            ...rule,
+            name: rule.name.trim(),
+            includedQuantity: toAmount(rule.includedQuantity),
+            unit: rule.unit.trim() || "个",
+            unitPrice: toAmount(rule.unitPrice),
+          }))
+          .filter((rule) => rule.name),
         minChargeAmount: toAmount(editingTemplate.quoteConfig.minChargeAmount),
         calculationNote: editingTemplate.quoteConfig.calculationNote.trim(),
       },
@@ -3319,8 +3553,8 @@ export default function QuotaTemplatesPage() {
                     <td className="px-3 py-3 text-surface-700">
                       <p className="line-clamp-2 leading-5" title={template.remark || undefined}>{template.remark || "-"}</p>
                     </td>
-                    <td className="px-3 py-3 text-center text-surface-500">{template.updatedAt}</td>
-                    <td className="px-3 py-3 text-center text-surface-500">{template.createdAt || template.updatedAt}</td>
+                    <td className="px-3 py-3 text-center text-surface-500"><TemplateTimestamp value={template.updatedAt} /></td>
+                    <td className="px-3 py-3 text-center text-surface-500"><TemplateTimestamp value={template.createdAt || template.updatedAt} /></td>
                     <td className="px-3 py-3 text-center">
                       <span className={`quota-status-tag ${isDisabled ? "quota-status-tag-disabled" : "quota-status-tag-enabled"} inline-flex h-6 items-center rounded-full border px-2 text-xs font-semibold ${getTemplateStatusBadgeClass(template.status)}`}>
                         {getTemplateStatusLabel(template.status)}
@@ -3629,11 +3863,15 @@ export default function QuotaTemplatesPage() {
                       </div>
 
                       <div className="space-y-3 p-4">
+                        <div className="quota-area-tier-head" aria-hidden="true">
+                          <span>面积阶梯</span><span>计价面积范围（㎡）</span><span>销售单价（元/㎡）</span><span />
+                        </div>
                         {editingTemplate.quoteConfig.areaTiers.map((tier, tierIndex) => {
                           const tierStartArea = getAreaTierStartArea(editingTemplate.quoteConfig, tierIndex);
                           return (
-                            <div key={tier.id} className="grid gap-3 rounded-md bg-surface-50 md:grid-cols-[96px_130px_auto_130px_300px_minmax(0,1fr)_40px] md:items-center">
+                            <div key={tier.id} className="quota-area-tier-row">
                               <span className="text-sm font-medium text-surface-600"><span className="mr-1 text-red-500">*</span>{getPackageTierLabel(tierIndex)}</span>
+                              <div className="quota-area-tier-range">
                               <input
                                 type="text"
                                 value={formatTemplateNumberInputValue(tierStartArea)}
@@ -3641,15 +3879,17 @@ export default function QuotaTemplatesPage() {
                                 className="input-field h-9 bg-surface-100 py-1.5 text-right tabular-nums text-surface-500"
                                 title="起始面积自动取 0 或上一阶梯面积"
                               />
-                              <span className="text-center text-sm font-medium text-surface-600">&lt; 面积(㎡) ≤</span>
+                              <span className="whitespace-nowrap text-center text-sm font-medium text-surface-600">&lt; 面积 ≤</span>
                               <input
                                 type="text"
                                 placeholder="0"
                                 {...getTemplateNumberInputProps(`quote.areaTiers.${tier.id}.maxArea`, tier.maxArea, (value) => updateAreaTier(tier.id, { maxArea: value }))}
                                 className="input-field h-9 py-1.5 text-right tabular-nums"
+                                aria-label={`${getPackageTierLabel(tierIndex)}上限面积（㎡）`}
                               />
-                              <label className="grid gap-2 md:grid-cols-[auto_130px] md:items-center">
-                                <span className="whitespace-nowrap text-sm font-medium text-surface-600"><span className="mr-1 text-red-500">*</span>销售单价(元/㎡) =</span>
+                              </div>
+                              <label className="quota-area-tier-price">
+                                <span className="text-sm font-medium text-surface-600"><span className="mr-1 text-red-500">*</span>销售单价（元/㎡）</span>
                                 <input
                                   type="text"
                                   placeholder="0"
@@ -3661,14 +3901,92 @@ export default function QuotaTemplatesPage() {
                                 type="button"
                                 onClick={() => removeAreaTier(tier.id)}
                                 disabled={editingTemplate.quoteConfig.areaTiers.length <= 1}
-                                className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-red-100 bg-white text-red-500 transition hover:border-red-200 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-30 md:col-start-7"
+                                className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-red-100 bg-white text-red-500 transition hover:border-red-200 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-30"
                                 title="删除阶梯"
+                                aria-label={`删除${getPackageTierLabel(tierIndex)}`}
                               >
                                 <Trash2 className="h-3.5 w-3.5" />
                               </button>
                             </div>
                           );
                         })}
+
+                        <div className="quota-overage-config">
+                          <div className="quota-overage-config-header">
+                            <div>
+                              <p className="text-sm font-semibold text-surface-900">超标加价规则</p>
+                              <p className="mt-1 text-xs leading-5 text-surface-500">超出套餐包含数量时，按超出单价收取费用。</p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={addAreaOverageRule}
+                              className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-primary-100 bg-primary-50 px-3 text-xs font-semibold text-primary-700 transition hover:border-primary-200 hover:bg-primary-100"
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                              添加规则
+                            </button>
+                          </div>
+                          {editingTemplate.quoteConfig.overageRules.length > 0 && <div className="quota-overage-column-head" aria-hidden="true"><span>加价项目</span><span>套餐包含数量</span><span>单位</span><span>超出单价（元/单位）</span><span /></div>}
+                          <div className="quota-overage-rows">
+                            {editingTemplate.quoteConfig.overageRules.length > 0 ? editingTemplate.quoteConfig.overageRules.map((rule, ruleIndex) => (
+                              <div key={rule.id} className="quota-overage-row">
+                                <label className="grid gap-1.5">
+                                  <span className="text-xs font-semibold text-surface-500">加价项目</span>
+                                  <input
+                                    type="text"
+                                    value={rule.name}
+                                    onChange={(event) => updateAreaOverageRule(rule.id, { name: event.target.value })}
+                                    onBlur={(event) => updateAreaOverageRule(rule.id, { name: event.target.value.trim() || `超标加价${ruleIndex + 1}` })}
+                                    className="input-field h-9 py-1.5"
+                                    placeholder="如：卫生间超标加价"
+                                  />
+                                </label>
+                                <label className="grid gap-1.5">
+                                  <span className="text-xs font-semibold text-surface-500">套餐包含数量</span>
+                                  <input
+                                    type="text"
+                                    placeholder="0"
+                                    {...getTemplateNumberInputProps(`quote.overageRules.${rule.id}.includedQuantity`, rule.includedQuantity, (value) => updateAreaOverageRule(rule.id, { includedQuantity: value }))}
+                                    className="input-field h-9 py-1.5 text-right tabular-nums"
+                                  />
+                                </label>
+                                <label className="grid gap-1.5">
+                                  <span className="text-xs font-semibold text-surface-500">单位</span>
+                                  <input
+                                    type="text"
+                                    value={rule.unit}
+                                    onChange={(event) => updateAreaOverageRule(rule.id, { unit: event.target.value })}
+                                    onBlur={(event) => updateAreaOverageRule(rule.id, { unit: event.target.value.trim() || "个" })}
+                                    className="input-field h-9 py-1.5 text-center"
+                                    placeholder="个"
+                                  />
+                                </label>
+                                <label className="grid gap-1.5">
+                                  <span className="text-xs font-semibold text-surface-500">超出单价（元/单位）</span>
+                                  <input
+                                    type="text"
+                                    placeholder="0"
+                                    {...getTemplateNumberInputProps(`quote.overageRules.${rule.id}.unitPrice`, rule.unitPrice, (value) => updateAreaOverageRule(rule.id, { unitPrice: value }))}
+                                    className="input-field h-9 py-1.5 text-right tabular-nums"
+                                  />
+                                </label>
+                                <button
+                                  type="button"
+                                  onClick={() => removeAreaOverageRule(rule.id)}
+                                  className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-red-100 bg-white text-red-500 transition hover:border-red-200 hover:bg-red-50"
+                                  title="删除加价规则"
+                                  aria-label={`删除${rule.name || "加价项目"}规则`}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            )) : (
+                              <div className="py-4 text-sm text-surface-500">
+                                暂无规则
+                              </div>
+                            )}
+                          </div>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -3794,10 +4112,38 @@ export default function QuotaTemplatesPage() {
                     </span>
                     <span className="quota-template-mode-copy min-w-0 flex-1 text-primary-700">{spaceConfigCopy.notice}</span>
                   </div>
-                  {editingTemplate.spaces.length === 0 ? (
+                  {isAreaPackageMode && (
+                    <div className="quota-template-package-scope-switch" role="tablist" aria-label="套餐项目范围">
+                      {packageScopeOptions.map((option) => {
+                        const active = activePackageScope === option.value;
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            role="tab"
+                            aria-selected={active}
+                            data-active={active || undefined}
+                            onClick={() => setActivePackageScope(option.value)}
+                            className="quota-template-package-scope-option"
+                          >
+                            <span className="quota-template-package-scope-title">
+                              {option.title}
+                              <span>{packageScopeItemCounts[option.value]}</span>
+                            </span>
+                            <span className="quota-template-package-scope-desc">{option.description}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {visibleTemplateSpaces.length === 0 ? (
                     <div className="quota-template-space-empty flex min-h-24 flex-col items-center justify-center rounded-lg border border-dashed border-surface-300 bg-surface-50 px-4 text-center">
                       <p className="text-sm font-semibold text-surface-700">暂无空间</p>
-                      <p className="mt-1 text-xs text-surface-500">添加空间后，再维护基装、主材或自定义项目分组。</p>
+                      <p className="mt-1 text-xs text-surface-500">
+                        {isAreaPackageMode
+                          ? `${activePackageScope === "extra" ? "套餐外另计项目" : "套餐内项目"}暂无空间，添加后再维护项目分组。`
+                          : "添加空间后，再维护基装、主材或自定义项目分组。"}
+                      </p>
                       <button type="button" onClick={addSpace} className="btn-secondary mt-3 min-h-8 px-2.5 text-xs">
                         <Plus className="h-3.5 w-3.5" />
                         添加空间
@@ -3812,8 +4158,11 @@ export default function QuotaTemplatesPage() {
                         </div>
                       <div className="quota-template-space-toolbar pb-1">
                         <div className="quota-template-space-toolbar-inner flex flex-wrap items-center gap-2 border-b border-surface-200 pb-3">
-                          {editingTemplate.spaces.map((space, spaceIndex) => {
+                          {visibleTemplateSpaces.map((space, spaceIndex) => {
                             const isActive = activeSpace?.id === space.id;
+                            const visibleItemCount = isAreaPackageMode
+                              ? space.quotaItems.filter((item) => normalizeTemplatePackageScope(item.packageScope) === activePackageScope).length
+                              : space.quotaItems.length;
                             const spaceNameDraft = spaceNameDrafts[space.id];
                             const displayedSpaceName = spaceNameDraft ?? space.name;
                             const spaceNameError = spaceNameDraft !== undefined
@@ -3873,7 +4222,7 @@ export default function QuotaTemplatesPage() {
                                   placeholder={`空间${spaceIndex + 1}`}
                                   title={spaceNameError || undefined}
                                 />
-                                <span className="quota-template-space-item-count">{space.quotaItems.length}</span>
+                                <span className="quota-template-space-item-count">{visibleItemCount}</span>
                               </div>
                             );
                           })}
@@ -3952,7 +4301,10 @@ export default function QuotaTemplatesPage() {
                             </div>
                           );
                         }
-                        const sectionItems = activeSpace.quotaItems.filter((item) => normalizeQuotaScope(item.quoteScope) === activeSection.scope);
+                        const sectionItems = activeSpace.quotaItems.filter((item) => (
+                          normalizeQuotaScope(item.quoteScope) === activeSection.scope
+                          && (!isAreaPackageMode || normalizeTemplatePackageScope(item.packageScope) === activePackageScope)
+                        ));
                         const isMainMaterialSection = activeSection.scope === "main_material";
                         const isEmptyMainMaterialItem = (item: TemplateSpaceQuota) => !item.code.trim() && !item.name.trim() && !item.unit.trim() && !item.constructionDescription.trim() && Number(item.totalPrice || 0) === 0;
 
@@ -3969,7 +4321,10 @@ export default function QuotaTemplatesPage() {
                                   <div className="quota-template-project-group-tabs">
                                     {quotaScopeSections.map((section) => {
                                       const isActive = activeSection.scope === section.scope;
-                                      const sectionCount = activeSpace.quotaItems.filter((item) => normalizeQuotaScope(item.quoteScope) === section.scope).length;
+                                      const sectionCount = activeSpace.quotaItems.filter((item) => (
+                                        normalizeQuotaScope(item.quoteScope) === section.scope
+                                        && (!isAreaPackageMode || normalizeTemplatePackageScope(item.packageScope) === activePackageScope)
+                                      )).length;
                                       const dropBefore = dragOverProjectGroup?.id === section.scope && dragOverProjectGroup.position === "before";
                                       const dropAfter = dragOverProjectGroup?.id === section.scope && dragOverProjectGroup.position === "after";
                                       const isDragging = draggingProjectGroupId === section.scope;
@@ -4072,8 +4427,8 @@ export default function QuotaTemplatesPage() {
                                     <col className="w-[5%]" />
                                     <col className="w-[12%]" />
                                     <col className="w-[10%]" />
-                                    <col className="w-[36%]" />
-                                    <col className="w-[8%]" />
+                                    <col className="w-[32%]" />
+                                    <col className="w-[12%]" />
                                   </colgroup>
                                 ) : (
                                   <colgroup>
@@ -4083,8 +4438,8 @@ export default function QuotaTemplatesPage() {
                                     <col className="w-[5%]" />
                                     <col className="w-[12%]" />
                                     <col className="w-[8%]" />
-                                    <col className="w-[27%]" />
-                                    <col className="w-[6%]" />
+                                    <col className="w-[24%]" />
+                                    <col className="w-[10%]" />
                                   </colgroup>
                                 )}
                                 <thead className="bg-white text-xs font-semibold text-surface-600">
@@ -4130,7 +4485,8 @@ export default function QuotaTemplatesPage() {
                                     const isQuantityPicking = Boolean(
                                       templateQuantityEditor
                                       && templateQuantityEditor.spaceId === activeSpace.id
-                                      && normalizeQuotaScope(templateQuantityEditor.scope) === normalizeQuotaScope(activeSection.scope),
+                                      && normalizeQuotaScope(templateQuantityEditor.scope) === normalizeQuotaScope(activeSection.scope)
+                                      && (!templateQuantityEditor.packageScope || templateQuantityEditor.packageScope === activePackageScope),
                                     );
                                     const isQuantityTarget = isQuantityPicking && templateQuantityEditor?.itemId === item.id;
                                     const canPickQuantityReference = isQuantityPicking
@@ -4143,6 +4499,9 @@ export default function QuotaTemplatesPage() {
                                           ? "available"
                                           : "mismatch"
                                       : undefined;
+                                    const hidePackageIncludedPrice = isAreaPackageMode && activePackageScope === "included";
+                                    const oppositePackageScope: TemplatePackageScope = activePackageScope === "included" ? "extra" : "included";
+                                    const movePackageScopeText = activePackageScope === "included" ? "移至套餐外" : "移至套餐内";
                                     return (
                                     <tr
                                       key={item.id}
@@ -4234,17 +4593,22 @@ export default function QuotaTemplatesPage() {
                                             quantityFormula: null,
                                           }, { markOverride: false })}
                                           onOpenFormula={() => openTemplateQuantityEditor(activeSpace.id, item.id)}
+                                          placeholderWhenZero={isAreaPackageMode && activePackageScope === "included"}
                                         />
                                       </td>
                                       {isMainMaterialSection ? (
                                         <>
-                                          <td className="px-2 py-2 text-right tabular-nums text-surface-700">
-                                            <input
-                                              type="text"
-                                              {...getTemplateNumberInputProps(`spaceQuota.${activeSpace.id}.${item.id}.totalPrice`, item.totalPrice, (value) => updateSpaceQuota(activeSpace.id, item.id, { totalPrice: value }))}
-                                              className="quota-template-project-plain-input h-8 w-full bg-transparent text-right text-xs font-medium tabular-nums text-surface-700 outline-none"
-                                            />
-                                            {!isEmptyMainMaterialItem(item) && item.isSpecialPrice && (
+                                          <td className="px-2 py-2 text-right tabular-nums text-surface-700" title={hidePackageIncludedPrice ? "套餐内项目已包含在平方套餐价中" : undefined}>
+                                            {hidePackageIncludedPrice ? (
+                                              <span className="quota-template-project-price-placeholder">-</span>
+                                            ) : (
+                                              <input
+                                                type="text"
+                                                {...getTemplateNumberInputProps(`spaceQuota.${activeSpace.id}.${item.id}.totalPrice`, item.totalPrice, (value) => updateSpaceQuota(activeSpace.id, item.id, { totalPrice: value }))}
+                                                className="quota-template-project-plain-input h-8 w-full bg-transparent text-right text-xs font-medium tabular-nums text-surface-700 outline-none"
+                                              />
+                                            )}
+                                            {!hidePackageIncludedPrice && !isEmptyMainMaterialItem(item) && item.isSpecialPrice && (
                                               <span className="quota-template-project-special-mark" title="特价项目">特</span>
                                             )}
                                           </td>
@@ -4258,9 +4622,13 @@ export default function QuotaTemplatesPage() {
                                         </>
                                       ) : (
                                         <>
-                                          <td className={`${spaceConfigCopy.priceClassName} quota-template-project-price-cell`} title={spaceConfigCopy.priceTitle}>
-                                            <span className="quota-template-project-price-value">{formatAmount(item.totalPrice)}</span>
-                                            {item.isSpecialPrice && (
+                                          <td className={`${spaceConfigCopy.priceClassName} quota-template-project-price-cell`} title={hidePackageIncludedPrice ? "套餐内项目已包含在平方套餐价中" : spaceConfigCopy.priceTitle}>
+                                            {hidePackageIncludedPrice ? (
+                                              <span className="quota-template-project-price-placeholder">-</span>
+                                            ) : (
+                                              <span className="quota-template-project-price-value">{formatAmount(item.totalPrice)}</span>
+                                            )}
+                                            {!hidePackageIncludedPrice && item.isSpecialPrice && (
                                               <span className="quota-template-project-special-mark" title="特价项目">特</span>
                                             )}
                                           </td>
@@ -4270,7 +4638,18 @@ export default function QuotaTemplatesPage() {
                                         </>
                                       )}
                                       <td className="px-2 py-2 text-center">
-                                        <div className="inline-flex items-center justify-center gap-1">
+                                        <div className="quota-template-package-action-group">
+                                          {isAreaPackageMode && (
+                                            <button
+                                              type="button"
+                                              onClick={() => moveSpaceQuotaToPackageScope(activeSpace.id, item.id, oppositePackageScope)}
+                                              className="quota-template-package-scope-move"
+                                              title={movePackageScopeText}
+                                            >
+                                              <ArrowRightLeft className="h-3.5 w-3.5" />
+                                              {movePackageScopeText}
+                                            </button>
+                                          )}
                                           <button type="button" onClick={() => removeSpaceQuota(activeSpace.id, item.id)} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-red-100 bg-white text-red-500 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600" title="删除定额">
                                             <Trash2 className="h-3.5 w-3.5" />
                                           </button>
@@ -4967,6 +5346,7 @@ export default function QuotaTemplatesPage() {
                       </div>
                       <span className="quote-library-target-pill max-w-full truncate">
                         {editingTemplateBranchName || "适用分公司"} · {activeSpace?.name || "当前空间"} · {getProjectGroupName(templateProjectGroups, quotaPickerTarget.quoteScope)}
+                        {quotaPickerTarget.packageScope ? ` · ${quotaPickerTarget.packageScope === "extra" ? "套餐外另计" : "套餐内包含"}` : ""}
                       </span>
                     </div>
                   </div>
@@ -5086,20 +5466,20 @@ export default function QuotaTemplatesPage() {
                             placeholder="㎡/项"
                           />
                         </label>
-                        <label className="space-y-1">
+                        {splitCustomerPrice && <label className="space-y-1">
                           <span className="text-xs font-semibold text-surface-600">人工单价</span>
                           <input
                             {...getTemplateNumberInputProps("customQuota.laborPrice", customQuotaDraft.laborPrice, (value) => setCustomQuotaDraft((current) => ({ ...current, laborPrice: value })))}
                             className="input-field h-9 py-0 text-right tabular-nums"
                           />
-                        </label>
-                        <label className="space-y-1">
+                        </label>}
+                        {splitCustomerPrice && <label className="space-y-1">
                           <span className="text-xs font-semibold text-surface-600">材料单价</span>
                           <input
                             {...getTemplateNumberInputProps("customQuota.materialPrice", customQuotaDraft.materialPrice, (value) => setCustomQuotaDraft((current) => ({ ...current, materialPrice: value })))}
                             className="input-field h-9 py-0 text-right tabular-nums"
                           />
-                        </label>
+                        </label>}
                         <label className="space-y-1">
                           <span className="text-xs font-semibold text-surface-600">客户单价</span>
                           <input
@@ -5170,8 +5550,7 @@ export default function QuotaTemplatesPage() {
                           <col style={{ width: 300 }} />
                           <col style={{ width: 112 }} />
                           <col style={{ width: 72 }} />
-                          <col style={{ width: 112 }} />
-                          <col style={{ width: 112 }} />
+                          {splitCustomerPrice && <><col style={{ width: 112 }} /><col style={{ width: 112 }} /></>}
                           <col style={{ width: 112 }} />
                           <col style={{ width: 520 }} />
                           <col style={{ width: 172 }} />
@@ -5183,9 +5562,9 @@ export default function QuotaTemplatesPage() {
                             <th className="quote-library-sticky-name px-3 py-0 whitespace-nowrap">项目名称</th>
                             <th className="px-3 py-0 text-center whitespace-nowrap">价格类型</th>
                             <th className="px-3 py-0 text-center whitespace-nowrap">单位</th>
-                            <th className="px-3 py-0 text-right whitespace-nowrap">材料单价</th>
-                            <th className="px-3 py-0 text-right whitespace-nowrap">人工单价</th>
-                            <th className="px-3 py-0 text-right whitespace-nowrap">总价</th>
+                            {splitCustomerPrice && <th className="px-3 py-0 text-right whitespace-nowrap">材料单价</th>}
+                            {splitCustomerPrice && <th className="px-3 py-0 text-right whitespace-nowrap">人工单价</th>}
+                            <th className="px-3 py-0 text-right whitespace-nowrap">客户单价</th>
                             <th className="px-3 py-0 whitespace-nowrap">施工说明</th>
                             <th className="quote-library-code-column px-3 py-0 whitespace-nowrap">编号</th>
                           </tr>
@@ -5234,8 +5613,8 @@ export default function QuotaTemplatesPage() {
                               </td>
                               <td className="px-3 py-0 text-center text-[#52647b] whitespace-nowrap">{quota.priceScene || "标准"}</td>
                               <td className="px-3 py-0 text-center font-medium text-[#52647b] whitespace-nowrap">{quota.unit || "-"}</td>
-                              <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatAmount(quota.materialPrice)}</td>
-                              <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatAmount(quota.laborPrice)}</td>
+                              {splitCustomerPrice && <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{quota.pricingMode === "single" ? "-" : formatAmount(quota.materialPrice)}</td>}
+                              {splitCustomerPrice && <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{quota.pricingMode === "single" ? "-" : formatAmount(quota.laborPrice)}</td>}
                               <td className="quote-library-total-price px-3 py-0 text-right font-semibold tabular-nums whitespace-nowrap">{formatAmount(quota.totalPrice)}</td>
                               <td className="px-3 py-0">
                                 <div className="quote-library-description-cell truncate" title={quota.constructionDescription || "暂无施工说明"}>{quota.constructionDescription || "暂无施工说明"}</div>
@@ -5599,6 +5978,110 @@ export default function QuotaTemplatesPage() {
           width: 16px;
           color: #f59e0b;
           stroke-width: 2.2;
+        }
+        .quota-template-package-scope-switch {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+          margin-bottom: 10px;
+        }
+        .quota-template-package-scope-option {
+          display: flex;
+          min-height: 64px;
+          flex-direction: column;
+          align-items: flex-start;
+          justify-content: center;
+          gap: 6px;
+          border: 1px solid #dbe5f2;
+          border-radius: 12px;
+          background: #ffffff;
+          padding: 10px 12px;
+          text-align: left;
+          transition: border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+        }
+        .quota-template-package-scope-option:hover {
+          border-color: #b9cced;
+          background: #fbfdff;
+          box-shadow: 0 8px 18px rgba(15, 35, 70, 0.055);
+          transform: translateY(-1px);
+        }
+        .quota-template-package-scope-option[data-active] {
+          border-color: #79a9ff;
+          background: linear-gradient(180deg, #f7faff 0%, #edf4ff 100%);
+          box-shadow: inset 0 0 0 1px rgba(47, 111, 235, 0.08), 0 6px 14px rgba(47, 111, 235, 0.08);
+        }
+        .quota-template-package-scope-title {
+          display: inline-flex;
+          width: 100%;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          color: #182230;
+          font-size: 13px;
+          font-weight: 800;
+        }
+        .quota-template-package-scope-title span {
+          display: inline-flex;
+          min-width: 24px;
+          height: 22px;
+          align-items: center;
+          justify-content: center;
+          border-radius: 999px;
+          background: #eef3f8;
+          color: #64748b;
+          font-size: 12px;
+          font-weight: 800;
+        }
+        .quota-template-package-scope-option[data-active] .quota-template-package-scope-title {
+          color: #1d4ed8;
+        }
+        .quota-template-package-scope-option[data-active] .quota-template-package-scope-title span {
+          background: #2f6feb;
+          color: #ffffff;
+        }
+        .quota-template-package-scope-desc {
+          color: #667085;
+          font-size: 12px;
+          font-weight: 600;
+          line-height: 1.45;
+        }
+        .quota-template-package-scope-move {
+          display: inline-flex;
+          min-height: 28px;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid #dbe5f2;
+          border-radius: 7px;
+          background: #ffffff;
+          padding: 0 8px;
+          color: #407aff;
+          font-size: 12px;
+          font-weight: 700;
+          white-space: nowrap;
+          transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease;
+        }
+        .quota-template-package-scope-move:hover {
+          border-color: #aecaef;
+          background: #eef5ff;
+          color: #1d4ed8;
+        }
+        .quota-template-package-scope-move svg {
+          color: inherit;
+          stroke-width: 2.2;
+        }
+        html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table .quota-template-project-price-placeholder {
+          display: inline-flex !important;
+          min-width: 34px !important;
+          align-items: center !important;
+          justify-content: flex-end !important;
+          color: #ef4444 !important;
+          font-size: 12.5px !important;
+          font-weight: 700 !important;
+          line-height: 18px !important;
+        }
+        html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table .quota-template-quantity-input[data-placeholder="true"] {
+          color: #ef4444 !important;
+          font-weight: 700 !important;
         }
         .quota-template-space-workbench {
           display: grid;
@@ -6333,6 +6816,43 @@ export default function QuotaTemplatesPage() {
           height: 28px !important;
           width: 28px !important;
           border-radius: 7px !important;
+        }
+        .quota-template-project-board [data-template-quota-row] .quota-template-package-action-group {
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          gap: 6px !important;
+          min-width: 132px !important;
+        }
+        .quota-template-project-board [data-template-quota-row] button.quota-template-package-scope-move {
+          width: auto !important;
+          min-width: 90px !important;
+          height: 30px !important;
+          min-height: 30px !important;
+          gap: 5px !important;
+          padding: 0 10px !important;
+          border: 1px solid #cfe0ff !important;
+          border-radius: 8px !important;
+          background: #f7faff !important;
+          color: #2563eb !important;
+          box-shadow: inset 0 0 0 1px rgba(64, 122, 255, 0.03) !important;
+        }
+        .quota-template-project-board [data-template-quota-row] button.quota-template-package-scope-move:hover {
+          border-color: #8db5ff !important;
+          background: #edf4ff !important;
+          color: #1d4ed8 !important;
+        }
+        html body .dashboard-scale-root .quota-management-ui.quota-template-page .quota-template-project-board .quota-template-project-table button.quota-template-package-scope-move {
+          width: auto !important;
+          min-width: 90px !important;
+          height: 30px !important;
+          min-height: 30px !important;
+          gap: 5px !important;
+          padding: 0 10px !important;
+          border: 1px solid #cfe0ff !important;
+          border-radius: 8px !important;
+          background: #f7faff !important;
+          color: #2563eb !important;
         }
         .quota-template-project-board [data-template-quota-row] svg {
           height: 14px !important;

@@ -9,6 +9,7 @@ import { bindStableFeeFormula, normalizeFeeScopeMode, parseFeeScopeValues, type 
 import { convertComprehensiveFeesToFormulaMode } from "@/app/quota/templates/quota-templates-shared";
 
 export type QuotaTemplateSpaceQuota = {
+  packageScope?: "included" | "extra";
   id: string;
   quotaId?: string;
   code?: string;
@@ -21,6 +22,7 @@ export type QuotaTemplateSpaceQuota = {
   quantity: number;
   quantityFormula?: string | null;
   quoteScope: string;
+  pricingMode?: "split" | "single";
   laborPrice: number;
   materialPrice: number;
   totalPrice: number;
@@ -48,7 +50,10 @@ export type QuotaTemplateComprehensiveFee = {
 };
 
 export type QuotaTemplateQuoteConfig = PackageQuoteConfigInput & {
+  areaUnitPrice?: number;
+  minChargeAmount?: number;
   areaTiers?: Array<{ minArea?: number; maxArea?: number; unitPrice?: number }>;
+  overageRules?: Array<{ id?: string; name?: string; includedQuantity?: number; unit?: string; unitPrice?: number }>;
   combinedAreaTiers?: Array<{ minArea?: number; maxArea?: number; foundationUnitPrice?: number; materialUnitPrice?: number }>;
 };
 
@@ -221,6 +226,7 @@ export function normalizeQuotaTemplate(value: any): QuotaTemplateOption | null {
       name: String(space?.name || `空间${spaceIndex + 1}`).trim(),
       quotaItems: Array.isArray(space?.quotaItems)
         ? space.quotaItems.map((item: any, itemIndex: number): QuotaTemplateSpaceQuota => ({
+          packageScope: item?.packageScope === "extra" ? "extra" : "included",
           id: String(item?.id || `quota-${spaceIndex}-${itemIndex}`),
           quotaId: String(item?.quotaId || item?.quota_id || ""),
           code: String(item?.code || ""),
@@ -233,6 +239,7 @@ export function normalizeQuotaTemplate(value: any): QuotaTemplateOption | null {
           quantity: toTemplateAmount(item?.quantity),
           quantityFormula: String(item?.quantityFormula || item?.quantity_formula || "").trim() || null,
           quoteScope: normalizeTemplateScope(item?.quoteScope),
+          pricingMode: item?.pricingMode === "single" ? "single" as const : "split" as const,
           laborPrice: toTemplateAmount(item?.laborPrice),
           materialPrice: toTemplateAmount(item?.materialPrice),
           totalPrice: toTemplateAmount(item?.totalPrice ?? (toTemplateAmount(item?.laborPrice) + toTemplateAmount(item?.materialPrice))),
@@ -277,6 +284,8 @@ export function normalizeQuotaTemplate(value: any): QuotaTemplateOption | null {
   const rawQuoteConfig = value.quoteConfig && typeof value.quoteConfig === "object" ? value.quoteConfig : null;
   const quoteConfig = rawQuoteConfig ? {
     mode: String(rawQuoteConfig.mode || ""),
+    areaUnitPrice: toTemplateAmount(rawQuoteConfig.areaUnitPrice),
+    minChargeAmount: toTemplateAmount(rawQuoteConfig.minChargeAmount),
     packageAmount: toTemplateAmount(rawQuoteConfig.packageAmount),
     includedArea: toTemplateAmount(rawQuoteConfig.includedArea),
     extraAreaPrice: toTemplateAmount(rawQuoteConfig.extraAreaPrice),
@@ -293,6 +302,15 @@ export function normalizeQuotaTemplate(value: any): QuotaTemplateOption | null {
         maxArea: toTemplateAmount(tier?.maxArea),
         unitPrice: toTemplateAmount(tier?.unitPrice),
       }))
+      : [],
+    overageRules: Array.isArray(rawQuoteConfig.overageRules)
+      ? rawQuoteConfig.overageRules.map((rule: any, index: number) => ({
+        id: String(rule?.id || `area-overage-${index}`),
+        name: String(rule?.name || "").trim(),
+        includedQuantity: toTemplateAmount(rule?.includedQuantity),
+        unit: String(rule?.unit || "个").trim() || "个",
+        unitPrice: toTemplateAmount(rule?.unitPrice),
+      })).filter((rule: any) => rule.name)
       : [],
     combinedAreaTiers: Array.isArray(rawQuoteConfig.combinedAreaTiers)
       ? rawQuoteConfig.combinedAreaTiers.map((tier: any) => ({
@@ -345,8 +363,8 @@ export function loadQuotaTemplatesFromStorage() {
 
 export function getTemplateModeLabel(mode?: string | null) {
   if (mode === "list") return "清单报价模式";
-  if (mode === "package") return "一口价模式";
-  if (mode === "area") return "平方报价模式";
+  if (mode === "package") return "套餐一口价模式";
+  if (mode === "area") return "套餐平方报价模式";
   if (mode === "foundation_material_area") return "基装+产品平方模式";
   return "未配置报价模式";
 }

@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { getQuotationPrintSettingsForOrgUnit } from "@/lib/branchSettingsLookup";
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { getAuthContext, hasPermission } from "@/lib/security/authorization";
@@ -324,7 +325,8 @@ export async function GET(req: NextRequest) {
   const items = rows
     .map((row) => safeJsonParse(row.payload, null))
     .filter(Boolean);
-  const scopedItems = filterItemsByManageableStore(items, storeNames);
+  const pricingModes = Object.fromEntries(scoped.stores.map((store) => [store.name, getQuotationPrintSettingsForOrgUnit(db, store.id, auth.companyId).splitCustomerPrice ? "split" : "single"]));
+  const scopedItems = filterItemsByManageableStore(items, storeNames).map((item) => ({ ...item, pricingMode: pricingModes[item.scope] === "single" ? "single" : item.pricingMode || "split" }));
   const itemCountByStore = scopedItems.reduce((counts, item) => {
     const storeName = cleanText(item?.scope);
     if (storeName) counts.set(storeName, (counts.get(storeName) || 0) + 1);
@@ -332,6 +334,8 @@ export async function GET(req: NextRequest) {
   }, new Map<string, number>());
   return NextResponse.json({
     items: scopedItems,
+    pricingModes,
+    splitCustomerPrice: scoped.branch ? getQuotationPrintSettingsForOrgUnit(db, scoped.branch.id, auth.companyId).splitCustomerPrice : true,
     branch: scoped.branch ? { id: scoped.branch.id, name: scoped.branch.name } : null,
     storeOptions: scoped.stores.map((store) => ({
       id: store.id,
@@ -351,11 +355,19 @@ export async function POST(req: NextRequest) {
   const db = getDb();
   ensureStandardQuotaItemsTable(db);
   const manageableStoreNames = getManageableStoreNames(db, auth);
+  if ((Array.isArray(body?.items) ? body.items : []).some((item: any) => item?.pricingMode === "single" && (item.totalPrice == null || String(item.totalPrice).trim() === "" || !Number.isFinite(Number(item.totalPrice)) || Number(item.totalPrice) < 0))) return NextResponse.json({ message: "请填写有效且不小于零的客户单价" }, { status: 400 });
   const items = filterItemsByManageableStore(
     Array.isArray(body?.items) ? body.items.map(normalizeQuotaPayload) : [],
     manageableStoreNames,
   );
 
+  const orgsForPricing = getActiveOrgOptions(db, auth.companyId);
+  for (const item of items) {
+    const owner = orgsForPricing.find((org) => org.type === "store" && org.name === item.scope);
+    const split = owner ? getQuotationPrintSettingsForOrgUnit(db, owner.id, auth.companyId).splitCustomerPrice : true;
+    item.pricingMode = !split || item.pricingMode === "single" ? "single" : "split";
+    if (item.pricingMode === "split") item.totalPrice = item.laborPrice + item.materialPrice;
+  }
   const tx = (db as any).transaction(() => {
     const activeIds = items.map((item: any) => String(item.id));
     const manageableStores = Array.from(manageableStoreNames);
@@ -396,6 +408,10 @@ export async function POST(req: NextRequest) {
     };
     items.forEach((item: any) => {
       const existing = existingByItemId.get(String(item.id));
+      if (item.pricingMode === "single" && existing?.payload) {
+        item.laborPrice = existing.payload.laborPrice ?? 0;
+        item.materialPrice = existing.payload.materialPrice ?? 0;
+      }
       if (!existing?.payload || existing.deletedAt) {
         writeLog(String(item.id), "created", "新增定额", [], null, item);
         return;

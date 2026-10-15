@@ -5,6 +5,9 @@ import type { FeeCalcBase, FeeCalcMethod, FeeScopeMode } from "@/lib/quotationFe
 import { getQuantityCategoryKey } from "@/lib/quotationQuantityLinks";
 
 export type QuotationItem = {
+  pricing_mode?: "split" | "single";
+  quota_source_total_price?: number | null;
+  package_scope?: "included" | "extra" | null;
   id?: string;
   client_key?: string;
   source?: "standard" | "custom";

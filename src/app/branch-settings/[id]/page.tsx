@@ -6,7 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as
 import areaData from "china-area-data";
 import { ArrowLeft, Building2, Check, ClipboardList, Copy, FileCheck2, Hammer, ListChecks, Loader2, Plus, Save, Search, SlidersHorizontal, Trash2, Upload, UserRoundCheck, Users, X } from "lucide-react";
 import { ApprovalFlow, BranchSettings, ConstructionProcessNode, ConstructionProcessNodeType, ConstructionStageAreaDuration, ConstructionStandardImage, ConstructionStandardItem, ConstructionTemplate, ConstructionTemplateStage, DesignerAssignmentDispatcher, DesignerAssignmentDispatcherSource, OrderTemplate, PaymentScheme, defaultBranchSettings, findDuplicateApprovalFlowType } from "@/lib/branchSettings";
-import { defaultQuotationSignatureLabels, normalizeQuotationSignatureLabels } from "@/lib/quotationPrintSettings";
+import { defaultQuotationSignatureLabels } from "@/lib/quotationPrintSettings";
+import QuotationSettingsFields from "@/components/branch-settings/QuotationSettingsFields";
 import { cn } from "@/lib/utils";
 import SystemSelect from "@/components/ui/SystemSelect";
 import NativeImage from "@/components/ui/NativeImage";
@@ -72,7 +73,7 @@ const settingsTabs: { key: SettingsTab; label: string }[] = [
   { key: "order", label: "下单设置" },
   { key: "features", label: "功能开关" },
   { key: "notifications", label: "通知规则" },
-  { key: "print", label: "打印设置" },
+  { key: "print", label: "报价设置" },
 ];
 
 const constructionTemplateTypeOptions = ["标准家装", "旧房翻新", "局部改造", "精装改造", "工装项目"];
@@ -719,6 +720,8 @@ export default function BranchSettingsDetailPage() {
 
               {activeTab === "print" && (
                 <PrintSettingsSection
+                  splitCustomerPrice={settings.printSettings.splitCustomerPrice !== false}
+                  onSplitCustomerPriceChange={(value) => update("printSettings", "splitCustomerPrice", value)}
                   quotationLogoUrl={settings.printSettings.quotationLogoUrl}
                   uploadingLogo={uploadingPrintLogo}
                   disabled={branchInactive}
@@ -742,6 +745,8 @@ export default function BranchSettingsDetailPage() {
 }
 
 function PrintSettingsSection({
+  splitCustomerPrice,
+  onSplitCustomerPriceChange,
   quotationLogoUrl,
   uploadingLogo,
   disabled = false,
@@ -750,6 +755,8 @@ function PrintSettingsSection({
   signatureLabels,
   onSignatureLabelsChange,
 }: {
+  splitCustomerPrice: boolean;
+  onSplitCustomerPriceChange: (value: boolean) => void;
   quotationLogoUrl: string;
   uploadingLogo: boolean;
   disabled?: boolean;
@@ -758,111 +765,20 @@ function PrintSettingsSection({
   signatureLabels: string[];
   onSignatureLabelsChange: (labels: string[]) => void;
 }) {
-  const labels = signatureLabels.length ? signatureLabels.map((label) => String(label || "")).slice(0, 8) : defaultQuotationSignatureLabels;
-  const previewLabels = normalizeQuotationSignatureLabels(labels);
-
-  const updateLabel = (index: number, value: string) => {
-    const next = labels.map((label, currentIndex) => currentIndex === index ? value : label);
-    onSignatureLabelsChange(next);
-  };
-
-  const addLabel = () => {
-    onSignatureLabelsChange([...labels, `签字栏${labels.length + 1}`]);
-  };
-
-  const removeLabel = (index: number) => {
-    const next = labels.filter((_, currentIndex) => currentIndex !== index);
-    onSignatureLabelsChange(next.length ? next : defaultQuotationSignatureLabels);
-  };
-
   return (
-    <div className="branch-settings-panel branch-print-settings rounded-lg border border-surface-200/90 bg-[#f7f9fc] p-4 shadow-[0_10px_24px_rgba(31,41,53,0.035)]">
-      <div className="grid gap-4">
-        <section className="rounded-lg border border-surface-200 bg-white p-4">
-          <div className="mb-3 flex items-start gap-3">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary-50 text-primary-700">
-              <FileCheck2 className="h-4 w-4" />
-            </span>
-            <div>
-              <p className="font-semibold text-surface-900">打印标识</p>
-              <p className="mt-0.5 text-xs text-surface-500">单独维护报价文件中使用的 Logo。</p>
-            </div>
-          </div>
-          <BrandLogoField
-            value={quotationLogoUrl}
-            uploading={uploadingLogo}
-            disabled={disabled}
-            label="报价打印Logo"
-            setText="已设置报价打印Logo"
-            emptyText="未单独设置，打印时沿用品牌Logo"
-            helpText="仅用于报价打印PDF和报价表格封面，不影响系统左上角品牌Logo。"
-            uploadText="上传打印Logo"
-            clearText="清除打印Logo"
-            onUpload={onLogoUpload}
-            onClear={onLogoClear}
-          />
-        </section>
-
-        <section className="rounded-lg border border-surface-200 bg-white p-4">
-          <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-            <div className="flex items-start gap-3">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#ecfdf3] text-[#16824a]">
-                <ListChecks className="h-4 w-4" />
-              </span>
-              <div>
-                <p className="font-semibold text-surface-900">报价单签字栏</p>
-                <p className="mt-0.5 text-xs text-surface-500">维护该分公司装修报价单底部展示的签字项。</p>
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button type="button" onClick={() => onSignatureLabelsChange(defaultQuotationSignatureLabels)} className="btn-secondary">
-                恢复默认
-              </button>
-              <button type="button" onClick={addLabel} className="btn-secondary" disabled={labels.length >= 8}>
-                <Plus className="h-4 w-4" />
-                添加签字栏
-              </button>
-            </div>
-          </div>
-
-          <div className="grid gap-3 lg:grid-cols-2">
-            {labels.map((label, index) => (
-              <div key={`signature-label-${index}`} className="grid items-center gap-2 rounded-lg border border-surface-100 bg-surface-50/60 p-3 sm:grid-cols-[32px_minmax(0,1fr)_40px]">
-                <span className="text-sm font-semibold text-surface-400">{index + 1}</span>
-                <input
-                  value={label}
-                  onChange={(event) => updateLabel(index, event.target.value)}
-                  onBlur={(event) => updateLabel(index, event.target.value.trim() || defaultQuotationSignatureLabels[index] || `签字栏${index + 1}`)}
-                  className="input-field bg-white"
-                  placeholder="例如：客户签字"
-                />
-                <button
-                  type="button"
-                  onClick={() => removeLabel(index)}
-                  className="flex h-10 w-10 items-center justify-center rounded-lg border border-surface-200 bg-white text-surface-400 hover:bg-red-50 hover:text-red-600"
-                  disabled={labels.length <= 1}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
-            ))}
-          </div>
-
-          <div className="mt-4 rounded-lg border border-surface-100 bg-surface-50/70 p-3">
-            <div className="mb-3 flex items-center gap-2">
-              <ClipboardList className="h-4 w-4 text-[#c25a18]" />
-              <p className="text-sm font-semibold text-surface-900">打印预览</p>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              {previewLabels.map((label, index) => (
-                <div key={`${label}-${index}`} className="min-h-12 rounded-md bg-white px-3 py-2">
-                  <p className="text-sm font-semibold text-surface-700">{label}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-      </div>
+    <div className="branch-settings-panel">
+      <QuotationSettingsFields
+        splitCustomerPrice={splitCustomerPrice}
+        onSplitCustomerPriceChange={onSplitCustomerPriceChange}
+        quotationLogoUrl={quotationLogoUrl}
+        uploadingLogo={uploadingLogo}
+        disabled={disabled}
+        onLogoUpload={onLogoUpload}
+        onLogoClear={onLogoClear}
+        signatureLabels={signatureLabels}
+        defaultSignatureLabels={defaultQuotationSignatureLabels}
+        onSignatureLabelsChange={onSignatureLabelsChange}
+      />
     </div>
   );
 }

@@ -236,6 +236,7 @@ export function getQuotationPrintSettingsForCustomer(db: Db, customerId?: string
   const branch = getBranchSettingsForCustomer(db, customerId);
   return {
     org_unit_id: branch.org_unit_id,
+    splitCustomerPrice: branch.settings.printSettings.splitCustomerPrice !== false,
     quotationSignatureLabels: branch.settings.printSettings.quotationSignatureLabels,
   };
 }
@@ -244,6 +245,7 @@ export function getQuotationPrintSettingsForOrgUnit(db: Db, orgUnitId?: string |
   const branch = getBranchSettingsForOrgUnit(db, orgUnitId, companyId);
   return {
     org_unit_id: branch.org_unit_id,
+    splitCustomerPrice: branch.settings.printSettings.splitCustomerPrice !== false,
     quotationSignatureLabels: branch.settings.printSettings.quotationSignatureLabels,
   };
 }

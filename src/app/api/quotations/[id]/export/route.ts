@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { withPricingSnapshot } from "@/lib/quotationPricingMode";
 import ExcelJS from "exceljs";
+import { PACKAGE_AREA_CATEGORY, PACKAGE_AREA_OVERAGE_CATEGORY, isPackageIncludedItem } from "@/lib/quotationPackageArea";
 import QRCode from "qrcode";
 import { existsSync, readFileSync } from "fs";
 import path from "path";
@@ -32,6 +34,11 @@ import { ensureQuotationSchema } from "@/lib/quotationSchema";
 import { createQuotationShareShortUrl } from "@/lib/quotationShareShortLinks";
 
 type ExportItem = {
+  pricing_mode?: "single" | "split";
+  package_scope?: string | null;
+  package_overage_rule_id?: string | null;
+  package_overage_included_quantity?: number | string | null;
+  package_overage_actual_quantity?: number | string | null;
   id?: string;
   client_key?: string;
   category: string;
@@ -92,6 +99,7 @@ const EXPORT_HEADER_FILL = "D9D9D9";
 const EXPORT_SPACE_FILL = "D9D9D9";
 const EXPORT_SECTION_FILL = "F8FBFF";
 const EXPORT_TOTAL_FILL = "EDF4FF";
+const SPECIAL_PRICE_BADGE_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAEyklEQVR42u2bf4hVRRTHP+/lyrpuZn+YFRGRRf9oBDlmC4VDC0a/2IpB+iuQSvpBERVFGZIU0VL9V0Ql1AatNUIUgZnWWEJKY1BLQkULZlmbUioFZe7u6w/nxXB59725b+fefdvegcebN3PuzJnvPXPmzDnnVWq1GrO5VJnlpQSgBKAEoARgVpc5RU4mpAo6c63RlaJ4quRtB4QuerrAyAWAqS66SDCiApDXwvMEIhoAIYsPZTzmWIUA0IzhqTKa59hTBiBv5oqYq20A0hjymRFS3QX8DPwIjFqjj6aMtRx4DDgA7AdGgF3W6H/amTd3QygDE88B7wB7gd+FVP0pQ84DBoB7geeBHcBtWRbargKu5qyZT3j1rdboHSmPTzRo+7SI7VWN8fat0RUh1Xoh1aNCqou9rskUMJJlssl8FSHVy0Kqta1AaEcKqjEW76orgKeAr4RUo0KqJyKZ2vcAtwObhFSbhVQ9MUEIVoItFo+Qaitwtdf9EdDn9jfAu9boAUe7CKgB465vObA9MXwfcBj4AljgtX8JXG+N/imUt1wuQw0mmOfV/wLWAKN+u5CqG+gFJPBWiyk+S2m/BNgCrExswVput8HAwXu9urZG/yakStJsAG4FVruFjFija0KqlcDuBO0ya/TXU7EbQqSgGlHj+2L6npDqTMCnOw+4HzgLMG6caHeHdk+GmP6ARe57HHjd1ed7/UuBv11/NzDoJCH0jXYBu4APgQ2xwKtmFf8UzdsDLHQ/11qje63RvcAxj+z9erv7rM7I6zrgMuBxYNgB0lQKQrZuLAlY4r73A8NNwFwMHPe0fyMF+l+bkKquV7qB9V7fGmC+kOoma/SJTvAJ1gHYaI0eb0I3ABwB/kh8Pm5A+7nXfxhYnOi/DthInj7BEPH3zvF93t5PK686E/cb4Gxr9MGAuY+5y9FL1ug3Q5Shz3er0yCWBPQBD1qjJ1vQnQ/cAGwDrgoc+zTgcsAKqR4RUl1EJ7nFnTI6YI3+oAXptcC3wAXALdbooQzTTLjnngZ2C6n66CC3eAW4r35xAZY5S28VcKpH96uz6/cAE0KqhRnneMbVTwe2C6luDgC9EADGgQecNbfCiWyjshcYA35pY465Dth66QHeFlKdm+ZkKQwAa/SkkGoVcEUA7R4h1VLn+ZljjT4SqICPW6O7oXNDYy82uN8PuiMsCcI+dxMcFlJ9L6QaFFKdAzM7NrjFGUE4H2C/NfrhNEeHNfpPZ9ktAR4CRtwWmpkAOOPnSbfPL7VGm4BnfgCOeorthRkdHbZGbwL6rNFjgcdnxSmzermw4wDIernIaJdXEltkGznED1pdk6ctP8BZjesAC7zi/H78r/MDGoAwBAw1eIsLOgaArJeLRDklIfKNRPYM4EpnUHU5x8qNCbJaHuJfxBbwjZeuFIAPAd8B1wCb3WnQ3yTAMv2nQIinRUhVTUjY3CZSNmKNvgO4M4VkLK/chGrOCQmHnDPjE07G/FqV1zjpN2zkR8jFSRotMEK8MPizwN3AQQfcG9bonXnxlik8XhQIEcN1cXVArIBkpyy+LSXYKSDEksbqTMsQiz1XzNBYISDETpEpk6TKNLkyUbJMlS2Tpct0+fIPE5T/GSoBKAEoASgBKAGYheVfqAlUZr0SteEAAAAASUVORK5CYII=";
 const builtInDirectCategories = ["base", "main_material", "custom_cabinet"];
 const baseExportColumnKeys: BaseExportColumnKey[] = ["materialUnit", "materialTotal", "laborUnit", "laborTotal", "subtotal", "description"];
 const baseColumnShortCodes: Record<BaseExportColumnKey, string> = {
@@ -182,7 +190,17 @@ function isCustomCabinetCategory(category: unknown) {
   return name === "custom_cabinet" || name === "定制柜" || name === "定制柜项目";
 }
 
+function isPackageAreaCategory(category: unknown) {
+  return String(category || "").trim() === PACKAGE_AREA_CATEGORY;
+}
+
+function isPackageAreaOverageCategory(category: unknown) {
+  return String(category || "").trim() === PACKAGE_AREA_OVERAGE_CATEGORY;
+}
+
 function getCategoryLabel(category: string) {
+  if (isPackageAreaCategory(category)) return "套餐平方";
+  if (isPackageAreaOverageCategory(category)) return "套餐超标加价";
   if (isBaseCategory(category)) return "基装";
   if (isMainMaterialCategory(category)) return "产品";
   if (isCustomCabinetCategory(category)) return "定制柜";
@@ -503,6 +521,7 @@ function groupItemsBySpace(items: ExportItem[], quoteSpaces?: string[]) {
 }
 
 function getBasePriceParts(item: ExportItem) {
+  if (item.pricing_mode === "single") { const quantity = toNumber(item.quantity); return { quantity, materialUnit: 0, materialTotal: 0, laborUnit: 0, laborTotal: 0, total: isPackageIncludedItem(item) ? 0 : quantity * toNumber(item.unit_price) }; }
   const quantity = toNumber(item.quantity);
   const materialUnit = toNumber(item.material_cost);
   const rawLaborUnit = toNumber(item.labor_cost);
@@ -510,15 +529,15 @@ function getBasePriceParts(item: ExportItem) {
   return {
     quantity,
     materialUnit,
-    materialTotal: roundMoney(quantity * materialUnit),
+    materialTotal: isPackageIncludedItem(item) ? 0 : roundMoney(quantity * materialUnit),
     laborUnit,
-    laborTotal: roundMoney(quantity * laborUnit),
-    total: roundMoney(quantity * (materialUnit + laborUnit)),
+    laborTotal: isPackageIncludedItem(item) ? 0 : roundMoney(quantity * laborUnit),
+    total: isPackageIncludedItem(item) ? 0 : roundMoney(quantity * (materialUnit + laborUnit)),
   };
 }
 
 function getBaseOrMaterialItemUnitPrice(item: ExportItem) {
-  if (!isBaseCategory(item.category)) return toNumber(item.unit_price);
+  if (item.pricing_mode === "single" || !isBaseCategory(item.category)) return toNumber(item.unit_price);
   const parts = getBasePriceParts(item);
   return parts.materialUnit + parts.laborUnit;
 }
@@ -528,6 +547,7 @@ function getCustomCabinetArea(item: ExportItem) {
 }
 
 function getBaseOrMaterialItemTotal(item: ExportItem) {
+  if (isPackageIncludedItem(item)) return 0;
   if (isCustomCabinetCategory(item.category)) {
     const area = getCustomCabinetArea(item);
     return roundMoney(toNumber(item.quantity) * (area > 0 ? area : 1) * toNumber(item.unit_price));
@@ -536,12 +556,14 @@ function getBaseOrMaterialItemTotal(item: ExportItem) {
 }
 
 function getItemLaborSubtotal(item: ExportItem) {
+  if (isPackageIncludedItem(item)) return 0;
   if (isOtherCategory(item.category)) return 0;
   const factor = isCustomCabinetCategory(item.category) ? Math.max(1, getCustomCabinetArea(item)) : 1;
   return roundMoney(toNumber(item.quantity) * factor * toNumber(item.labor_cost));
 }
 
 function getItemMaterialSubtotal(item: ExportItem) {
+  if (isPackageIncludedItem(item)) return 0;
   if (isOtherCategory(item.category)) return 0;
   const factor = isCustomCabinetCategory(item.category) ? Math.max(1, getCustomCabinetArea(item)) : 1;
   return roundMoney(toNumber(item.quantity) * factor * toNumber(item.material_cost));
@@ -549,6 +571,27 @@ function getItemMaterialSubtotal(item: ExportItem) {
 
 function isSpecialQuoteItem(item?: Pick<ExportItem, "row_color"> | null) {
   return String(item?.row_color || "") === "special";
+}
+
+function addSpecialPriceBadge(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet, rowNumber: number, fromCol: number, toCol = fromCol) {
+  void fromCol;
+  const imageId = workbook.addImage({ base64: SPECIAL_PRICE_BADGE_PNG_BASE64, extension: "png" });
+  const badgeSize = 20;
+  const targetCol = Math.max(fromCol, toCol);
+  const targetWidthPx = (sheet.getColumn(targetCol).width ?? 10) * 7;
+  const rowHeightPx = (sheet.getRow(rowNumber).height ?? 28) * 4 / 3;
+  const colOffset = Math.max(0, targetWidthPx - badgeSize - 8);
+  const rowOffset = Math.max(2, (rowHeightPx - badgeSize) / 2);
+  sheet.addImage(imageId, {
+    tl: {
+      nativeCol: targetCol - 1,
+      nativeColOff: Math.round(colOffset * 9525),
+      nativeRow: rowNumber - 1,
+      nativeRowOff: Math.round(rowOffset * 9525),
+    } as unknown as ExcelJS.Anchor,
+    ext: { width: badgeSize, height: badgeSize },
+    editAs: "oneCell",
+  });
 }
 
 function isLaborOnlyQuoteItem(item: ExportItem) {
@@ -727,7 +770,9 @@ function buildCostComposition(items: ExportItem[]) {
   };
   const workTypeMap = new Map<string, number>();
   const materialCategoryMap = new Map<string, number>();
+  const unsplitMap = new Map<string, number>();
   items.forEach((item) => {
+    if (item.pricing_mode === "single" && isBaseCategory(item.category)) addAmount(unsplitMap, String(item.name || "未命名项目"), getBaseOrMaterialItemTotal(item));
     addAmount(workTypeMap, String(item.work_type_name || "未指定工种"), getItemLaborSubtotal(item));
     addAmount(materialCategoryMap, String(item.material_category_name || "未分类材料"), getItemMaterialSubtotal(item));
   });
@@ -735,6 +780,7 @@ function buildCostComposition(items: ExportItem[]) {
     .map(([name, amount]) => ({ name, amount }))
     .sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, "zh-CN"));
   return {
+    unsplit: sortRows(unsplitMap),
     workTypes: sortRows(workTypeMap),
     materialCategories: sortRows(materialCategoryMap),
   };
@@ -1046,7 +1092,208 @@ function applyRowColor(row: ExcelJS.Row, value?: string | null, fromCol = 1, toC
   }
 }
 
-function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: ExportItem[], quoteSpaces?: string[], columnOptions: BaseExportColumnOptions = defaultBaseExportColumnOptions) {
+function styleExportHeaderRows(sheet: ExcelJS.Worksheet, fromRow: number, toRow = fromRow) {
+  for (let row = fromRow; row <= toRow; row += 1) {
+    sheet.getRow(row).height = 22;
+    for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
+      const cell = sheet.getCell(row, col);
+      cell.font = { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "475467" } };
+      cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_HEADER_FILL } };
+      applyThinBorder(cell, EXPORT_HEADER_BORDER_COLOR);
+    }
+  }
+}
+
+function addPackageBaseSection(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet, startRow: number, items: ExportItem[], quoteSpaces?: string[]) {
+  const singlePricing = items.some((item) => item.pricing_mode === "single");
+  let rowNumber = startRow;
+  addSectionTitle(sheet, rowNumber, "基装明细");
+  rowNumber += 1;
+
+  const addPackageTitle = (title: string) => {
+    sheet.mergeCells(rowNumber, 1, rowNumber, EXPORT_COLUMN_COUNT);
+    sheet.getCell(rowNumber, 1).value = title;
+    styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
+      font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
+      alignment: { vertical: "middle", horizontal: "left" },
+      fill: { type: "pattern", pattern: "solid", fgColor: { argb: "EEF2F6" } },
+    });
+    for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
+    rowNumber += 1;
+  };
+
+  const addSpaceRow = (space: string, groupIndex: number, colSpanStart = 2) => {
+    sheet.getCell(rowNumber, 1).value = formatBaseSectionNumber(groupIndex);
+    sheet.mergeCells(rowNumber, colSpanStart, rowNumber, EXPORT_COLUMN_COUNT);
+    sheet.getCell(rowNumber, colSpanStart).value = space;
+    styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
+      font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
+      alignment: { vertical: "middle" },
+      fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_SPACE_FILL } },
+    });
+    sheet.getCell(rowNumber, 1).alignment = { vertical: "middle", horizontal: "center" };
+    sheet.getCell(rowNumber, colSpanStart).alignment = { vertical: "middle", horizontal: "left" };
+    for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
+    rowNumber += 1;
+  };
+
+  const extraItems = items.filter((item) => !isPackageIncludedItem(item));
+  const includedItems = items.filter(isPackageIncludedItem);
+  let sequence = 0;
+
+  if (extraItems.length > 0) {
+    addPackageTitle("套餐外另计项目");
+    if (singlePricing) {
+      setRowValues(sheet, rowNumber, ["序号", "工程项目", "", "数量", "单位", "客户单价", "", "", "", "小计", "施工工艺及材料说明", ""]);
+      sheet.mergeCells(rowNumber, 2, rowNumber, 3);
+      sheet.mergeCells(rowNumber, 6, rowNumber, 9);
+      sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
+      styleExportHeaderRows(sheet, rowNumber, rowNumber);
+      rowNumber += 1;
+    } else {
+    setRowValues(sheet, rowNumber, ["序号", "工程项目", "", "数量", "单位", "材料", "", "人工", "", "小计", "施工工艺及材料说明", ""]);
+    setRowValues(sheet, rowNumber + 1, ["", "", "", "", "", "单价", "合价", "单价", "合价", "", "", ""]);
+    sheet.mergeCells(rowNumber, 1, rowNumber + 1, 1);
+    sheet.mergeCells(rowNumber, 2, rowNumber + 1, 3);
+    sheet.mergeCells(rowNumber, 4, rowNumber + 1, 4);
+    sheet.mergeCells(rowNumber, 5, rowNumber + 1, 5);
+    sheet.mergeCells(rowNumber, 6, rowNumber, 7);
+    sheet.mergeCells(rowNumber, 8, rowNumber, 9);
+    sheet.mergeCells(rowNumber, 10, rowNumber + 1, 10);
+    sheet.mergeCells(rowNumber, 11, rowNumber + 1, EXPORT_COLUMN_COUNT);
+    styleExportHeaderRows(sheet, rowNumber, rowNumber + 1);
+    rowNumber += 2;
+    }
+
+    groupItemsBySpace(extraItems, quoteSpaces).forEach((group, groupIndex) => {
+      addSpaceRow(group.space, groupIndex);
+      group.items.forEach((item) => {
+        sequence += 1;
+        const parts = getBasePriceParts(item);
+        const description = getBaseRowDescription(item);
+        const row = setRowValues(sheet, rowNumber, [
+          sequence,
+          itemText(item.name),
+          "",
+          parts.quantity,
+          itemText(item.unit),
+          singlePricing ? getBaseOrMaterialItemUnitPrice(item) : parts.materialUnit,
+          singlePricing ? "" : parts.materialTotal,
+          singlePricing ? "" : parts.laborUnit,
+          singlePricing ? "" : parts.laborTotal,
+          parts.total,
+          description,
+          "",
+        ]);
+        row.height = Math.max(getWrappedRowHeight(itemText(item.name), 24, 28), getWrappedRowHeight(description, 44, description ? 40 : 28));
+        sheet.mergeCells(rowNumber, 2, rowNumber, 3);
+        if (singlePricing) sheet.mergeCells(rowNumber, 6, rowNumber, 9);
+        sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
+        applyRowColor(row, item.row_color);
+        for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
+          const cell = row.getCell(col);
+          applyThinBorder(cell);
+          cell.font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "344054" } };
+          cell.alignment = { vertical: "middle", horizontal: col === 2 || col === 11 ? "left" : "center", wrapText: ![1, 4, 5, 6, 7, 8, 9, 10].includes(col) };
+        }
+        [4, 6, 7, 8, 9, 10].forEach((col) => addCompactAmountCell(row.getCell(col), col === 10, col === 10 ? "111827" : "344054", "center"));
+        if (isSpecialQuoteItem(item)) addSpecialPriceBadge(workbook, sheet, rowNumber, 2, 3);
+        rowNumber += 1;
+      });
+
+      const groupMaterialTotal = group.items.reduce((sum, item) => sum + getBasePriceParts(item).materialTotal, 0);
+      const groupLaborTotal = group.items.reduce((sum, item) => sum + getBasePriceParts(item).laborTotal, 0);
+      const groupTotal = group.items.reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
+      sheet.mergeCells(rowNumber, 1, rowNumber, 6);
+      sheet.getCell(rowNumber, 1).value = "小计";
+      sheet.getCell(rowNumber, 7).value = singlePricing ? "" : groupMaterialTotal;
+      sheet.getCell(rowNumber, 9).value = singlePricing ? "" : groupLaborTotal;
+      sheet.getCell(rowNumber, 10).value = groupTotal;
+      sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
+      styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
+        font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "344054" } },
+        fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_SECTION_FILL } },
+      });
+      sheet.getCell(rowNumber, 1).alignment = { horizontal: "center", vertical: "middle" };
+      [7, 9, 10].forEach((col) => addCompactAmountCell(sheet.getCell(rowNumber, col), true, "111827", "center"));
+      for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
+      rowNumber += 1;
+    });
+
+    const materialTotal = extraItems.reduce((sum, item) => sum + getBasePriceParts(item).materialTotal, 0);
+    const laborTotal = extraItems.reduce((sum, item) => sum + getBasePriceParts(item).laborTotal, 0);
+    const total = extraItems.reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
+    sheet.mergeCells(rowNumber, 1, rowNumber, 6);
+    sheet.getCell(rowNumber, 1).value = "基装小计";
+    sheet.getCell(rowNumber, 7).value = singlePricing ? "" : materialTotal;
+    sheet.getCell(rowNumber, 9).value = singlePricing ? "" : laborTotal;
+    sheet.getCell(rowNumber, 10).value = total;
+    sheet.mergeCells(rowNumber, 11, rowNumber, EXPORT_COLUMN_COUNT);
+    styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
+      font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
+      fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_TOTAL_FILL } },
+    });
+    sheet.getCell(rowNumber, 1).alignment = { horizontal: "center", vertical: "middle" };
+    [7, 9, 10].forEach((col) => addCompactAmountCell(sheet.getCell(rowNumber, col), true, col === 10 ? "DC2626" : "111827", "center"));
+    for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
+    rowNumber += 1;
+  }
+
+  if (includedItems.length > 0) {
+    if (extraItems.length > 0) rowNumber += 1;
+    addPackageTitle("套餐内项目");
+    addTableHeader(sheet, rowNumber, ["序号", "工程项目", "", "", "", "数量", "单位", "施工工艺及材料说明", "", "", "", ""], EXPORT_COLUMN_COUNT);
+    sheet.mergeCells(rowNumber, 2, rowNumber, 5);
+    sheet.mergeCells(rowNumber, 8, rowNumber, EXPORT_COLUMN_COUNT);
+    rowNumber += 1;
+
+    groupItemsBySpace(includedItems, quoteSpaces).forEach((group, groupIndex) => {
+      addSpaceRow(group.space, groupIndex);
+      group.items.forEach((item) => {
+        sequence += 1;
+        const parts = getBasePriceParts(item);
+        const description = getBaseRowDescription(item);
+        const row = setRowValues(sheet, rowNumber, [
+          sequence,
+          itemText(item.name),
+          "",
+          "",
+          "",
+          parts.quantity > 0 ? parts.quantity : "-",
+          itemText(item.unit),
+          description,
+          "",
+          "",
+          "",
+          "",
+        ]);
+        row.height = Math.max(getWrappedRowHeight(itemText(item.name), 32, 28), getWrappedRowHeight(description, 52, description ? 40 : 28));
+        sheet.mergeCells(rowNumber, 2, rowNumber, 5);
+        sheet.mergeCells(rowNumber, 8, rowNumber, EXPORT_COLUMN_COUNT);
+        applyRowColor(row, item.row_color);
+        for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
+          const cell = row.getCell(col);
+          applyThinBorder(cell);
+          cell.font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "344054" } };
+          cell.alignment = { vertical: "middle", horizontal: col === 2 || col === 8 ? "left" : "center", wrapText: ![1, 6, 7].includes(col) };
+        }
+        if (typeof row.getCell(6).value === "number") addCompactAmountCell(row.getCell(6), false, "344054", "center");
+        if (isSpecialQuoteItem(item)) addSpecialPriceBadge(workbook, sheet, rowNumber, 2, 5);
+        rowNumber += 1;
+      });
+    });
+  }
+
+  return rowNumber;
+}
+
+function addBaseSection(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet, startRow: number, items: ExportItem[], quoteSpaces?: string[], columnOptions: BaseExportColumnOptions = defaultBaseExportColumnOptions) {
+  const singlePricing = items.some((item) => item.pricing_mode === "single");
+  if (singlePricing) columnOptions = { materialUnit: true, materialTotal: false, laborUnit: false, laborTotal: false, subtotal: true, description: true };
+  if (items.some((item) => item.package_scope === "included" || item.package_scope === "extra")) {
+    return addPackageBaseSection(workbook, sheet, startRow, items, quoteSpaces);
+  }
   let rowNumber = startRow;
   addSectionTitle(sheet, rowNumber, "基装明细");
   rowNumber += 1;
@@ -1063,7 +1310,7 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
     { key: "name", top: "工程项目" },
     { key: "quantity", top: "数量" },
     { key: "unit", top: "单位" },
-    ...(columnOptions.materialUnit ? [{ key: "materialUnit" as const, top: "材料", bottom: "单价", group: "material" as const, amount: true }] : []),
+    ...(columnOptions.materialUnit ? [{ key: "materialUnit" as const, top: singlePricing ? "客户单价" : "材料", bottom: singlePricing ? undefined : "单价", group: singlePricing ? undefined : "material" as const, amount: true }] : []),
     ...(columnOptions.materialTotal ? [{ key: "materialTotal" as const, top: "材料", bottom: "合价", group: "material" as const, amount: true }] : []),
     ...(columnOptions.laborUnit ? [{ key: "laborUnit" as const, top: "人工", bottom: "单价", group: "labor" as const, amount: true }] : []),
     ...(columnOptions.laborTotal ? [{ key: "laborTotal" as const, top: "人工", bottom: "合价", group: "labor" as const, amount: true }] : []),
@@ -1117,9 +1364,8 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
     sheet.getCell(rowNumber, start).value = column.group && columnLayouts[index - 1]?.column.group === column.group ? "" : column.top;
     sheet.getCell(rowNumber + 1, start).value = column.bottom || "";
   });
-  ["sequence", "name", "quantity", "unit", "subtotal", "description"].forEach((key) => {
-    const layout = layoutByKey[key as (typeof columns)[number]["key"]];
-    if (layout) sheet.mergeCells(rowNumber, layout.start, rowNumber + 1, layout.end);
+  columnLayouts.filter(({ column }) => !column.group).forEach((layout) => {
+    sheet.mergeCells(rowNumber, layout.start, rowNumber + 1, layout.end);
   });
   (["material", "labor"] as const).forEach((group) => {
     const groupColumns = columnLayouts.filter(({ column }) => column.group === group);
@@ -1165,7 +1411,7 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
         name: nameText,
         quantity: parts.quantity,
         unit: itemText(item.unit),
-        materialUnit: parts.materialUnit,
+        materialUnit: singlePricing ? getBaseOrMaterialItemUnitPrice(item) : parts.materialUnit,
         materialTotal: parts.materialTotal,
         laborUnit: parts.laborUnit,
         laborTotal: parts.laborTotal,
@@ -1201,6 +1447,9 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
           addCompactAmountCell(cell, false, "344054", "center");
         }
       });
+      if (isSpecialQuoteItem(item) && layoutByKey.name) {
+        addSpecialPriceBadge(workbook, sheet, rowNumber, layoutByKey.name.start, layoutByKey.name.end);
+      }
       rowNumber += 1;
     });
 
@@ -1236,7 +1485,7 @@ function addBaseSection(sheet: ExcelJS.Worksheet, startRow: number, items: Expor
   return rowNumber + 1;
 }
 
-function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: ExportItem[], quoteSpaces?: string[], title = "产品明细") {
+function addMaterialSection(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet, startRow: number, items: ExportItem[], quoteSpaces?: string[], title = "产品明细") {
   let rowNumber = startRow;
   addSectionTitle(sheet, rowNumber, title);
   rowNumber += 1;
@@ -1303,6 +1552,7 @@ function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: E
       [2, 3].forEach((col) => {
         sheet.getCell(rowNumber, col).alignment = { ...sheet.getCell(rowNumber, col).alignment, horizontal: "left" };
       });
+      if (isSpecialQuoteItem(item)) addSpecialPriceBadge(workbook, sheet, rowNumber, 2, 3);
       rowNumber += 1;
     });
 
@@ -1335,7 +1585,130 @@ function addMaterialSection(sheet: ExcelJS.Worksheet, startRow: number, items: E
   return rowNumber + 1;
 }
 
-function addCustomCabinetSection(sheet: ExcelJS.Worksheet, startRow: number, items: ExportItem[], quoteSpaces?: string[], title = "定制柜明细") {
+function addPackageAreaSection(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet, startRow: number, items: ExportItem[]) {
+  let rowNumber = startRow;
+  addSectionTitle(sheet, rowNumber, "套餐平方明细");
+  rowNumber += 1;
+  addTableHeader(sheet, rowNumber, ["序号", "套餐项目", "", "计价面积", "单位", "套餐单价", "套餐金额", "计价说明", "", "", "", ""], EXPORT_COLUMN_COUNT);
+  sheet.mergeCells(rowNumber, 2, rowNumber, 3);
+  sheet.mergeCells(rowNumber, 8, rowNumber, EXPORT_COLUMN_COUNT);
+  rowNumber += 1;
+
+  items.forEach((item, index) => {
+    const total = getBaseOrMaterialItemTotal(item);
+    const nameText = itemText(item.name);
+    const remarkText = itemText(item.remark);
+    const row = setRowValues(sheet, rowNumber, [
+      index + 1,
+      nameText,
+      "",
+      toNumber(item.quantity),
+      itemText(item.unit),
+      getBaseOrMaterialItemUnitPrice(item),
+      total,
+      remarkText,
+      "",
+      "",
+      "",
+      "",
+    ]);
+    row.height = Math.max(
+      getWrappedRowHeight(nameText, 24, 28),
+      getWrappedRowHeight(remarkText, 52, remarkText ? 40 : 28),
+    );
+    sheet.mergeCells(rowNumber, 2, rowNumber, 3);
+    sheet.mergeCells(rowNumber, 8, rowNumber, EXPORT_COLUMN_COUNT);
+    applyRowColor(row, item.row_color);
+    for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
+      const cell = row.getCell(col);
+      applyThinBorder(cell);
+      cell.font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "344054" } };
+      cell.alignment = { vertical: "middle", horizontal: col === 2 || col === 8 ? "left" : "center", wrapText: ![1, 4, 5, 6, 7].includes(col) };
+    }
+    [4, 6, 7].forEach((col) => addCompactAmountCell(row.getCell(col), col === 7, col === 7 ? "111827" : "344054", "center"));
+    if (isSpecialQuoteItem(item)) addSpecialPriceBadge(workbook, sheet, rowNumber, 2, 3);
+    rowNumber += 1;
+  });
+
+  const total = items.reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
+  sheet.mergeCells(rowNumber, 1, rowNumber, 6);
+  sheet.getCell(rowNumber, 1).value = "套餐小计";
+  sheet.getCell(rowNumber, 1).alignment = { horizontal: "center", vertical: "middle" };
+  sheet.getCell(rowNumber, 7).value = total;
+  sheet.mergeCells(rowNumber, 8, rowNumber, EXPORT_COLUMN_COUNT);
+  styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
+    font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
+    fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_TOTAL_FILL } },
+  });
+  addCompactAmountCell(sheet.getCell(rowNumber, 7), true, "DC2626", "center");
+  for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
+  return rowNumber + 1;
+}
+
+function addPackageAreaOverageSection(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet, startRow: number, items: ExportItem[]) {
+  let rowNumber = startRow;
+  addSectionTitle(sheet, rowNumber, "套餐超标加价明细");
+  rowNumber += 1;
+  addTableHeader(sheet, rowNumber, ["序号", "加价项目", "", "套餐包含", "实际数量", "超出数量", "超出单价", "加价金额", "计价说明", "", "", ""], EXPORT_COLUMN_COUNT);
+  sheet.mergeCells(rowNumber, 2, rowNumber, 3);
+  sheet.mergeCells(rowNumber, 9, rowNumber, EXPORT_COLUMN_COUNT);
+  rowNumber += 1;
+
+  items.forEach((item, index) => {
+    const total = getBaseOrMaterialItemTotal(item);
+    const nameText = itemText(item.name);
+    const unitText = itemText(item.unit);
+    const remarkText = itemText(item.remark);
+    const includedQuantity = toNumber(item.package_overage_included_quantity);
+    const actualQuantity = toNumber(item.package_overage_actual_quantity);
+    const row = setRowValues(sheet, rowNumber, [
+      index + 1,
+      nameText,
+      "",
+      `${formatQuantity(includedQuantity)}${unitText}`,
+      `${formatQuantity(actualQuantity)}${unitText}`,
+      `${formatQuantity(toNumber(item.quantity))}${unitText}`,
+      getBaseOrMaterialItemUnitPrice(item),
+      total,
+      remarkText,
+      "",
+      "",
+      "",
+    ]);
+    row.height = Math.max(
+      getWrappedRowHeight(nameText, 24, 28),
+      getWrappedRowHeight(remarkText, 52, remarkText ? 40 : 28),
+    );
+    sheet.mergeCells(rowNumber, 2, rowNumber, 3);
+    sheet.mergeCells(rowNumber, 9, rowNumber, EXPORT_COLUMN_COUNT);
+    applyRowColor(row, item.row_color);
+    for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) {
+      const cell = row.getCell(col);
+      applyThinBorder(cell);
+      cell.font = { name: EXPORT_FONT_NAME, size: 11, color: { argb: "344054" } };
+      cell.alignment = { vertical: "middle", horizontal: col === 2 || col === 9 ? "left" : "center", wrapText: ![1, 4, 5, 6, 7, 8].includes(col) };
+    }
+    [7, 8].forEach((col) => addCompactAmountCell(row.getCell(col), col === 8, col === 8 ? "111827" : "344054", "center"));
+    if (isSpecialQuoteItem(item)) addSpecialPriceBadge(workbook, sheet, rowNumber, 2, 3);
+    rowNumber += 1;
+  });
+
+  const total = items.reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
+  sheet.mergeCells(rowNumber, 1, rowNumber, 7);
+  sheet.getCell(rowNumber, 1).value = "超标加价小计";
+  sheet.getCell(rowNumber, 1).alignment = { horizontal: "center", vertical: "middle" };
+  sheet.getCell(rowNumber, 8).value = total;
+  sheet.mergeCells(rowNumber, 9, rowNumber, EXPORT_COLUMN_COUNT);
+  styleRange(sheet, rowNumber, rowNumber, 1, EXPORT_COLUMN_COUNT, {
+    font: { name: EXPORT_FONT_NAME, size: 11, bold: true, color: { argb: "111827" } },
+    fill: { type: "pattern", pattern: "solid", fgColor: { argb: EXPORT_TOTAL_FILL } },
+  });
+  addCompactAmountCell(sheet.getCell(rowNumber, 8), true, "DC2626", "center");
+  for (let col = 1; col <= EXPORT_COLUMN_COUNT; col += 1) applyThinBorder(sheet.getCell(rowNumber, col), EXPORT_HEADER_BORDER_COLOR);
+  return rowNumber + 1;
+}
+
+function addCustomCabinetSection(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet, startRow: number, items: ExportItem[], quoteSpaces?: string[], title = "定制柜明细") {
   let rowNumber = startRow;
   addSectionTitle(sheet, rowNumber, title);
   rowNumber += 1;
@@ -1401,6 +1774,7 @@ function addCustomCabinetSection(sheet: ExcelJS.Worksheet, startRow: number, ite
       [2, 3].forEach((col) => {
         sheet.getCell(rowNumber, col).alignment = { ...sheet.getCell(rowNumber, col).alignment, horizontal: "left" };
       });
+      if (isSpecialQuoteItem(item)) addSpecialPriceBadge(workbook, sheet, rowNumber, 2, 3);
       rowNumber += 1;
     });
 
@@ -1434,6 +1808,7 @@ function addCustomCabinetSection(sheet: ExcelJS.Worksheet, startRow: number, ite
 }
 
 function addOtherFeeSection(
+  workbook: ExcelJS.Workbook,
   sheet: ExcelJS.Worksheet,
   startRow: number,
   items: ExportItem[],
@@ -1513,7 +1888,7 @@ function addOtherFeeSection(
     amount: row.amount,
   })), discount);
 
-  const addFeeRow = (values: [unknown, unknown, unknown, unknown, unknown], options: { fill?: string; bold?: boolean; amountColor?: string; rowColor?: string | null } = {}) => {
+  const addFeeRow = (values: [unknown, unknown, unknown, unknown, unknown], options: { fill?: string; bold?: boolean; amountColor?: string; rowColor?: string | null; special?: boolean } = {}) => {
     setRowValues(sheet, rowNumber, [
       values[0],
       values[1],
@@ -1542,6 +1917,7 @@ function addOtherFeeSection(
       if (options.fill) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: options.fill } };
     }
     addAmountCell(row.getCell(6), true, options.amountColor || "111827");
+    if (options.special) addSpecialPriceBadge(workbook, sheet, rowNumber, 2, 3);
     rowNumber += 1;
   };
 
@@ -1557,7 +1933,7 @@ function addOtherFeeSection(
         discountDetailText,
       ].filter(Boolean).join("；")
       : getOtherFeeRuleDisplay(item, total, feeFormulaContext, items);
-    addFeeRow([formatAlphaSequence(index + feeSequenceOffset), item.name || "", getFeeFormulaText(item, items, feeSequenceOffset), total, ruleText], { rowColor: item.row_color });
+    addFeeRow([formatAlphaSequence(index + feeSequenceOffset), itemText(item.name), getFeeFormulaText(item, items, feeSequenceOffset), total, ruleText], { rowColor: item.row_color, special: isSpecialQuoteItem(item) });
   });
 
   fallbackDiscountRows.forEach((row, index) => {
@@ -1651,6 +2027,7 @@ function addCompositionSections(
   rowNumber = addCompositionTable(sheet, rowNumber, "材料分类汇总", composition.materialCategories, "暂无材料费用归属");
   rowNumber += 1;
 
+  if (composition.unsplit.length) rowNumber = addCompositionTable(sheet, rowNumber, "未拆分客户报价汇总", composition.unsplit, "") + 1;
   addSectionTitle(sheet, rowNumber, "综合费用和总费用");
   rowNumber += 1;
   setRowValues(sheet, rowNumber, ["综合费用", otherAmount, "", "", "", "", "", "", "报价总费用", finalAmount, ""]);
@@ -1886,7 +2263,7 @@ function addCoverSheet(workbook: ExcelJS.Workbook, quotation: any, branchSetting
   sheet.getRow(6).height = 40;
 
   sheet.mergeCells(9, 2, 9, 9);
-  sheet.getCell(9, 2).value = buildExportTitle(quotation);
+  sheet.getCell(9, 2).value = "工程报价单";
   sheet.getCell(9, 2).font = { name: EXPORT_FONT_NAME, size: 21, bold: true, color: { argb: "111111" } };
   sheet.getCell(9, 2).alignment = { vertical: "middle", horizontal: "center", wrapText: false, shrinkToFit: true };
   sheet.getRow(9).height = 34;
@@ -2019,7 +2396,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
   const appendixNote = buildAppendixNoteContent(rawSettings, quotation);
   const budgetCompilationContent = getBudgetCompilationContent(rawSettings);
   const rawItems = db.prepare("SELECT * FROM quotation_items WHERE quotation_id = ? ORDER BY sort_order ASC, created_at ASC").all(params.id) as ExportItem[];
-  const items = migrateManagementFeeToOtherItem(rawItems, rawSettings).map((item) => ({
+  const items = migrateManagementFeeToOtherItem(withPricingSnapshot(rawItems, rawSettings), rawSettings).map((item) => ({
     ...item,
     space: inferItemSpace(item),
     fee_scope_mode: isOtherCategory(item.category) ? normalizeFeeScopeMode(item.fee_scope_mode) : null,
@@ -2031,15 +2408,30 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
     items,
   );
   const baseItems = items.filter((item) => isBaseCategory(item.category));
+  const packageAreaItems = items.filter((item) => isPackageAreaCategory(item.category));
+  const overageRuleByName = new Map<string, any>(
+    (Array.isArray(rawSettings.templatePricing?.overageRules) ? rawSettings.templatePricing.overageRules : [])
+      .map((rule: any, index: number) => [String(rule?.name || `超标加价${index + 1}`).trim(), rule]),
+  );
+  const packageAreaOverageItems = items
+    .filter((item) => isPackageAreaOverageCategory(item.category))
+    .map((item) => {
+      const rule = overageRuleByName.get(String(item.name || "").trim());
+      return {
+        ...item,
+        package_overage_included_quantity: item.package_overage_included_quantity ?? rule?.includedQuantity ?? 0,
+        package_overage_actual_quantity: item.package_overage_actual_quantity ?? rule?.actualQuantity ?? (toNumber(rule?.includedQuantity) + toNumber(item.quantity)),
+      };
+    });
   const materialGroups = quoteCategories
     .filter((category) => !isBaseCategory(category) && !isOtherCategory(category))
     .map((category) => ({
       category,
       label: getCategoryLabel(category),
       items: items.filter((item) => {
-        if (category === "main_material") return isMainMaterialCategory(item.category);
+        if (category === "main_material") return isMainMaterialCategory(item.category) && !isPackageAreaCategory(item.category) && !isPackageAreaOverageCategory(item.category);
         if (category === "custom_cabinet") return isCustomCabinetCategory(item.category);
-        return item.category === category;
+        return item.category === category && !isPackageAreaCategory(item.category) && !isPackageAreaOverageCategory(item.category);
       }),
     }))
     .filter((group) => group.items.length > 0);
@@ -2047,7 +2439,9 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
 
   const baseAmount = baseItems.reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
   const mainMaterialAmount = items.filter((item) => isMainMaterialCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
-  const materialAmount = materialGroups.reduce((sum, group) => sum + group.items.reduce((groupSum, item) => groupSum + getBaseOrMaterialItemTotal(item), 0), 0);
+  const packageAreaAmount = packageAreaItems.reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
+  const packageAreaOverageAmount = packageAreaOverageItems.reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0);
+  const materialAmount = packageAreaAmount + packageAreaOverageAmount + materialGroups.reduce((sum, group) => sum + group.items.reduce((groupSum, item) => groupSum + getBaseOrMaterialItemTotal(item), 0), 0);
   const quotationHouseArea = toNumber(quotation.customer_area_size ?? quotation.project_area);
   const formulaTableMode = rawSettings.comprehensiveFeeMode === "formula" && String(rawSettings.formulaFinalFeeItemId || "").trim();
   let discount = 0;
@@ -2161,8 +2555,14 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
     rowNumber = addCompositionSections(sheet, rowNumber, costComposition, otherAmount, finalAmount);
   } else {
     const isAllDetailScope = exportScope === "all" || exportScope === "all_without_cover";
+    if ((isAllDetailScope || exportScope === "main_material") && packageAreaItems.length > 0) {
+      rowNumber = addPackageAreaSection(workbook, sheet, rowNumber, packageAreaItems);
+    }
+    if ((isAllDetailScope || exportScope === "main_material") && packageAreaOverageItems.length > 0) {
+      rowNumber = addPackageAreaOverageSection(workbook, sheet, rowNumber, packageAreaOverageItems);
+    }
     if (isAllDetailScope || exportScope === "base") {
-      rowNumber = addBaseSection(sheet, rowNumber, baseItems, rawSettings.quoteSpaces, baseExportColumns);
+      rowNumber = addBaseSection(workbook, sheet, rowNumber, baseItems, rawSettings.quoteSpaces, baseExportColumns);
     }
     materialGroups
       .filter((group) => {
@@ -2173,11 +2573,11 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
       })
       .forEach((group) => {
         rowNumber = isCustomCabinetCategory(group.category)
-          ? addCustomCabinetSection(sheet, rowNumber, group.items, rawSettings.quoteSpaces, `${group.label}明细`)
-          : addMaterialSection(sheet, rowNumber, group.items, rawSettings.quoteSpaces, `${group.label}明细`);
+          ? addCustomCabinetSection(workbook, sheet, rowNumber, group.items, rawSettings.quoteSpaces, `${group.label}明细`)
+          : addMaterialSection(workbook, sheet, rowNumber, group.items, rawSettings.quoteSpaces, `${group.label}明细`);
       });
     if (isAllDetailScope || exportScope === "fees") {
-      rowNumber = addOtherFeeSection(sheet, rowNumber, otherItems, items, baseAmount, materialAmount, feeFormulaContext, otherFeeTotals, displayDiscountRows, discount, taxAmount, finalAmount, rawSettings, quotationHouseArea);
+      rowNumber = addOtherFeeSection(workbook, sheet, rowNumber, otherItems, items, baseAmount, materialAmount, feeFormulaContext, otherFeeTotals, displayDiscountRows, discount, taxAmount, finalAmount, rawSettings, quotationHouseArea);
     }
   }
   if (outputMode !== "composition" && appendixNote && (exportScope === "all" || exportScope === "all_without_cover" || exportScope === "fees")) {

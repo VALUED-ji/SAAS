@@ -1,4 +1,9 @@
 "use client";
+import { pricingConfigurationError } from "@/lib/quotationPricingMode";
+import quotationWizardStyles from "@/components/quotations/CreateQuotationWizard.module.css";
+import { PACKAGE_AREA_CATEGORY, PACKAGE_AREA_OVERAGE_CATEGORY, isPackageIncludedItem } from "@/lib/quotationPackageArea";
+import { getQuotationSpaceSequences, reorderQuotationSpaceItems } from "@/lib/quotationSpaceOrder";
+import { PackageSpaceOrderProvider, PackageSpaceOrderRow } from "@/components/quotations/PackageSpaceOrder";
 
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
@@ -50,11 +55,15 @@ import {
   getQuotationQuantityFormulaError,
   getQuotationQuantityLinkDependents,
   getQuantityLinkItemId,
+  normalizeManualQuantityExpression,
+  parseManualQuantityFormula,
   parseQuotationQuantityFormula,
   parseQuotationQuantityConstantTerms,
   parseQuotationQuantityFormulaRows,
   remapQuotationQuantityFormulaIds,
   repairQuotationQuantityLinksAfterDeletion,
+  serializeManualQuantityFormula,
+  serializeQuantityFormulaValue,
   serializeQuotationQuantityFormula,
   type QuotationQuantityFormula,
 } from "@/lib/quotationQuantityLinks";
@@ -98,7 +107,7 @@ import {
   isMainMaterialCategory,
   isOtherCategory,
   normalizeCategoryName,
-  sameQuoteCategory,
+  sameQuoteCategory as sameStandardQuoteCategory,
 } from "./quotation-shared";
 import {
   AttributionDialog,
@@ -109,6 +118,7 @@ import {
 
 
 type QuotaLibraryItem = {
+  pricingMode?: "split" | "single";
   id: string;
   code: string;
   source?: "standard" | "custom";
@@ -264,6 +274,7 @@ type PointerItemDragState = {
 } | null;
 
 type QuoteEditableElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLDivElement;
+type InvalidQuantityDraft = { value: string; message: string };
 type RowMenuOpenHandler = (event: MouseEvent<HTMLElement>, index: number) => void;
 type QuantityLinkAnchor = { x: number; y: number };
 type QuantityLinkOpenHandler = (index: number, event?: MouseEvent<HTMLButtonElement>, anchor?: QuantityLinkAnchor) => void;
@@ -342,6 +353,8 @@ type QuoteProjectInfoForm = {
   areaSize: string;
   quotationType: string;
   decorationType: string;
+  notes: string;
+  customerVisibleNote: string;
 };
 
 function normalizeProjectInfoPhone(value: unknown) {
@@ -418,8 +431,6 @@ function renderFindReplaceHighlightedText(value: string, highlight?: Pick<FindRe
     </>
   );
 }
-
-const quoteDecorationTypeOptions = ["清包", "半包", "全包"];
 
 const itemDragAutoScrollEdge = 96;
 const itemDragAutoScrollMaxSpeed = 1200;
@@ -532,6 +543,7 @@ type QuotationDetail = {
   customer_visible_note?: string | null;
   terms?: string;
   settings?: {
+    splitCustomerPrice?: boolean;
     managementFeeRate?: number;
     taxRate?: number;
 	    discount?: number;
@@ -610,6 +622,8 @@ const quotationFeeValueSourceOptions = [
   { value: "discount", label: "报价优惠" },
 ] as const;
 const allSpacesValue = "__ALL_SPACES__";
+const packageIncludedSpaceValue = "__PACKAGE_INCLUDED_ITEMS__";
+const packageIncludedSpaceLabel = "套餐内项目";
 const defaultQuoteSpaces: string[] = [];
 const quotaLibraryStorageKey = "zxgj_quota_library_items";
 const budgetRecordReturnStateKey = "quotationBudgetRecordReturnState";
@@ -644,7 +658,17 @@ function readBudgetRecordReturnState() {
   }
 }
 
+function isAreaPricingCategory(category: unknown) {
+  return category === PACKAGE_AREA_CATEGORY || category === PACKAGE_AREA_OVERAGE_CATEGORY;
+}
+
+function sameQuoteCategory(left: unknown, right: unknown) {
+  if (isAreaPricingCategory(left) || isAreaPricingCategory(right)) return isAreaPricingCategory(left) && isAreaPricingCategory(right);
+  return sameStandardQuoteCategory(left, right);
+}
+
 function getCategoryLabel(category: string) {
+  if (isAreaPricingCategory(category)) return "套餐计价";
   return builtInCategoryLabels[getCategoryKey(category)] || category;
 }
 
@@ -685,9 +709,11 @@ function isPackagePricingCategory(category: unknown) {
 }
 
 function orderQuoteCategories(categories: string[]) {
+  const hasAreaPricing = categories.some(isAreaPricingCategory);
   const normalized: string[] = [];
   const seenKeys = new Set<string>();
   categories.map((category) => String(category || "").trim()).filter(Boolean).forEach((category) => {
+    if (isAreaPricingCategory(category)) return;
     const key = getCategoryKey(category);
     if (key !== "base" && key !== "main_material" && key !== "custom_cabinet" && key !== "other") return;
     if (seenKeys.has(key)) return;
@@ -695,7 +721,7 @@ function orderQuoteCategories(categories: string[]) {
     normalized.push(key);
   });
   const directBuiltIns = builtInDirectCategories.filter((category) => normalized.some((item) => sameQuoteCategory(item, category)));
-  return [...directBuiltIns, "other"];
+  return [...directBuiltIns, ...(hasAreaPricing ? [PACKAGE_AREA_CATEGORY] : []), "other"];
 }
 
 function getQuoteCategoriesForItems(categories: string[], items: Pick<QuotationItem, "category">[]) {
@@ -749,6 +775,7 @@ function normalizeQuotaLibraryItem(value: unknown): QuotaLibraryItem | null {
     name,
     constructionDescription: String(raw.constructionDescription || "").trim(),
     unit: String(raw.unit || "").trim(),
+    pricingMode: raw.pricingMode === "single" ? "single" : "split",
     laborPrice: Math.max(0, laborPrice),
     materialPrice: Math.max(0, materialPrice),
     internalLaborCost: Math.max(0, internalLaborCost),
@@ -1074,13 +1101,7 @@ function isValidDecimalInput(value: string) {
 }
 
 function normalizeArithmeticExpression(value: string) {
-  return value
-    .replace(/（/g, "(")
-    .replace(/）/g, ")")
-    .replace(/×/g, "*")
-    .replace(/÷/g, "/")
-    .replace(/，/g, ",")
-    .trim();
+  return normalizeManualQuantityExpression(value);
 }
 
 function parseQuantityExpression(value: string): number | null {
@@ -1252,6 +1273,8 @@ function QuantityLinkInput({
   onOpenQuantityLink,
   quantityLinkItems,
   targetIndex,
+  invalidDraft,
+  onInvalidDraftChange,
 }: {
   item: QuotationItem;
   readOnly?: boolean;
@@ -1259,35 +1282,83 @@ function QuantityLinkInput({
   onOpenQuantityLink: (event?: MouseEvent<HTMLButtonElement>) => void;
   quantityLinkItems?: QuotationItem[];
   targetIndex?: number;
+  invalidDraft?: InvalidQuantityDraft | null;
+  onInvalidDraftChange?: (draft: InvalidQuantityDraft | null) => void;
 }) {
   const formula = useMemo(
     () => parseQuotationQuantityFormula(item.quantity_formula),
     [item.quantity_formula],
   );
+  const manualFormula = useMemo(
+    () => parseManualQuantityFormula(item.quantity_formula),
+    [item.quantity_formula],
+  );
   const [error, setError] = useState("");
+  const invalidDraftValue = invalidDraft?.value || "";
   const inputRef = useRef<HTMLInputElement | null>(null);
   const skipBlurCommitRef = useRef(false);
   const previousValueRef = useRef("");
   const moveToNextRowOnEnter = !isOtherCategory(item.category);
+  const showPackageZeroDash = isPackageIncludedItem(item) && Math.abs(toNumber(item.quantity)) < 0.000001;
+  const getQuantityDisplayValue = useCallback(
+    (quantity: unknown = item.quantity) => {
+      if (invalidDraftValue) return invalidDraftValue;
+      return isPackageIncludedItem(item) && Math.abs(toNumber(quantity)) < 0.000001 ? "-" : formatEditableNumber(toNumber(quantity));
+    },
+    [invalidDraftValue, item],
+  );
+
+  const showError = (message: string, draftValue?: string) => {
+    setError(message);
+    if (draftValue !== undefined) onInvalidDraftChange?.({ value: draftValue, message });
+  };
+
+  const clearInvalidDraft = () => onInvalidDraftChange?.(null);
+
+  const updateInvalidDraftValue = (value: string) => {
+    if (!invalidDraftValue) return;
+    onInvalidDraftChange?.({
+      value,
+      message: error || invalidDraft?.message || "请输入有效数字、算式或 [编号] 联动公式",
+    });
+  };
+
+  useEffect(() => {
+    setError(invalidDraft?.message || "");
+  }, [invalidDraft?.message]);
+
+  useEffect(() => {
+    if (!invalidDraftValue) return;
+    const input = inputRef.current;
+    if (!input) return;
+    input.value = invalidDraftValue;
+    previousValueRef.current = invalidDraftValue;
+  }, [invalidDraftValue]);
 
   const prepareEditing = (input: HTMLInputElement) => {
     if (readOnly) return;
     const quantityText = formatEditableNumber(item.quantity);
     if (!formula) {
-      input.value = Math.abs(toNumber(item.quantity)) < 0.000001 ? "" : quantityText;
+      input.value = invalidDraftValue || manualFormula || (showPackageZeroDash ? "" : Math.abs(toNumber(item.quantity)) < 0.000001 ? "" : quantityText);
       previousValueRef.current = input.value;
-      if (error) setError("");
       return;
     }
-    input.value = quantityText;
+    input.value = invalidDraftValue || quantityText;
     previousValueRef.current = input.value;
-    if (error) setError("");
   };
 
   const restoreDisplayValue = () => {
     const input = inputRef.current;
     if (!input) return;
-    const displayValue = formatEditableNumber(item.quantity);
+    const displayValue = getQuantityDisplayValue();
+    input.value = displayValue;
+    previousValueRef.current = displayValue;
+  };
+
+  const restoreEditingValue = () => {
+    const input = inputRef.current;
+    if (!input) return;
+    const displayValue = invalidDraftValue || manualFormula || (showPackageZeroDash ? "" : formatEditableNumber(item.quantity));
     input.value = displayValue;
     previousValueRef.current = displayValue;
   };
@@ -1306,27 +1377,28 @@ function QuantityLinkInput({
       setError("");
       return;
     }
-    const expression = raw.replace(/^=/, "");
+    const expression = normalizeManualQuantityExpression(raw.replace(/^=/, ""));
     if (formula) {
       if (/[\[#(]/.test(expression)) {
         if (!quantityLinkItems || targetIndex === undefined) {
-          setError("当前单元格无法解析数量联动");
+          showError("当前单元格无法解析数量联动", raw);
           return;
         }
         const parsed = parseQuotationQuantityFormulaRows(quantityLinkItems, targetIndex, expression);
         if (!parsed.formula || parsed.error) {
-          setError(parsed.error || "数量联动公式无效");
+          showError(parsed.error || "数量联动公式无效", raw);
           return;
         }
         const nextQuantity = calculateQuotationQuantityFormula(quantityLinkItems, parsed.formula);
         if (nextQuantity === null) {
-          setError("数量联动计算结果无效");
+          showError("数量联动计算结果无效", raw);
           return;
         }
         onChange({
           quantity: toMoney(nextQuantity),
           quantity_formula: serializeQuotationQuantityFormula(parsed.formula),
         });
+        clearInvalidDraft();
         setError("");
         return;
       }
@@ -1335,7 +1407,7 @@ function QuantityLinkInput({
       const adjustmentTerms = parseQuotationQuantityConstantTerms(adjustmentText);
       if (adjustmentTerms) {
         if (!quantityLinkItems || targetIndex === undefined) {
-          setError("当前单元格无法解析数量联动调整");
+          showError("当前单元格无法解析数量联动调整", raw);
           return;
         }
         let nextExpression = formula.expression;
@@ -1353,77 +1425,91 @@ function QuantityLinkInput({
         };
         const formulaError = getQuotationQuantityFormulaError(quantityLinkItems, targetIndex, nextFormula);
         if (formulaError) {
-          setError(formulaError);
+          showError(formulaError, raw);
           return;
         }
         const nextQuantity = calculateQuotationQuantityFormula(quantityLinkItems, nextFormula);
         if (nextQuantity === null) {
-          setError("数量联动计算结果无效");
+          showError("数量联动计算结果无效", raw);
           return;
         }
         onChange({
           quantity: toMoney(nextQuantity),
           quantity_formula: serializeQuotationQuantityFormula(nextFormula),
         });
+        clearInvalidDraft();
         setError("");
         return;
       }
       const nextValue = normalizeNumberInputValue(expression);
       if (nextValue === null) {
-        setError("请输入 +0.5、-0.5 这样的调整式，或输入普通数字改为手动数量");
+        showError("请输入 +0.5、-0.5 这样的调整式，或输入普通数字改为手动数量", raw);
         return;
       }
       const nextQuantity = Number(Math.max(0, nextValue).toFixed(2));
       if (Math.abs(nextQuantity - toNumber(item.quantity)) >= 0.000001) {
         onChange({ quantity: nextQuantity, quantity_formula: null });
       }
+      clearInvalidDraft();
       setError("");
       return;
     }
     if (/[\[#]/.test(expression)) {
       if (!quantityLinkItems || targetIndex === undefined) {
-        setError("当前单元格无法解析数量联动");
+        showError("当前单元格无法解析数量联动", raw);
         return;
       }
       const parsed = parseQuotationQuantityFormulaRows(quantityLinkItems, targetIndex, expression);
       if (!parsed.formula || parsed.error) {
-        setError(parsed.error || "数量联动公式无效");
+        showError(parsed.error || "数量联动公式无效", raw);
         return;
       }
       const nextQuantity = calculateQuotationQuantityFormula(quantityLinkItems, parsed.formula);
       if (nextQuantity === null) {
-        setError("数量联动计算结果无效");
+        showError("数量联动计算结果无效", raw);
         return;
       }
       onChange({
         quantity: toMoney(nextQuantity),
         quantity_formula: serializeQuotationQuantityFormula(parsed.formula),
       });
+      clearInvalidDraft();
       setError("");
       return;
     }
     const nextValue = parseQuantityExpression(expression);
     if (nextValue === null) {
-      setError("请输入有效数字、算式或 [编号] 联动公式");
+      showError("请输入有效数字、算式或 [编号] 联动公式", raw);
       return;
     }
     const nextQuantity = Number(Math.max(0, nextValue).toFixed(2));
-    if (Math.abs(nextQuantity - toNumber(item.quantity)) >= 0.000001) {
+    const normalizedExpression = normalizeArithmeticExpression(expression);
+    const shouldKeepManualFormula = normalizedExpression !== formatEditableNumber(nextQuantity);
+    const nextManualExpression = shouldKeepManualFormula ? normalizedExpression : null;
+    const nextManualFormula = nextManualExpression ? serializeManualQuantityFormula(nextManualExpression) : null;
+    if (Math.abs(nextQuantity - toNumber(item.quantity)) >= 0.000001 || (manualFormula || null) !== nextManualExpression) {
       onChange({
         quantity: nextQuantity,
-        quantity_formula: null,
+        quantity_formula: nextManualFormula,
       });
     }
+    const input = inputRef.current;
+    if (input) {
+      const displayValue = getQuantityDisplayValue(nextQuantity);
+      input.value = displayValue;
+      previousValueRef.current = displayValue;
+    }
+    clearInvalidDraft();
     setError("");
   };
 
   useEffect(() => {
     const input = inputRef.current;
-    if (!input || document.activeElement === input) return;
-    const displayValue = formatEditableNumber(item.quantity);
+    if (!input || document.activeElement === input || invalidDraftValue) return;
+    const displayValue = getQuantityDisplayValue();
     input.value = displayValue;
     previousValueRef.current = displayValue;
-  }, [item.quantity, item.quantity_formula]);
+  }, [getQuantityDisplayValue, invalidDraftValue, item.quantity]);
 
   return (
     <div className="quote-quantity-link-control">
@@ -1432,29 +1518,32 @@ function QuantityLinkInput({
         type="text"
         inputMode="text"
         readOnly={readOnly}
-        defaultValue={formatEditableNumber(item.quantity)}
+        defaultValue={getQuantityDisplayValue()}
         placeholder={formula ? "输入 +0.5 或 -0.5" : undefined}
         onMouseDown={(event) => {
           if (readOnly || formula) return;
-          if (Math.abs(toNumber(item.quantity)) >= 0.000001) return;
+          if (!invalidDraftValue && !manualFormula && Math.abs(toNumber(item.quantity)) >= 0.000001) return;
           prepareEditing(event.currentTarget);
         }}
         onFocus={(event) => {
-          if (!formula) return;
+          if (!formula && !manualFormula && !invalidDraftValue && !showPackageZeroDash) return;
           prepareEditing(event.currentTarget);
-          event.currentTarget.select();
+          const cursorPosition = event.currentTarget.value.length;
+          event.currentTarget.setSelectionRange(cursorPosition, cursorPosition);
         }}
         onChange={(event) => {
           const nextValue = event.target.value;
           const valid = formula
-            ? /^[\d+\-*/().\[\]#\s@]*$/.test(nextValue)
-            : /^[\d+\-*/().\[\]\s@]*$/.test(nextValue);
+            ? /^[\d+\-*/().（）×÷\[\]#\s@]*$/.test(nextValue)
+            : /^[\d+\-*/().（）×÷\[\]\s@]*$/.test(nextValue);
           if (!valid) {
             event.target.value = previousValueRef.current;
+            showError("请输入有效数字、算式或 [编号] 联动公式", previousValueRef.current);
             return;
           }
           previousValueRef.current = nextValue;
           if (error) setError("");
+          updateInvalidDraftValue(nextValue);
         }}
         onBlur={(event) => {
           if (skipBlurCommitRef.current) {
@@ -1479,15 +1568,14 @@ function QuantityLinkInput({
             event.preventDefault();
             setError("");
             const input = event.currentTarget;
-            input.value = formatEditableNumber(item.quantity);
-            previousValueRef.current = input.value;
+            restoreEditingValue();
             skipBlurCommitRef.current = true;
             input.blur();
             return;
           }
+          if (event.key === "ArrowLeft" || event.key === "ArrowRight") return;
           handleQuoteCellKeyDown(event);
         }}
-        data-quote-arrow-navigation="always"
         title={error || (formula ? "可输入 +0.5、-0.5 调整数量；输入普通数字会解除联动" : "可输入数字、算式或点击项目引用")}
         className={`quote-cell-editable quote-cell-input text-center font-semibold text-red-600${error ? " is-invalid" : ""}`}
       />
@@ -1717,7 +1805,7 @@ function isStandardQuotaSourceItem(item?: QuotationItem | null) {
 function createQuotationItemFromQuota(quota: QuotaLibraryItem, category: QuotationItem["category"], space?: string): QuotationItem {
   const materialPrice = toMoney(quota.materialPrice);
   const laborPrice = toMoney(quota.laborPrice);
-  const totalPrice = toMoney(quota.totalPrice || materialPrice + laborPrice);
+  const totalPrice = toMoney(quota.totalPrice ?? (materialPrice + laborPrice));
   const itemId = makeClientItemId();
   return {
     id: itemId,
@@ -1735,7 +1823,9 @@ function createQuotationItemFromQuota(quota: QuotaLibraryItem, category: Quotati
     remark: quota.code ? `定额编号：${quota.code}` : "",
     unit: quota.unit,
     quantity: 0,
-    unit_price: isBaseCategory(category) ? materialPrice + laborPrice : totalPrice,
+    pricing_mode: quota.pricingMode === "single" ? "single" : "split",
+    quota_source_total_price: totalPrice,
+    unit_price: isBaseCategory(category) && quota.pricingMode !== "single" ? materialPrice + laborPrice : totalPrice,
     material_cost: materialPrice,
     labor_cost: laborPrice,
     cost_material_unit: toMoney(quota.internalMaterialCost || 0),
@@ -1988,7 +2078,7 @@ function normalizeQuotationItems(items: QuotationItem[], options: { inferMissing
       client_key: item.client_key || item.id || makeClientItemKey(),
       price_manually_edited: Math.max(0, Math.min(3, Number(item.price_manually_edited || 0))),
       quantity: toMoney(Math.max(0, toNumber(item.quantity))),
-      quantity_formula: serializeQuotationQuantityFormula(item.quantity_formula) || null,
+      quantity_formula: serializeQuantityFormulaValue(item.quantity_formula) || null,
       space: inferItemSpace(item) || (options.inferMissingSpace ? guessItemSpace(item) : ""),
       ...(isOther ? {
         fee_calc_method: feeMethod,
@@ -2129,7 +2219,7 @@ function cloneItemForSpace(
     quantity_formula: copiedItemIdBySourceId
       ? remapQuotationQuantityFormulaIds(item.quantity_formula, copiedItemIdBySourceId)
       : sameSpace
-        ? serializeQuotationQuantityFormula(item.quantity_formula) || null
+        ? serializeQuantityFormulaValue(item.quantity_formula) || null
         : null,
   };
 }
@@ -2226,13 +2316,14 @@ function calculate(items: QuotationItem[], settings: QuotationDetail["settings"]
 }
 
 function getBaseOrMaterialItemUnitPrice(item: QuotationItem) {
-  if (!isBaseCategory(item.category)) return toNumber(item.unit_price);
+  if (item.pricing_mode === "single" || !isBaseCategory(item.category)) return toNumber(item.unit_price);
   const material = toNumber(item.material_cost);
   const labor = toNumber(item.labor_cost);
   return material || labor ? material + labor : toNumber(item.unit_price);
 }
 
 function getBaseOrMaterialItemTotal(item: QuotationItem) {
+  if (isPackageIncludedItem(item)) return 0;
   if (isCustomCabinetCategory(item.category)) {
     const area = getCustomCabinetArea(item);
     const quantity = toNumber(item.quantity);
@@ -2266,6 +2357,8 @@ type DiscountRule = {
 };
 
 function getBaseLaborSubtotal(item: QuotationItem) {
+  if (item.pricing_mode === "single") return 0;
+  if (isPackageIncludedItem(item)) return 0;
   if (!isBaseCategory(item.category)) return 0;
   const materialUnit = toNumber(item.material_cost);
   const rawLaborUnit = toNumber(item.labor_cost);
@@ -2274,6 +2367,8 @@ function getBaseLaborSubtotal(item: QuotationItem) {
 }
 
 function getBaseMaterialSubtotal(item: QuotationItem) {
+  if (item.pricing_mode === "single") return 0;
+  if (isPackageIncludedItem(item)) return 0;
   if (!isBaseCategory(item.category)) return 0;
   return toMoney(toNumber(item.quantity) * toNumber(item.material_cost));
 }
@@ -2502,7 +2597,7 @@ export default function QuotationDetailPage() {
   const searchParams = useSearchParams();
   const quotationId = params.id;
   const [data, setData] = useState<QuotationDetail | null>(null);
-  const [items, setItems] = useState<QuotationItem[]>([]);
+  const [items, setRawItems] = useState<QuotationItem[]>([]);
   const [quotationType, setQuotationType] = useState("");
   const [settings, setSettings] = useState<QuotationDetail["settings"]>({
     managementFeeRate: 0,
@@ -2519,6 +2614,19 @@ export default function QuotationDetailPage() {
     excludeLaborOnlyDiscountItems: false,
     warrantyMonths: 24,
   });
+  const setItems = useCallback((action: React.SetStateAction<QuotationItem[]>) => {
+    setRawItems((current) => {
+      const next = typeof action === "function" ? action(current) : action;
+      if (next === current || settings?.splitCustomerPrice !== false) return next;
+      let changed = false;
+      const normalized = next.map((item) => {
+        if (!isBaseCategory(item.category) || item.pricing_mode === "single") return item;
+        changed = true;
+        return { ...item, pricing_mode: "single" as const, unit_price: Number(item.quota_source_total_price ?? item.unit_price) };
+      });
+      return changed ? normalized : next;
+    });
+  }, [settings?.splitCustomerPrice]);
   const [title, setTitle] = useState("装修报价单");
   const [terms, setTerms] = useState("");
   const [notes, setNotes] = useState("");
@@ -2534,6 +2642,7 @@ export default function QuotationDetailPage() {
   const [autoSaveErrorMessage, setAutoSaveErrorMessage] = useState("");
   const [activeCategory, setActiveCategory] = useState<QuotationItem["category"]>("base");
   const [activeSpace, setActiveSpace] = useState(allSpacesValue);
+  const [invalidQuantityDrafts, setInvalidQuantityDrafts] = useState<Record<string, InvalidQuantityDraft>>({});
   const [manualSpaceCategories, setManualSpaceCategories] = useState<Record<string, string[]>>({});
   const [itemSearch, setItemSearch] = useState("");
   const [packageDetailOpen, setPackageDetailOpen] = useState(false);
@@ -2641,6 +2750,8 @@ export default function QuotationDetailPage() {
 	    areaSize: "",
 	    quotationType: "",
 	    decorationType: "",
+      notes: "",
+      customerVisibleNote: "",
   });
   const [categoryCreateMenu, setCategoryCreateMenu] = useState<{ x: number; y: number } | null>(null);
   const [shareUrl, setShareUrl] = useState("");
@@ -2687,10 +2798,14 @@ export default function QuotationDetailPage() {
   useEffect(() => {
     if (loading) return;
     setItems((current) => {
-      const nextItems = applyQuotationQuantityLinks(current);
+      const needsScope = settings?.templatePricing?.mode === "area";
+      const scopedItems = needsScope && current.some((item) => !isOtherCategory(item.category) && item.category !== PACKAGE_AREA_CATEGORY && item.category !== PACKAGE_AREA_OVERAGE_CATEGORY && !item.package_scope)
+        ? current.map((item) => !isOtherCategory(item.category) && item.category !== PACKAGE_AREA_CATEGORY && item.category !== PACKAGE_AREA_OVERAGE_CATEGORY && !item.package_scope ? { ...item, package_scope: "extra" as const } : item)
+        : current;
+      const nextItems = applyQuotationQuantityLinks(scopedItems);
       return nextItems === current ? current : nextItems;
     });
-  }, [items, loading]);
+  }, [items, loading, settings?.templatePricing?.mode, setItems]);
 
   useEffect(() => {
     setQuantityLinkDialog(null);
@@ -2819,7 +2934,7 @@ export default function QuotationDetailPage() {
       });
       return changed ? nextItems : current;
     });
-  }, [items]);
+  }, [items, setItems]);
 
   useEffect(() => {
     if (!quotationTotalBreakdownOpen) return;
@@ -2935,7 +3050,7 @@ export default function QuotationDetailPage() {
     setAutoSaveStatus("idle");
     setAutoSaveErrorMessage("");
     setLoading(false);
-  }, [quotationId]);
+  }, [quotationId, setItems]);
 
   useEffect(() => {
     load();
@@ -3078,6 +3193,7 @@ export default function QuotationDetailPage() {
 
   const quotationHouseArea = useMemo(() => toNumber(data?.customer_area_size ?? data?.project_area), [data?.customer_area_size, data?.project_area]);
   const totals = useMemo(() => calculate(items, settings, quotationHouseArea), [items, quotationHouseArea, settings]);
+  const areaPricingAmount = useMemo(() => items.filter((item) => isAreaPricingCategory(item.category)).reduce((sum, item) => sum + getBaseOrMaterialItemTotal(item), 0), [items]);
   const formulaFinalFeeLabel = useMemo(() => {
     const finalFeeItemId = String(settings?.formulaFinalFeeItemId || "").trim();
     const finalFeeName = finalFeeItemId
@@ -3506,11 +3622,27 @@ export default function QuotationDetailPage() {
     () => quoteCategories.filter((category) => !isOtherCategory(category)),
     [quoteCategories],
   );
+  const isAreaPackageQuote = settings?.templatePricing?.mode === "area";
+  const isAreaPackageSystemCategory = useCallback((category: unknown) => category === PACKAGE_AREA_CATEGORY || category === PACKAGE_AREA_OVERAGE_CATEGORY, []);
+  const itemMatchesProjectSpace = useCallback((item: QuotationItem, space: string) => {
+    if (isOtherCategory(item.category)) return true;
+    if (!isAreaPackageQuote) return space === allSpacesValue || inferItemSpace(item) === space;
+    if (space === allSpacesValue) return !isPackageIncludedItem(item) && !isAreaPackageSystemCategory(item.category);
+    if (space === packageIncludedSpaceValue) return isPackageIncludedItem(item);
+    return !isPackageIncludedItem(item) && !isAreaPackageSystemCategory(item.category) && inferItemSpace(item) === space;
+  }, [isAreaPackageQuote, isAreaPackageSystemCategory]);
   const visibleQuoteCategories = useMemo(() => {
-    if (activeSpace === allSpacesValue) return quoteCategories;
+    if (activeSpace === allSpacesValue) return quoteCategories.filter((category) => !isAreaPricingCategory(category));
+    if (activeSpace === packageIncludedSpaceValue) {
+      const includedCategories = quoteCategories.filter((category) => {
+        if (isOtherCategory(category)) return false;
+        return items.some((item) => isPackageIncludedItem(item) && sameQuoteCategory(item.category, category));
+      });
+      return orderQuoteCategories(includedCategories);
+    }
     const manualCategories = manualSpaceCategories[activeSpace] || [];
     return orderQuoteCategories([...quoteCategories, ...manualCategories]);
-  }, [activeSpace, manualSpaceCategories, quoteCategories]);
+  }, [activeSpace, items, manualSpaceCategories, quoteCategories]);
   const visibleProjectQuoteCategories = useMemo(
     () => visibleQuoteCategories.filter((category) => !isOtherCategory(category)),
     [visibleQuoteCategories],
@@ -3521,25 +3653,25 @@ export default function QuotationDetailPage() {
       if (isOtherCategory(category)) return false;
       return items.some((item) => {
         if (!sameQuoteCategory(item.category, category)) return false;
-        return activeSpace === allSpacesValue || inferItemSpace(item) === activeSpace;
+        return itemMatchesProjectSpace(item, activeSpace);
       });
     });
-    return orderQuoteCategories([...categoriesWithItems, ...manualCategories]).filter((category) => !isOtherCategory(category));
-  }, [activeSpace, items, manualSpaceCategories, quoteCategories]);
+    return orderQuoteCategories([...categoriesWithItems, ...manualCategories]).filter((category) => !isOtherCategory(category) && !isAreaPricingCategory(category));
+  }, [activeSpace, itemMatchesProjectSpace, items, manualSpaceCategories, quoteCategories]);
   const getFirstProjectCategoryForSpace = useCallback((space: string) => {
     const categoriesWithItems = quoteCategories.filter((category) => {
       if (isOtherCategory(category)) return false;
       return items.some((item) => {
         if (isOtherCategory(item.category) || !sameQuoteCategory(item.category, category)) return false;
-        return space === allSpacesValue || inferItemSpace(item) === space;
+        return itemMatchesProjectSpace(item, space);
       });
     });
-    const manualCategories = manualSpaceCategories[space] || [];
+    const manualCategories = space === packageIncludedSpaceValue ? [] : manualSpaceCategories[space] || [];
     return orderQuoteCategories([
       ...categoriesWithItems,
       ...manualCategories,
     ]).find((category) => !isOtherCategory(category)) || noQuoteCategoryValue;
-  }, [items, manualSpaceCategories, quoteCategories]);
+  }, [itemMatchesProjectSpace, items, manualSpaceCategories, quoteCategories]);
   const switchToProjectSpace = useCallback((space: string) => {
     setActiveSpace(space);
     setActiveCategory(getFirstProjectCategoryForSpace(space));
@@ -3551,16 +3683,40 @@ export default function QuotationDetailPage() {
     }),
     [items, quotationHouseArea, quoteCategories, totals.discount],
   );
-  const activeSpaces = useMemo(() => getSpacesForCategory(items, activeCategory, customSpaces), [activeCategory, customSpaces, items]);
+  const activeSpaces = useMemo(() => {
+    if (!isAreaPackageQuote) return getSpacesForCategory(items, activeCategory, customSpaces);
+    const categoryItems = items.filter((item) => sameQuoteCategory(item.category, activeCategory));
+    const itemSpaces = categoryItems
+      .filter((item) => !isPackageIncludedItem(item) && !isAreaPackageSystemCategory(item.category))
+      .map((item) => inferItemSpace(item));
+    const customVisibleSpaces = customSpaces.filter((space) => {
+      const directItems = items.filter((item) => !isOtherCategory(item.category) && !isAreaPackageSystemCategory(item.category) && inferItemSpace(item) === space);
+      return space === activeSpace || directItems.some((item) => !isPackageIncludedItem(item));
+    });
+    return uniqueValues([...customVisibleSpaces, ...itemSpaces]);
+  }, [activeCategory, activeSpace, customSpaces, isAreaPackageQuote, isAreaPackageSystemCategory, items]);
   const feeScopeOptions = useMemo(() => getFeeScopeOptions(items, customSpaces, quoteCategories), [customSpaces, items, quoteCategories]);
   const spaceTabOptions = useMemo(
-    () => uniqueValues([
-      ...customSpaces,
-      ...items
-        .filter((item) => !isOtherCategory(item.category))
-        .map((item) => inferItemSpace(item)),
-    ]),
-    [customSpaces, items],
+    () => {
+      if (!isAreaPackageQuote) {
+        return uniqueValues([
+          ...customSpaces,
+          ...items
+            .filter((item) => !isOtherCategory(item.category))
+            .map((item) => inferItemSpace(item)),
+        ]);
+      }
+      const directItems = items.filter((item) => !isOtherCategory(item.category) && !isAreaPackageSystemCategory(item.category));
+      const customVisibleSpaces = customSpaces.filter((space) => {
+        const spaceItems = directItems.filter((item) => inferItemSpace(item) === space);
+        return space === activeSpace || spaceItems.some((item) => !isPackageIncludedItem(item));
+      });
+      const personalizedSpaces = directItems
+        .filter((item) => !isPackageIncludedItem(item))
+        .map((item) => inferItemSpace(item));
+      return uniqueValues([packageIncludedSpaceValue, ...customVisibleSpaces, ...personalizedSpaces]);
+    },
+    [activeSpace, customSpaces, isAreaPackageQuote, isAreaPackageSystemCategory, items],
   );
   useEffect(() => {
     updateHiddenSpaceCount();
@@ -3590,26 +3746,27 @@ export default function QuotationDetailPage() {
     };
   }, [scheduleHiddenSpaceCountUpdate, spaceTabOptions.length, updateHiddenSpaceCount]);
   const isAllSpaceView = !isOtherCategory(activeCategory) && activeSpace === allSpacesValue;
+  const activeSpaceDisplayName = activeSpace === allSpacesValue ? "全部空间" : activeSpace === packageIncludedSpaceValue ? packageIncludedSpaceLabel : activeSpace;
   const activeSpaceAmount = useMemo(
     () => isOtherCategory(activeCategory)
       ? 0
       : items
         .filter((item) => sameQuoteCategory(item.category, activeCategory))
-        .filter((item) => isAllSpaceView || inferItemSpace(item) === activeSpace)
+        .filter((item) => itemMatchesProjectSpace(item, activeSpace))
         .reduce((sum, item) => sum + getItemTotal(item), 0),
-    [activeCategory, activeSpace, isAllSpaceView, items],
+    [activeCategory, activeSpace, itemMatchesProjectSpace, items],
   );
   const activeItems = useMemo(() => {
     const keyword = itemSearch.trim().toLowerCase();
     return items
       .map((item, index) => ({ item, index }))
       .filter(({ item }) => sameQuoteCategory(item.category, activeCategory))
-      .filter(({ item }) => isOtherCategory(activeCategory) || isAllSpaceView || inferItemSpace(item) === activeSpace)
+      .filter(({ item }) => isOtherCategory(activeCategory) || itemMatchesProjectSpace(item, activeSpace))
       .filter(({ item }) => {
         if (!keyword) return true;
         return String(item.name || "").toLowerCase().includes(keyword);
       });
-  }, [activeCategory, activeSpace, isAllSpaceView, itemSearch, items]);
+  }, [activeCategory, activeSpace, itemMatchesProjectSpace, itemSearch, items]);
   const findReplaceMatches = useMemo(
     () => buildFindReplaceMatches(activeItems, findReplaceKeyword, findReplaceScopes),
     [activeItems, findReplaceKeyword, findReplaceScopes],
@@ -3744,9 +3901,65 @@ export default function QuotationDetailPage() {
     } finally {
       setQuotaUpdateSyncingIds([]);
     }
-  }, [checkQuotaUpdates, isReadonly, quotationId, quotaUpdateNotices.length, waitForLatestAutoSave]);
+  }, [checkQuotaUpdates, isReadonly, quotationId, quotaUpdateNotices.length, waitForLatestAutoSave, setItems]);
+
+  const setInvalidQuantityDraft = useCallback((itemKey: string, draft: InvalidQuantityDraft | null) => {
+    setInvalidQuantityDrafts((current) => {
+      const exists = Object.prototype.hasOwnProperty.call(current, itemKey);
+      if (!draft) {
+        if (!exists) return current;
+        const next = { ...current };
+        delete next[itemKey];
+        return next;
+      }
+      const currentDraft = current[itemKey];
+      if (currentDraft?.value === draft.value && currentDraft.message === draft.message) return current;
+      return { ...current, [itemKey]: draft };
+    });
+  }, []);
+
+  const focusInvalidQuantityCell = useCallback((itemIndex: number) => {
+    setItemSearch("");
+    window.setTimeout(() => {
+      const row = document.querySelector<HTMLElement>(`[data-quote-item-row][data-index="${itemIndex}"]`);
+      const input = row?.querySelector<HTMLInputElement>(".quote-quantity-link-control > input");
+      if (!input) return;
+      row?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+      window.setTimeout(() => {
+        input.focus();
+        const cursorPosition = input.value.length;
+        input.setSelectionRange(cursorPosition, cursorPosition);
+      }, 180);
+    }, 80);
+  }, []);
+
+  const guardInvalidQuantityBeforeLeaving = useCallback((message = "请先修正红色闪烁的数量单元格，再返回预算记录。") => {
+    const pricingError = pricingConfigurationError(items, settings);
+    if (pricingError) { window.alert(pricingError); return false; }
+    const invalidEntries = Object.entries(invalidQuantityDrafts);
+    if (invalidEntries.length === 0) return true;
+    const invalidKeys = new Set(invalidEntries.map(([key]) => key));
+    const targetIndex = items.findIndex((item, index) => invalidKeys.has(getQuotationItemKey(item, index)));
+    if (targetIndex < 0) {
+      setInvalidQuantityDrafts({});
+      return true;
+    }
+    const targetItem = items[targetIndex];
+    const targetCategory = targetItem.category || "main_material";
+    const targetSpace = inferItemSpace(targetItem);
+    setActiveCategory(targetCategory);
+    if (!isOtherCategory(targetCategory)) setActiveSpace(targetSpace || allSpacesValue);
+    setSystemDialog({
+      title: "数量格式不正确",
+      message,
+      tone: "danger",
+    });
+    focusInvalidQuantityCell(targetIndex);
+    return false;
+  }, [focusInvalidQuantityCell, invalidQuantityDrafts, items, settings]);
 
   const returnToBudgetRecords = () => {
+    if (!guardInvalidQuantityBeforeLeaving()) return;
     if (!isReadonly && !loading && lastSavedPayloadRef.current !== latestSavePayloadTextRef.current) {
       try {
         const requestBody = allowEmptyItemsSaveRef.current
@@ -3795,6 +4008,7 @@ export default function QuotationDetailPage() {
       return;
     }
     if (activeSpace === allSpacesValue) return;
+    if (activeSpace === packageIncludedSpaceValue) return;
     if (activeSpaces.length && !activeSpaces.includes(activeSpace)) {
       setActiveSpace(activeSpaces[0]);
     }
@@ -3852,6 +4066,7 @@ export default function QuotationDetailPage() {
   const updateItem = useCallback((index: number, patch: Partial<QuotationItem>) => {
     if (isReadonly) return;
     const currentItem = items[index];
+    if (settings?.templatePricing?.mode === "area" && isAreaPackageSystemCategory(currentItem?.category)) return;
     const referenceId = currentItem ? getQuantityLinkItemId(currentItem) : "";
     const quantityDependents = referenceId
       ? getQuotationQuantityLinkDependents(items, new Set([referenceId]))
@@ -3884,7 +4099,7 @@ export default function QuotationDetailPage() {
       }
     }
     setItems((current) => current.map((item, i) => i === index ? { ...item, ...patch } : item));
-  }, [isReadonly, items]);
+  }, [isAreaPackageSystemCategory, isReadonly, items, settings?.templatePricing?.mode, setItems]);
 
   const quantityLinkDialogTarget = quantityLinkDialog ? items[quantityLinkDialog.index] || null : null;
   const quantityLinkVisibleItems = useMemo(() => {
@@ -4166,9 +4381,7 @@ export default function QuotationDetailPage() {
         ...copy,
         id: copiedKey,
         client_key: copiedKey,
-        quantity_formula: parseQuotationQuantityFormula(source.quantity_formula)
-          ? serializeQuotationQuantityFormula(source.quantity_formula)
-          : null,
+        quantity_formula: serializeQuantityFormulaValue(source.quantity_formula) || null,
         name: source.name ? `${source.name} 副本` : "",
       };
       const next = [...current];
@@ -4328,6 +4541,7 @@ export default function QuotationDetailPage() {
   const removeItem = (index: number) => {
     if (isReadonly) return;
     const targetItem = items[index];
+    if (settings?.templatePricing?.mode === "area" && isAreaPackageSystemCategory(targetItem?.category)) return;
     const key = targetItem ? getQuotationItemKey(targetItem, index) : "";
     const referencedBy = key ? getFeeReferenceDependentNames(items, new Set([key])) : [];
     if (referencedBy.length > 0) {
@@ -4563,11 +4777,25 @@ export default function QuotationDetailPage() {
     if (movedItemTimerRef.current) window.clearTimeout(movedItemTimerRef.current);
     movedItemTimerRef.current = window.setTimeout(() => setRecentlyMovedItemKey(null), 650);
     return true;
-  }, [isReadonly]);
+  }, [isReadonly, setItems]);
 
   useEffect(() => () => {
     if (movedItemTimerRef.current) window.clearTimeout(movedItemTimerRef.current);
   }, []);
+
+  const reorderPackageSpace = (source: string, target: string, position: ItemDropPosition) => {
+    if (isReadonly || activeSpace !== packageIncludedSpaceValue) return;
+    const current = itemsRef.current;
+    const next = reorderQuotationSpaceItems(
+      current,
+      (item) => isPackageIncludedItem(item) && item.category === activeCategory,
+      (item) => inferItemSpace(item) || "未分类",
+      source, target, position,
+    );
+    if (next === current) return;
+    itemsRef.current = next;
+    setItems(next);
+  };
 
   const startPointerItemDrag = (event: ReactPointerEvent<HTMLButtonElement>, index: number) => {
     if (isReadonly) return;
@@ -4712,7 +4940,11 @@ export default function QuotationDetailPage() {
 
   const deleteSelectedQuoteItems = useCallback(() => {
     if (isReadonly || selectedActiveItemKeys.length === 0) return;
-    const keysToDelete = new Set(selectedActiveItemKeys);
+    const protectedKeys = new Set(settings?.templatePricing?.mode === "area"
+      ? items.flatMap((item, index) => isAreaPackageSystemCategory(item.category) ? [getQuotationItemKey(item, index)] : [])
+      : []);
+    const keysToDelete = new Set(selectedActiveItemKeys.filter((key) => !protectedKeys.has(key)));
+    if (keysToDelete.size === 0) return;
     const count = keysToDelete.size;
     const quantityReferenceIds = new Set(items
       .filter((item, index) => keysToDelete.has(getQuotationItemKey(item, index)))
@@ -4740,7 +4972,7 @@ export default function QuotationDetailPage() {
       confirmText: repair.repairs.length > 0 ? "删除并自动调整" : "删除",
       onConfirm: applyDeletion,
     });
-  }, [isReadonly, items, selectedActiveItemKeys]);
+  }, [isAreaPackageSystemCategory, isReadonly, items, selectedActiveItemKeys, settings?.templatePricing?.mode, setItems]);
 
   const openProjectInfoEditor = () => {
     if (!data || isReadonly) return;
@@ -4762,12 +4994,15 @@ export default function QuotationDetailPage() {
 	      areaSize: formatProjectInfoArea(data.customer_area_size ?? data.project_area),
 	      quotationType,
 	      decorationType: String(data.customer_decoration_type || "").trim(),
+        notes: String(data.notes || ""),
+        customerVisibleNote: String(data.customer_visible_note || ""),
     });
     setProjectInfoOpen(true);
   };
 
   const openQuotationPreview = async () => {
     if (quotationPreviewOpening) return;
+    if (!guardInvalidQuantityBeforeLeaving("请先修正红色闪烁的数量单元格，再预览报价。")) return;
     setQuotationPreviewOpening(true);
     try {
       await waitForLatestAutoSave();
@@ -4803,6 +5038,8 @@ export default function QuotationDetailPage() {
 	      areaSize: formatProjectInfoArea(data.customer_area_size ?? data.project_area),
 	      quotationType,
 	      decorationType: String(data.customer_decoration_type || "").trim(),
+        notes: String(data.notes || ""),
+        customerVisibleNote: String(data.customer_visible_note || ""),
     });
     setProjectInfoOpen(true);
     const nextParams = new URLSearchParams(searchParams.toString());
@@ -4874,6 +5111,8 @@ export default function QuotationDetailPage() {
 	          area_size: toNumber(projectInfoForm.areaSize),
 	          quotation_type: projectInfoForm.quotationType.trim(),
 	          decoration_type: projectInfoForm.decorationType.trim(),
+            notes: projectInfoForm.notes,
+            customer_visible_note: projectInfoForm.customerVisibleNote,
         }),
       });
       const payload = await res.json().catch(() => ({}));
@@ -4891,8 +5130,8 @@ export default function QuotationDetailPage() {
 
   const addCategoryByType = (type: string) => {
     if (isReadonly) return;
-    if (activeSpace === allSpacesValue) {
-      showAlert("请先选择空间", "全部是汇总视图，不能直接新增报价大类。请先选择客餐厅、卧室等具体空间。");
+    if (activeSpace === allSpacesValue || activeSpace === packageIncludedSpaceValue) {
+      showAlert("请先选择空间", "全部和套餐内项目都是汇总视图，不能直接新增报价大类。请先选择具体的个性化空间/类别。");
       setCategoryCreateMenu(null);
       return;
     }
@@ -4929,8 +5168,8 @@ export default function QuotationDetailPage() {
       return;
     }
     const categoryLabel = getCategoryLabel(category);
-    if (!isOtherCategory(category) && activeSpace !== allSpacesValue) {
-      const count = items.filter((item) => sameQuoteCategory(item.category, category) && inferItemSpace(item) === activeSpace).length;
+    if (!isOtherCategory(category) && activeSpace !== allSpacesValue && activeSpace !== packageIncludedSpaceValue) {
+      const count = items.filter((item) => sameQuoteCategory(item.category, category) && itemMatchesProjectSpace(item, activeSpace)).length;
       const manualVisible = (manualSpaceCategories[activeSpace] || []).some((item) => sameQuoteCategory(item, category));
       if (!count) {
         if (!manualVisible) {
@@ -4958,7 +5197,7 @@ export default function QuotationDetailPage() {
         message: `确定删除「${activeSpace}」下的「${categoryLabel}」大类吗？只会删除当前空间的 ${count} 条明细，不会影响其他空间。`,
         confirmText: "删除",
         onConfirm: () => {
-          setItems((current) => current.filter((item) => !(sameQuoteCategory(item.category, category) && inferItemSpace(item) === activeSpace)));
+          setItems((current) => current.filter((item) => !(sameQuoteCategory(item.category, category) && itemMatchesProjectSpace(item, activeSpace))));
           setManualSpaceCategories((current) => ({
             ...current,
             [activeSpace]: (current[activeSpace] || []).filter((item) => !sameQuoteCategory(item, category)),
@@ -5397,17 +5636,18 @@ export default function QuotationDetailPage() {
 
   const clearSpaceCategoryItems = (space: string) => {
     if (isReadonly) return;
-    const count = items.filter((item) => !isOtherCategory(item.category) && inferItemSpace(item) === space).length;
+    const count = items.filter((item) => !isOtherCategory(item.category) && itemMatchesProjectSpace(item, space)).length;
     if (!count) {
       setSpaceMenu(null);
       return;
     }
+    const isPersonalizedOnly = isAreaPackageQuote && space !== allSpacesValue && space !== packageIncludedSpaceValue;
     showConfirm({
       title: "清空该空间/类别",
-      message: `确定清空「${space}」下的所有内容吗？该操作会清空该空间/类别中的基装、产品、定制柜项目，但不会删除空间/类别本身。`,
+      message: `确定清空「${space}」下的${isPersonalizedOnly ? "个性化" : "所有"}内容吗？该操作会清空该空间/类别中的基装、产品、定制柜项目，但不会删除空间/类别本身。`,
       confirmText: "清空",
       onConfirm: () => {
-        setItems((current) => current.filter((item) => isOtherCategory(item.category) || inferItemSpace(item) !== space));
+        setItems((current) => current.filter((item) => isOtherCategory(item.category) || !itemMatchesProjectSpace(item, space)));
         setSpaceMenu(null);
       },
     });
@@ -5417,11 +5657,11 @@ export default function QuotationDetailPage() {
     if (isReadonly) return;
     showConfirm({
       title: "删除空间/类别",
-      message: `确定删除空间「${space}」吗？该空间下的基装、产品和定制柜明细也会一起删除。`,
+      message: `确定删除空间「${space}」吗？${isAreaPackageQuote ? "该空间下的个性化基装、产品和定制柜明细也会一起删除，套餐内项目不会被删除。" : "该空间下的基装、产品和定制柜明细也会一起删除。"}`,
       confirmText: "删除",
       onConfirm: () => {
         updateSpaces((spaces) => spaces.filter((item) => item !== space));
-        setItems((current) => current.filter((item) => inferItemSpace(item) !== space));
+        setItems((current) => current.filter((item) => isOtherCategory(item.category) || !itemMatchesProjectSpace(item, space)));
         const fallback = activeSpaces.find((item) => item !== space) || allSpacesValue;
         setActiveSpace(fallback);
         setSpaceMenu(null);
@@ -5759,7 +5999,7 @@ export default function QuotationDetailPage() {
       if (packageItemIndex < 0) return [patch, ...current];
       return current.map((item, index) => index === packageItemIndex ? patch : item);
     });
-  }, [isReadonly, packagePricingConfig]);
+  }, [isReadonly, packagePricingConfig, setItems]);
 
   const handlePackageAreaInputChange = (value: string) => {
     const nextValue = sanitizeQuoteAreaInput(value);
@@ -5800,7 +6040,7 @@ export default function QuotationDetailPage() {
   const availableCategoryCreateOptions = quoteCategoryCreateOptions.filter(
     (option) => !displayedProjectQuoteCategories.some((category) => sameQuoteCategory(category, option.value)),
   );
-  const canAddCategoryInCurrentView = !isAllSpaceView && availableCategoryCreateOptions.length > 0;
+  const canAddCategoryInCurrentView = !isAllSpaceView && activeSpace !== packageIncludedSpaceValue && availableCategoryCreateOptions.length > 0;
   const showCategoryNavigation = activeCategory !== noQuoteCategoryValue && !isOtherCategory(activeCategory) && (displayedProjectQuoteCategories.length > 0 || (!isReadonly && canAddCategoryInCurrentView));
   const shouldShowCategoryChooser = !isOtherCategory(activeCategory) && displayedProjectQuoteCategories.length === 0;
   const quotaUpdateGroups = (() => {
@@ -6823,24 +7063,32 @@ export default function QuotationDetailPage() {
                   <i>{projectInfoForm.noRoomNumber && <Check className="h-3.5 w-3.5" />}</i>
                   暂无房号
                 </label>
-                <label className="quote-project-info-field">
+                <label className="quote-project-info-field quote-project-info-span-2">
                   <span>面积(m²)</span>
                   <div className="quote-project-info-area">
                     <input inputMode="decimal" value={projectInfoForm.areaSize} onChange={(event) => setProjectInfoForm((current) => ({ ...current, areaSize: sanitizeQuoteAreaInput(event.target.value) }))} placeholder="面积" />
                     <em>㎡</em>
                   </div>
                 </label>
-	                <label className="quote-project-info-field">
-	                  <span>装修类型</span>
-	                  <input list="quote-project-decoration-types" value={projectInfoForm.decorationType} onChange={(event) => setProjectInfoForm((current) => ({ ...current, decorationType: event.target.value }))} placeholder="如：全包/半包" />
-	                </label>
 	                <label className="quote-project-info-field quote-project-info-span-2">
 	                  <span>报价名称</span>
 	                  <input maxLength={20} value={projectInfoForm.quotationType} onChange={(event) => setProjectInfoForm((current) => ({ ...current, quotationType: event.target.value }))} placeholder="如：全包一期、局改增项等" />
 	                </label>
-                <datalist id="quote-project-decoration-types">
-                  {quoteDecorationTypeOptions.map((option) => <option key={option} value={option} />)}
-                </datalist>
+                <details open className={`quote-project-info-span-2 ${quotationWizardStyles.notes}`}>
+                  <summary>备注与附注<span>{projectInfoForm.notes.trim() || projectInfoForm.customerVisibleNote.trim() ? "已填写" : "选填"}</span></summary>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="flex min-w-0 flex-col text-sm">
+                      <span className="mb-1 block text-xs font-bold text-[#52647b]">内部备注</span>
+                      <span className="mb-2 block text-xs font-semibold leading-5 text-[#98a2b3]">仅系统内部查看，不会显示在客户报价单。</span>
+                      <textarea aria-label="内部备注" rows={3} value={projectInfoForm.notes} onChange={(event) => setProjectInfoForm((current) => ({ ...current, notes: event.target.value }))} className="min-h-[82px] flex-1 resize-none rounded-[10px] border border-[#cfd7e3] bg-white px-3 py-2.5 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:bg-white focus:ring-[3px] focus:ring-[#407aff]/12" placeholder="如：客户关注点、沟通记录、报价口径等" />
+                    </label>
+                    <label className="flex min-w-0 flex-col text-sm">
+                      <span className="mb-1 block text-xs font-bold text-[#52647b]">客户附注</span>
+                      <span className="mb-2 block text-xs font-semibold leading-5 text-[#98a2b3]">会显示在报价单底部，综合费用下方、签字栏上方。</span>
+                      <textarea aria-label="客户附注" rows={3} value={projectInfoForm.customerVisibleNote} onChange={(event) => setProjectInfoForm((current) => ({ ...current, customerVisibleNote: event.target.value }))} className="min-h-[82px] flex-1 resize-none rounded-[10px] border border-[#cfd7e3] bg-white px-3 py-2.5 text-sm font-semibold text-[#182230] outline-none transition placeholder:text-[#98a2b3] focus:border-[#407aff] focus:bg-white focus:ring-[3px] focus:ring-[#407aff]/12" placeholder="如：优惠说明、施工范围补充、特殊约定等" />
+                    </label>
+                  </div>
+                </details>
               </div>
             </div>
             <div className="quote-project-info-footer flex items-center justify-end gap-2 bg-white pt-4">
@@ -7776,8 +8024,10 @@ export default function QuotationDetailPage() {
                 </div>
                 <div className="quote-total-breakdown-list">
                   <div className="quote-total-breakdown-section-label">直接费用</div>
+                  {isAreaPackageQuote && <div className="quote-total-breakdown-row"><span>套餐价</span><strong className="tabular-nums">¥{formatQuoteAmount(areaPricingAmount)}</strong></div>}
+                  {isAreaPackageQuote && <div className="quote-total-breakdown-section-label">个性化</div>}
                   <div className="quote-total-breakdown-row"><span>基装</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.baseAmount)}</strong></div>
-                  <div className="quote-total-breakdown-row"><span>产品</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.mainMaterialAmount)}</strong></div>
+                  <div className="quote-total-breakdown-row"><span>产品</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.mainMaterialAmount - areaPricingAmount)}</strong></div>
                   <div className="quote-total-breakdown-row"><span>定制柜</span><strong className="tabular-nums">¥{formatQuoteAmount(totals.customCategoryAmount)}</strong></div>
                   <div className="quote-total-breakdown-divider" />
                   <div className="quote-total-breakdown-section-label">报价结果</div>
@@ -7831,6 +8081,8 @@ export default function QuotationDetailPage() {
               </button>
               {spaceTabOptions.map((space) => {
                 const active = !isOtherCategory(activeCategory) && activeSpace === space;
+                const isPackageIncludedTab = space === packageIncludedSpaceValue;
+                const spaceLabel = isPackageIncludedTab ? packageIncludedSpaceLabel : space;
                 if (editingSpaceName === space) {
                   return (
                     <input
@@ -7869,18 +8121,18 @@ export default function QuotationDetailPage() {
                       }
                       switchToProjectSpace(space);
                     }}
-                    onContextMenu={isReadonly ? undefined : (event) => openSpaceMenu(event, space)}
-                    onPointerDown={isReadonly ? undefined : (event) => startPointerSpaceDrag(event, space)}
-                    onDoubleClick={isReadonly ? undefined : () => startInlineRenameSpace(space)}
-                    title={isReadonly ? "查看空间" : "拖动调整顺序，双击重命名，右键更多操作"}
-                    className={`quote-space-tab quote-space-tab-draggable inline-flex min-h-8 shrink-0 select-none items-center gap-1 rounded-md border px-2.5 text-xs font-semibold transition ${isReadonly ? "" : "cursor-grab active:cursor-grabbing"} ${
+                    onContextMenu={isReadonly || isPackageIncludedTab ? undefined : (event) => openSpaceMenu(event, space)}
+                    onPointerDown={isReadonly || isPackageIncludedTab ? undefined : (event) => startPointerSpaceDrag(event, space)}
+                    onDoubleClick={isReadonly || isPackageIncludedTab ? undefined : () => startInlineRenameSpace(space)}
+                    title={isPackageIncludedTab ? "查看套餐内包含项目" : isReadonly ? "查看空间" : "拖动调整顺序，双击重命名，右键更多操作"}
+                    className={`quote-space-tab ${isPackageIncludedTab ? "" : "quote-space-tab-draggable"} inline-flex min-h-8 shrink-0 select-none items-center gap-1 rounded-md border px-2.5 text-xs font-semibold transition ${isReadonly || isPackageIncludedTab ? "" : "cursor-grab active:cursor-grabbing"} ${
                       active ? "quote-space-tab-active" : ""
                     } ${draggingSpace === space ? "scale-[0.98] opacity-55" : ""} ${dragOverSpace === space && draggingSpace !== space ? "quote-space-tab-drop-target" : ""}`}
                   >
                     <span className="quote-space-tab-icon">
-                      <Home className="h-3.5 w-3.5" />
+                      {isPackageIncludedTab ? <LayoutGrid className="h-3.5 w-3.5" /> : <Home className="h-3.5 w-3.5" />}
                     </span>
-                    <span>{space}</span>
+                    <span>{spaceLabel}</span>
                   </button>
                 );
               })}
@@ -8195,23 +8447,24 @@ export default function QuotationDetailPage() {
         )}
         {shouldShowCategoryChooser ? (
           <QuoteCategoryChooser
-            readOnly={isReadonly}
+            readOnly={isReadonly || activeSpace === packageIncludedSpaceValue}
             isAllSpaceView={isAllSpaceView}
-            activeSpace={activeSpace === allSpacesValue ? "全部空间" : activeSpace}
+            activeSpace={activeSpaceDisplayName}
             onSelect={addCategoryByType}
           />
         ) : activeCategory === noQuoteCategoryValue ? (
           <QuoteCategoryChooser
-            readOnly={isReadonly}
+            readOnly={isReadonly || activeSpace === packageIncludedSpaceValue}
             isAllSpaceView={isAllSpaceView}
-            activeSpace={activeSpace === allSpacesValue ? "全部空间" : activeSpace}
+            activeSpace={activeSpaceDisplayName}
             onSelect={addCategoryByType}
           />
         ) : (
           <QuoteSection
+            onReorderPackageSpace={reorderPackageSpace}
             title={getCategoryLabel(activeCategory)}
             category={activeCategory}
-            activeSpace={isOtherCategory(activeCategory) ? undefined : activeSpace}
+            activeSpace={isOtherCategory(activeCategory) ? undefined : activeSpaceDisplayName}
             activeSpaceAmount={activeSpaceAmount}
             items={activeItems}
             spaceOptions={activeSpaces}
@@ -8223,6 +8476,9 @@ export default function QuotationDetailPage() {
             formulaFinalFeeItemId={String(settings?.formulaFinalFeeItemId || "")}
             discountDetailText={discountDetailText}
             isAllSpaceView={isAllSpaceView}
+            showSpaceColumn={isAllSpaceView}
+            hidePricingColumns={activeSpace === packageIncludedSpaceValue}
+            canAddRows={activeSpace !== packageIncludedSpaceValue}
             searchValue={itemSearch}
             onSearchChange={setItemSearch}
             onAdd={isBaseCategory(activeCategory)
@@ -8242,8 +8498,8 @@ export default function QuotationDetailPage() {
               <div className="quote-section-category-tabs no-print">
                 {displayedProjectQuoteCategories.map((category) => {
                   const active = sameQuoteCategory(activeCategory, category);
-                  const canDelete = activeSpace !== allSpacesValue || (!defaultQuoteCategories.includes(category) && !builtInDirectCategories.some((item) => sameQuoteCategory(item, category)));
-                  const CategoryIcon = isBaseCategory(category) ? FileText : isMainMaterialCategory(category) ? Tags : isCustomCabinetCategory(category) ? Ruler : LayoutGrid;
+                  const canDelete = activeSpace !== packageIncludedSpaceValue && !isAreaPackageSystemCategory(category) && (activeSpace !== allSpacesValue || (!defaultQuoteCategories.includes(category) && !builtInDirectCategories.some((item) => sameQuoteCategory(item, category))));
+                  const CategoryIcon = isAreaPricingCategory(category) ? Calculator : isBaseCategory(category) ? FileText : isMainMaterialCategory(category) ? Tags : isCustomCabinetCategory(category) ? Ruler : LayoutGrid;
                   return (
                     <button
                       key={category}
@@ -8312,7 +8568,9 @@ export default function QuotationDetailPage() {
             onOpenRowMenu={openRowMenu}
             onOpenQuantityLink={openQuantityLinkDialog}
             onReplaceBaseItem={openQuotaReplacePicker}
-            readOnly={isReadonly}
+            invalidQuantityDrafts={invalidQuantityDrafts}
+            onInvalidQuantityDraftChange={setInvalidQuantityDraft}
+            readOnly={isReadonly || (settings?.templatePricing?.mode === "area" && isAreaPackageSystemCategory(activeCategory))}
             draggingItemIndex={draggingItemIndex}
             dragOverItem={dragOverItem}
             recentlyMovedItemKey={recentlyMovedItemKey}
@@ -8326,7 +8584,8 @@ export default function QuotationDetailPage() {
       {quotaPickerOpen && (
         <QuotaLibraryPickerModal
           items={quotationStoreQuotaItems}
-          targetText={`${isAllSpaceView ? "全部空间" : activeSpace || "未指定空间"} · ${getCategoryLabel(activeCategory)}`}
+          splitCustomerPrice={settings?.splitCustomerPrice !== false}
+          targetText={`${activeSpaceDisplayName || "未指定空间"} · ${getCategoryLabel(activeCategory)}`}
           isAllSpaceView={isAllSpaceView}
           mode={quotaReplaceTarget ? "replace" : "add"}
           targetItem={quotaReplaceTarget ? items[quotaReplaceTarget.index] : undefined}
@@ -8342,7 +8601,7 @@ export default function QuotationDetailPage() {
         <ProductLibraryPickerModal
           items={productLibraryItems}
           loading={productPickerLoading}
-          targetText={`${isAllSpaceView ? "全部空间" : activeSpace || "未指定空间"} · ${getCategoryLabel(activeCategory)}`}
+          targetText={`${activeSpaceDisplayName || "未指定空间"} · ${getCategoryLabel(activeCategory)}`}
           onClose={() => setProductPickerOpen(false)}
           onConfirm={insertProductLibraryItems}
         />
@@ -10247,7 +10506,7 @@ export default function QuotationDetailPage() {
         .quotation-detail-ui .quote-section tbody tr:hover td {
           background-color: #f5f9ff !important;
         }
-        .quotation-detail-ui .quote-section tbody tr:last-child td {
+        .quotation-detail-ui .quote-section tbody tr.quote-subtotal-row td {
           background: #f8fafd !important;
           font-weight: 700;
         }
@@ -11404,7 +11663,7 @@ export default function QuotationDetailPage() {
           background: #2f66e8 !important;
           color: #ffffff !important;
         }
-        .quotation-detail-ui.quote-workbench-shell .quote-section tbody tr:last-child td {
+        .quotation-detail-ui.quote-workbench-shell .quote-section tbody tr.quote-subtotal-row td {
           height: 38px !important;
           padding-top: 6px !important;
           padding-bottom: 6px !important;
@@ -11412,7 +11671,7 @@ export default function QuotationDetailPage() {
           font-size: 13px !important;
           line-height: 1.3 !important;
         }
-        .quotation-detail-ui.quote-workbench-shell .quote-section tbody tr:last-child td:first-child {
+        .quotation-detail-ui.quote-workbench-shell .quote-section tbody tr.quote-subtotal-row td:first-child {
           color: #34445a !important;
           font-weight: 700 !important;
         }
@@ -12743,7 +13002,7 @@ export default function QuotationDetailPage() {
           overflow-y: hidden !important;
         }
         .quotation-detail-ui .quote-project-info-modal {
-          max-height: min(90vh, 720px);
+          max-height: calc(100dvh - 48px) !important;
           display: flex;
           flex-direction: column;
           background: #ffffff !important;
@@ -12755,17 +13014,21 @@ export default function QuotationDetailPage() {
           box-shadow: none !important;
         }
         .quotation-detail-ui .quote-project-info-header {
+          flex-shrink: 0;
           border-bottom: 1px solid #e7edf5 !important;
         }
         .quotation-detail-ui .quote-project-info-footer {
+          flex-shrink: 0;
           border-top: 0 !important;
         }
         .quote-project-info-map-layer > .fixed {
           z-index: 11001 !important;
         }
         .quotation-detail-ui .quote-project-info-body {
+          flex: 1 1 auto !important;
           min-height: 0;
           overflow-y: auto;
+          overscroll-behavior: contain;
           padding: 14px 0 0;
           background: #ffffff;
         }
@@ -12986,6 +13249,19 @@ export default function QuotationDetailPage() {
         .quotation-detail-ui .quote-quantity-link-control > input.is-invalid {
           color: #b42318 !important;
           box-shadow: inset 0 0 0 1px #e6a2a2 !important;
+          animation: quote-quantity-invalid-breathe 1.15s ease-in-out infinite;
+        }
+        @keyframes quote-quantity-invalid-breathe {
+          0%, 100% {
+            border-color: #f2b8b5;
+            box-shadow: inset 0 0 0 1px #e6a2a2, 0 0 0 0 rgba(217, 45, 32, 0);
+            background-color: #fff;
+          }
+          50% {
+            border-color: #d92d20;
+            box-shadow: inset 0 0 0 1px #d92d20, 0 0 0 3px rgba(217, 45, 32, 0.18);
+            background-color: #fff5f5;
+          }
         }
         .quotation-detail-ui .quote-quantity-link-button {
           position: absolute;
@@ -14779,11 +15055,12 @@ function RowContextMenu({
 }) {
   if (!item) return null;
   const activeColor = getQuotationRowColor(item.row_color);
+  const isPackageIncluded = isPackageIncludedItem(item);
   const special = isSpecialQuoteItem(item);
-  const canCopyToSpace = !isOtherCategory(item.category);
-  const canReplaceQuota = isBaseCategory(item.category);
-  const canSetAttribution = !isOtherCategory(item.category);
-  const canSaveToCustomLibrary = isBaseCategory(item.category) && !isStandardQuotaSourceItem(item);
+  const canCopyToSpace = !isPackageIncluded && !isOtherCategory(item.category);
+  const canReplaceQuota = !isPackageIncluded && isBaseCategory(item.category);
+  const canSetAttribution = !isPackageIncluded && !isOtherCategory(item.category);
+  const canSaveToCustomLibrary = !isPackageIncluded && isBaseCategory(item.category) && !isStandardQuotaSourceItem(item);
   const hasQuantityLink = Boolean(parseQuotationQuantityFormula(item.quantity_formula));
   const canOpenQuantityLink = !isOtherCategory(item.category);
 
@@ -14794,18 +15071,22 @@ function RowContextMenu({
       onClick={(event) => event.stopPropagation()}
       onContextMenu={(event) => event.preventDefault()}
     >
-      <button type="button" onClick={onInsertBefore} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
-        <Plus className="h-4 w-4" />
-        在上方插入一行
-      </button>
-      <button type="button" onClick={onInsertAfter} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
-        <Plus className="h-4 w-4" />
-        在下方插入一行
-      </button>
-      <button type="button" onClick={onCopy} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
-        <Copy className="h-4 w-4" />
-        复制到下方
-      </button>
+      {!isPackageIncluded && (
+        <>
+          <button type="button" onClick={onInsertBefore} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
+            <Plus className="h-4 w-4" />
+            在上方插入一行
+          </button>
+          <button type="button" onClick={onInsertAfter} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
+            <Plus className="h-4 w-4" />
+            在下方插入一行
+          </button>
+          <button type="button" onClick={onCopy} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
+            <Copy className="h-4 w-4" />
+            复制到下方
+          </button>
+        </>
+      )}
       {canCopyToSpace && (
         <button type="button" onClick={onCopyToSpace} className="flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
           <span className="inline-flex min-w-0 items-center gap-2 whitespace-nowrap">
@@ -14845,21 +15126,25 @@ function RowContextMenu({
           解除数量联动
         </button>
       )}
-      <button type="button" onClick={onClear} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
-        <Eraser className="h-4 w-4" />
-        清空本行内容
-      </button>
-      <div className="my-1 border-t border-surface-100" />
-      <button
-        type="button"
-        onClick={() => onColor(special ? "" : "special")}
-        className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-orange-50 ${
-          special ? "bg-orange-50 text-orange-700" : "text-surface-700"
-        }`}
-      >
-        <span className="quote-special-menu-mark">特</span>
-        {special ? "取消特价项目" : "标为特价项目"}
-      </button>
+      {!isPackageIncluded && (
+        <>
+          <button type="button" onClick={onClear} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-surface-700 hover:bg-surface-50">
+            <Eraser className="h-4 w-4" />
+            清空本行内容
+          </button>
+          <div className="my-1 border-t border-surface-100" />
+          <button
+            type="button"
+            onClick={() => onColor(special ? "" : "special")}
+            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-orange-50 ${
+              special ? "bg-orange-50 text-orange-700" : "text-surface-700"
+            }`}
+          >
+            <span className="quote-special-menu-mark">特</span>
+            {special ? "取消特价项目" : "标为特价项目"}
+          </button>
+        </>
+      )}
       <div className="px-3 py-2">
         <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-surface-500">
           <Palette className="h-3.5 w-3.5" />
@@ -14885,11 +15170,15 @@ function RowContextMenu({
         <Eraser className="h-4 w-4" />
         清除颜色
       </button>
-      <div className="my-1 border-t border-surface-100" />
-      <button type="button" onClick={onRemove} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-red-600 hover:bg-red-50">
-        <Trash2 className="h-4 w-4" />
-        删除本行
-      </button>
+      {!isPackageIncluded && (
+        <>
+          <div className="my-1 border-t border-surface-100" />
+          <button type="button" onClick={onRemove} className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-red-600 hover:bg-red-50">
+            <Trash2 className="h-4 w-4" />
+            删除本行
+          </button>
+        </>
+      )}
     </div>
   );
 }
@@ -15184,7 +15473,8 @@ function QuoteCategoryChooser({
   );
 }
 
-function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, spaceOptions, feeScopeOptions, otherFeeRows, baseAmount, materialAmount, feeFormulaContext, formulaFinalFeeItemId, discountDetailText, isAllSpaceView, searchValue, onSearchChange, onAdd, onManualAdd, onOpenFindReplace, quotaUpdateEntry, categoryNavigation, useQuotaLibraryAction, quantityLinkPanel, quantityLinkPickMode, onQuantityLinkPick, selectedItemKeys, selectedItemCount, onToggleItemSelection, onToggleAllItemSelection, onDeleteSelectedItems, onChange, onOpenRowMenu, onOpenQuantityLink, onReplaceBaseItem, readOnly, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onItemPointerDown, onNotify }: {
+function QuoteSection({ onReorderPackageSpace, title, category, activeSpace, activeSpaceAmount, items, spaceOptions, feeScopeOptions, otherFeeRows, baseAmount, materialAmount, feeFormulaContext, formulaFinalFeeItemId, discountDetailText, isAllSpaceView, showSpaceColumn, hidePricingColumns, splitPackageItems = false, canAddRows = true, searchValue, onSearchChange, onAdd, onManualAdd, onOpenFindReplace, quotaUpdateEntry, categoryNavigation, useQuotaLibraryAction, quantityLinkPanel, quantityLinkPickMode, onQuantityLinkPick, selectedItemKeys, selectedItemCount, onToggleItemSelection, onToggleAllItemSelection, onDeleteSelectedItems, onChange, onOpenRowMenu, onOpenQuantityLink, onReplaceBaseItem, invalidQuantityDrafts, onInvalidQuantityDraftChange, readOnly, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onItemPointerDown, onNotify }: {
+  onReorderPackageSpace?: (source: string, target: string, position: ItemDropPosition) => void;
   title: string;
   category: QuotationItem["category"];
   activeSpace?: string;
@@ -15199,6 +15489,10 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
   formulaFinalFeeItemId?: string;
   discountDetailText?: string;
   isAllSpaceView?: boolean;
+  showSpaceColumn?: boolean;
+  hidePricingColumns?: boolean;
+  splitPackageItems?: boolean;
+  canAddRows?: boolean;
   searchValue: string;
   onSearchChange: (value: string) => void;
   onAdd: () => void;
@@ -15219,6 +15513,8 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
   onOpenRowMenu: RowMenuOpenHandler;
   onOpenQuantityLink: QuantityLinkOpenHandler;
   onReplaceBaseItem?: (index: number) => void;
+  invalidQuantityDrafts: Record<string, InvalidQuantityDraft>;
+  onInvalidQuantityDraftChange: (itemKey: string, draft: InvalidQuantityDraft | null) => void;
   readOnly?: boolean;
   draggingItemIndex: number | null;
   dragOverItem: DragOverItemState;
@@ -15239,7 +15535,20 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
       ? "全部空间暂无明细"
       : isBase ? "暂无基装明细" : "暂无明细";
   const isEmpty = items.length === 0;
-  const canAddInCurrentView = !isAllSpaceView;
+  const includedSpaceGroups = new Map<string, typeof items>();
+  if (hidePricingColumns) {
+    items.forEach((row) => {
+      const space = inferItemSpace(row.item) || "未分类";
+      const group = includedSpaceGroups.get(space) || [];
+      group.push(row);
+      includedSpaceGroups.set(space, group);
+    });
+  }
+  const tableGroups = [{ key: "all", items: splitPackageItems ? [
+    ...items.filter(({ item }) => !isPackageIncludedItem(item)),
+    ...items.filter(({ item }) => isPackageIncludedItem(item)),
+  ] : hidePricingColumns ? Array.from(includedSpaceGroups.values()).flat() : items, hidePricing: hidePricingColumns }];
+  const canAddInCurrentView = canAddRows && !isAllSpaceView;
   const [fullscreen, setFullscreen] = useState(false);
   const sectionRef = useRef<HTMLElement | null>(null);
 
@@ -15272,7 +15581,7 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
         <div className="quote-section-title-strip min-w-0">
           <div className="quote-section-title-copy min-w-0">
             <h3 className="quote-section-title truncate text-sm font-semibold text-surface-900">{sectionTitle}</h3>
-            {activeSpace && <p className="quote-section-summary text-xs text-surface-400">{isAllSpaceView ? "全部空间小计" : "当前空间小计"} {formatQuoteAmount(activeSpaceAmount)}</p>}
+            {activeSpace && !hidePricingColumns && <p className="quote-section-summary text-xs text-surface-400">{splitPackageItems ? "另计项目小计" : isAllSpaceView ? "全部空间小计" : "当前空间小计"} {formatQuoteAmount(activeSpaceAmount)}</p>}
           </div>
           {categoryNavigation}
         </div>
@@ -15365,10 +15674,23 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           onQuantityLinkPick(rowNumber);
         }}
       >
-      {isBase ? (
+      <PackageSpaceOrderProvider onReorder={!readOnly && hidePricingColumns ? onReorderPackageSpace : undefined}>
+      {tableGroups.map((group) => <React.Fragment key={group.key}>
+      {isAreaPricingCategory(category) ? (
+        <ThinScrollArea className="quote-table-shell" scrollClassName="quote-table-freeze-scroll">
+          <table className="w-full min-w-[900px] table-fixed border-collapse text-sm">
+            <thead className="bg-surface-50 text-center text-xs font-semibold text-surface-600"><tr>{["序号", "套餐项目", "计价数量", "单位", "单价", "套餐金额", "计价说明"].map((label) => <th key={label} className="border border-surface-200 px-3 py-2">{label}</th>)}</tr></thead>
+            <tbody>{group.items.map(({ item, index }, rowIndex) => <tr key={getQuotationItemKey(item, index)} className="quote-item-row"><td className="border border-surface-200 px-3 py-3 text-center">{rowIndex + 1}</td><td className="border border-surface-200 px-3 py-3">{item.name}</td><td className="border border-surface-200 px-3 py-3 text-center">{formatEditableNumber(toNumber(item.quantity))}</td><td className="border border-surface-200 px-3 py-3 text-center">{item.unit}</td><td className="border border-surface-200 px-3 py-3 text-center">{formatQuoteAmount(toNumber(item.unit_price))}</td><td className="border border-surface-200 px-3 py-3 text-center">{formatQuoteAmount(getBaseOrMaterialItemTotal(item))}</td><td className="border border-surface-200 px-3 py-3">{item.remark}</td></tr>)}</tbody>
+          </table>
+        </ThinScrollArea>
+      ) : isBase ? (
         <BaseQuoteTable
-          items={items}
-          showSpace={!!isAllSpaceView}
+          groupPackageItems={splitPackageItems}
+          items={group.items}
+          referenceItems={items}
+          showSpace={!!showSpaceColumn}
+          hidePricingColumns={group.hidePricing}
+          subtotalLabel={splitPackageItems ? "另计项目小计" : undefined}
           spaceOptions={spaceOptions}
           emptyText={emptyText}
           draggingItemIndex={draggingItemIndex}
@@ -15379,6 +15701,8 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           onOpenRowMenu={onOpenRowMenu}
           onOpenQuantityLink={onOpenQuantityLink}
           onReplaceBaseItem={onReplaceBaseItem}
+          invalidQuantityDrafts={invalidQuantityDrafts}
+          onInvalidQuantityDraftChange={onInvalidQuantityDraftChange}
           selectedItemKeys={selectedItemKeys}
           onToggleItemSelection={onToggleItemSelection}
           onToggleAllItemSelection={onToggleAllItemSelection}
@@ -15387,8 +15711,12 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
         />
       ) : isCustomCabinetCategory(category) ? (
         <CustomCabinetQuoteTable
-          items={items}
-          showSpace={!!isAllSpaceView}
+          groupPackageItems={splitPackageItems}
+          items={group.items}
+          referenceItems={items}
+          showSpace={!!showSpaceColumn}
+          hidePricingColumns={group.hidePricing}
+          subtotalLabel={splitPackageItems ? "另计项目小计" : undefined}
           spaceOptions={spaceOptions}
           emptyText={emptyText}
           draggingItemIndex={draggingItemIndex}
@@ -15398,6 +15726,8 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           onChange={onChange}
           onOpenRowMenu={onOpenRowMenu}
           onOpenQuantityLink={onOpenQuantityLink}
+          invalidQuantityDrafts={invalidQuantityDrafts}
+          onInvalidQuantityDraftChange={onInvalidQuantityDraftChange}
           selectedItemKeys={selectedItemKeys}
           onToggleItemSelection={onToggleItemSelection}
           onToggleAllItemSelection={onToggleAllItemSelection}
@@ -15406,9 +15736,13 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
         />
       ) : (
         <SimpleQuoteTable
-          items={items}
+          groupPackageItems={splitPackageItems}
+          items={group.items}
+          referenceItems={items}
           otherFeeRows={otherFeeRows}
-          showSpace={!isOther && !!isAllSpaceView}
+          showSpace={!isOther && !!showSpaceColumn}
+          hidePricingColumns={!isOther && group.hidePricing}
+          subtotalLabel={splitPackageItems ? "另计项目小计" : undefined}
           editableSpace={false}
           spaceOptions={spaceOptions}
           feeScopeOptions={feeScopeOptions}
@@ -15426,6 +15760,8 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           onChange={onChange}
           onOpenRowMenu={onOpenRowMenu}
           onOpenQuantityLink={onOpenQuantityLink}
+          invalidQuantityDrafts={invalidQuantityDrafts}
+          onInvalidQuantityDraftChange={onInvalidQuantityDraftChange}
           selectedItemKeys={selectedItemKeys}
           onToggleItemSelection={onToggleItemSelection}
           onToggleAllItemSelection={onToggleAllItemSelection}
@@ -15434,6 +15770,8 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
           onNotify={onNotify}
         />
       )}
+      </React.Fragment>)}
+      </PackageSpaceOrderProvider>
       </div>
       {!readOnly && canAddInCurrentView && (
         <div className={`quote-section-footer no-print border-t border-surface-100 px-3 ${isOther ? "py-2" : "py-3"} ${isEmpty ? "quote-section-footer-empty" : ""}`}>
@@ -15451,8 +15789,22 @@ function QuoteSection({ title, category, activeSpace, activeSpaceAmount, items, 
   );
 }
 
+function PackageItemGroupRow({ items, position, columns }: { items: { item: QuotationItem; index: number }[]; position: number; columns: number }) {
+  const included = isPackageIncludedItem(items[position].item);
+  if (position > 0 && isPackageIncludedItem(items[position - 1].item) === included) return null;
+  const count = items.filter(({ item }) => isPackageIncludedItem(item) === included).length;
+  return <tr className="quote-package-group-row"><td colSpan={columns}><strong>{included ? "套餐内项目" : "套餐外另计项目"}</strong><span>{count} 项</span></td></tr>;
+}
+
+function PackageSpaceGroupRow({ items, position, columns }: { items: { item: QuotationItem; index: number }[]; position: number; columns: number }) {
+  const space = inferItemSpace(items[position].item) || "未分类";
+  if (position > 0 && (inferItemSpace(items[position - 1].item) || "未分类") === space) return null;
+  return <PackageSpaceOrderRow space={space} columns={columns} />;
+}
+
 function QuotaLibraryPickerModal({
   items,
+  splitCustomerPrice = true,
   targetText,
   isAllSpaceView,
   mode = "add",
@@ -15461,6 +15813,7 @@ function QuotaLibraryPickerModal({
   onConfirm,
 }: {
   items: QuotaLibraryItem[];
+  splitCustomerPrice?: boolean;
   targetText: string;
   isAllSpaceView: boolean;
   mode?: "add" | "replace";
@@ -15657,16 +16010,16 @@ function QuotaLibraryPickerModal({
             </div>
           ) : (
             <div className={`quote-library-table-wrap overflow-auto bg-white ${shouldUseTallPicker ? "h-full" : "max-h-[420px]"}`}>
-              <table className="quote-library-table quote-base-library-table w-full min-w-[1620px] border-separate border-spacing-0 text-sm">
+              <table className={`quote-library-table quote-base-library-table w-full ${splitCustomerPrice ? "min-w-[1620px]" : "min-w-[1396px]"} border-separate border-spacing-0 text-sm`}>
                 <thead className="sticky top-0 z-10 bg-[#f4f7fb] text-left text-xs font-semibold text-[#34445a]">
                   <tr>
                     <th className="quote-library-sticky-select w-14 px-3 py-0 text-center whitespace-nowrap">{isReplaceMode ? "替换" : "选择"}</th>
                     <th className="quote-library-sticky-category w-28 px-3 py-0 whitespace-nowrap">分类</th>
                     <th className="quote-library-sticky-name w-80 px-3 py-0 whitespace-nowrap">项目名称</th>
                     <th className="w-28 px-3 py-0 text-center whitespace-nowrap">价格类型</th>
-                    <th className="w-28 px-3 py-0 text-right whitespace-nowrap">材料单价</th>
-                    <th className="w-28 px-3 py-0 text-right whitespace-nowrap">人工单价</th>
-                    <th className="w-28 px-3 py-0 text-right whitespace-nowrap">总价</th>
+                    {splitCustomerPrice && <><th className="w-28 px-3 py-0 text-right whitespace-nowrap">材料单价</th>
+                    <th className="w-28 px-3 py-0 text-right whitespace-nowrap">人工单价</th></>}
+                    <th className="w-28 px-3 py-0 text-right whitespace-nowrap">{splitCustomerPrice ? "总价" : "客户单价"}</th>
                     <th className="w-[72px] px-3 py-0 text-center whitespace-nowrap">单位</th>
                     <th className="w-[440px] px-3 py-0 whitespace-nowrap">施工说明</th>
                     <th className="quote-library-code-column w-44 px-3 py-0 whitespace-nowrap">编号</th>
@@ -15705,8 +16058,8 @@ function QuotaLibraryPickerModal({
                           </div>
                         </td>
                         <td className="px-3 py-0 text-center text-[#52647b] whitespace-nowrap">{item.priceScene || "标准"}</td>
-                        <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatQuoteAmount(item.materialPrice)}</td>
-                        <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatQuoteAmount(item.laborPrice)}</td>
+                        {splitCustomerPrice && <><td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatQuoteAmount(item.materialPrice)}</td>
+                        <td className="px-3 py-0 text-right font-semibold tabular-nums text-[#162033] whitespace-nowrap">{formatQuoteAmount(item.laborPrice)}</td></>}
                         <td className="quote-library-total-price px-3 py-0 text-right font-semibold tabular-nums whitespace-nowrap">{formatQuoteAmount(item.totalPrice)}</td>
                         <td className="px-3 py-0 text-center font-medium text-[#52647b] whitespace-nowrap">{item.unit || "-"}</td>
                         <td className="px-3 py-0">
@@ -16381,7 +16734,9 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
   item,
   index,
   rowIndex,
+  displaySequence,
   showSpace,
+  hidePricingColumns,
   spaceOptions,
   readOnly,
   onChange,
@@ -16397,11 +16752,15 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
   recentlyMoved,
   findReplaceHighlight,
   quantityLinkItems,
+  invalidQuantityDraft,
+  onInvalidQuantityDraftChange,
 }: {
   item: QuotationItem;
   index: number;
   rowIndex: number;
+  displaySequence?: number;
   showSpace?: boolean;
+  hidePricingColumns?: boolean;
   spaceOptions: string[];
   readOnly?: boolean;
   onChange: (index: number, patch: Partial<QuotationItem>) => void;
@@ -16417,13 +16776,15 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
   recentlyMoved: boolean;
   findReplaceHighlight?: FindReplaceActiveHighlight | null;
   quantityLinkItems?: QuotationItem[];
+  invalidQuantityDraft?: InvalidQuantityDraft | null;
+  onInvalidQuantityDraftChange?: (draft: InvalidQuantityDraft | null) => void;
 }) {
   const quantity = toNumber(item.quantity);
   const materialUnit = toNumber(item.material_cost);
   const laborUnit = materialUnit || toNumber(item.labor_cost) ? toNumber(item.labor_cost) : toNumber(item.unit_price);
   const manualPriceEditFlags = getManualPriceEditFlags(item.price_manually_edited);
-  const materialTotal = quantity * materialUnit;
-  const laborTotal = quantity * laborUnit;
+  const materialTotal = isPackageIncludedItem(item) ? 0 : quantity * materialUnit;
+  const laborTotal = isPackageIncludedItem(item) ? 0 : quantity * laborUnit;
   const itemKey = getQuotationItemKey(item, index);
   const handleChange = useCallback((patch: Partial<QuotationItem>) => {
     onChange(index, patch);
@@ -16443,12 +16804,12 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
       <td className="border border-surface-200 px-1 py-1 text-center text-surface-500" style={cellStyle}>
         <QuoteRowIndexCell
           itemKey={itemKey}
-          label={rowIndex + 1}
+          label={displaySequence ?? rowIndex + 1}
           readOnly={readOnly}
           selected={selected}
           onToggle={onToggleItemSelection}
           onItemPointerDown={(event) => onItemPointerDown(event, index)}
-          onQuickReplace={!readOnly && onReplaceBaseItem ? () => onReplaceBaseItem(index) : undefined}
+          onQuickReplace={!readOnly && !isPackageIncludedItem(item) && onReplaceBaseItem ? () => onReplaceBaseItem(index) : undefined}
         />
       </td>
       {showSpace && (
@@ -16474,40 +16835,53 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
           onOpenQuantityLink={(event) => onOpenQuantityLink(index, event)}
           quantityLinkItems={quantityLinkItems}
           targetIndex={rowIndex}
+          invalidDraft={invalidQuantityDraft}
+          onInvalidDraftChange={onInvalidQuantityDraftChange}
         />
       </td>
       <td className="border border-surface-200 p-0" style={cellStyle}><UnitInputCell value={item.unit} onChange={(value) => handleChange({ unit: value })} className="text-center" readOnly={readOnly} /></td>
-      <td className="border border-surface-200 p-0" style={cellStyle}>
-        <div className="quote-price-input-wrap">
-          <QuoteNumberInput value={item.material_cost || 0} onChange={(value) => {
-            handleChange({
-              material_cost: value,
-              unit_price: value + laborUnit,
-              price_manually_edited: canTrackManualPriceEdit(item)
-                ? setManualPriceEditFlag(item.price_manually_edited, "material")
-                : item.price_manually_edited,
-            });
-          }} className="text-center" disabled={readOnly} />
-          {manualPriceEditFlags.material ? <span className="quote-price-edit-mark" title="材料单价已手动修改">改</span> : null}
-        </div>
-      </td>
-      <td className="border border-surface-200 px-2 py-1 text-center font-medium text-surface-700" style={cellStyle}>{formatQuoteAmount(materialTotal)}</td>
-      <td className="border border-surface-200 p-0" style={cellStyle}>
-        <div className="quote-price-input-wrap">
-          <QuoteNumberInput value={laborUnit} onChange={(value) => {
-            handleChange({
-              labor_cost: value,
-              unit_price: materialUnit + value,
-              price_manually_edited: canTrackManualPriceEdit(item)
-                ? setManualPriceEditFlag(item.price_manually_edited, "labor")
-                : item.price_manually_edited,
-            });
-          }} className="text-center" disabled={readOnly} />
-          {manualPriceEditFlags.labor ? <span className="quote-price-edit-mark" title="人工单价已手动修改">改</span> : null}
-        </div>
-      </td>
-      <td className="border border-surface-200 px-2 py-1 text-center font-medium text-surface-700" style={cellStyle}>{formatQuoteAmount(laborTotal)}</td>
-      <td className="border border-surface-200 px-2 py-1 text-center font-semibold text-red-600" style={cellStyle}>{formatQuoteAmount(materialTotal + laborTotal)}</td>
+      {!hidePricingColumns && isPackageIncludedItem(item) ? (
+        <td colSpan={5} className="quote-package-included-price border border-surface-200 px-2 py-1 text-center" style={cellStyle}>已含套餐价</td>
+      ) : !hidePricingColumns && item.pricing_mode === "single" ? (
+        <>
+          <td colSpan={4} className="border border-surface-200 p-0" style={cellStyle}><QuoteNumberInput value={item.unit_price} onChange={(value) => handleChange({ unit_price: value, price_manually_edited: 3 })} className="text-center text-red-600" disabled={readOnly} /></td>
+          <td className="border border-surface-200 px-2 py-1 text-center font-semibold text-red-600" style={cellStyle}>{formatQuoteAmount(isPackageIncludedItem(item) ? 0 : quantity * item.unit_price)}</td>
+        </>
+      ) : !hidePricingColumns && (
+        <>
+          <td className="border border-surface-200 p-0" style={cellStyle}>
+            <div className="quote-price-input-wrap">
+              <QuoteNumberInput value={item.material_cost || 0} onChange={(value) => {
+                handleChange({
+                  material_cost: value,
+                  unit_price: value + laborUnit,
+                  price_manually_edited: canTrackManualPriceEdit(item)
+                    ? setManualPriceEditFlag(item.price_manually_edited, "material")
+                    : item.price_manually_edited,
+                });
+              }} className="text-center" disabled={readOnly} />
+              {manualPriceEditFlags.material ? <span className="quote-price-edit-mark" title="材料单价已手动修改">改</span> : null}
+            </div>
+          </td>
+          <td className="border border-surface-200 px-2 py-1 text-center font-medium text-surface-700" style={cellStyle}>{formatQuoteAmount(materialTotal)}</td>
+          <td className="border border-surface-200 p-0" style={cellStyle}>
+            <div className="quote-price-input-wrap">
+              <QuoteNumberInput value={laborUnit} onChange={(value) => {
+                handleChange({
+                  labor_cost: value,
+                  unit_price: materialUnit + value,
+                  price_manually_edited: canTrackManualPriceEdit(item)
+                    ? setManualPriceEditFlag(item.price_manually_edited, "labor")
+                    : item.price_manually_edited,
+                });
+              }} className="text-center" disabled={readOnly} />
+              {manualPriceEditFlags.labor ? <span className="quote-price-edit-mark" title="人工单价已手动修改">改</span> : null}
+            </div>
+          </td>
+          <td className="border border-surface-200 px-2 py-1 text-center font-medium text-surface-700" style={cellStyle}>{formatQuoteAmount(laborTotal)}</td>
+          <td className="border border-surface-200 px-2 py-1 text-center font-semibold text-red-600" style={cellStyle}>{formatQuoteAmount(materialTotal + laborTotal)}</td>
+        </>
+      )}
       <td className="border border-surface-200 p-0 align-middle" style={cellStyle}>
         <QuoteDescriptionCell
           value={item.spec || ""}
@@ -16521,9 +16895,13 @@ const QuoteBaseRow = React.memo(function QuoteBaseRow({
 });
 
 
-function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onOpenQuantityLink, onReplaceBaseItem, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
+function BaseQuoteTable({ items, groupPackageItems = false, referenceItems = items, subtotalLabel = "小计", showSpace, hidePricingColumns, spaceOptions, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onOpenQuantityLink, onReplaceBaseItem, invalidQuantityDrafts, onInvalidQuantityDraftChange, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
+  groupPackageItems?: boolean;
+  referenceItems?: { item: QuotationItem; index: number }[];
+  subtotalLabel?: string;
   items: { item: QuotationItem; index: number }[];
   showSpace?: boolean;
+  hidePricingColumns?: boolean;
   spaceOptions: string[];
   emptyText: string;
   draggingItemIndex: number | null;
@@ -16534,57 +16912,77 @@ function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingIte
   onOpenRowMenu: RowMenuOpenHandler;
   onOpenQuantityLink: QuantityLinkOpenHandler;
   onReplaceBaseItem?: (index: number) => void;
+  invalidQuantityDrafts: Record<string, InvalidQuantityDraft>;
+  onInvalidQuantityDraftChange: (itemKey: string, draft: InvalidQuantityDraft | null) => void;
   selectedItemKeys: Set<string>;
   onToggleItemSelection: (key: string) => void;
   onToggleAllItemSelection: (keys: string[]) => void;
   readOnly?: boolean;
   onItemPointerDown: (event: ReactPointerEvent<HTMLButtonElement>, index: number) => void;
 }) {
-  const materialSubtotal = useMemo(() => items.reduce((sum, { item }) => sum + toNumber(item.quantity) * toNumber(item.material_cost), 0), [items]);
-  const laborSubtotal = useMemo(() => items.reduce((sum, { item }) => sum + toNumber(item.quantity) * toNumber(item.labor_cost), 0), [items]);
-  const total = materialSubtotal + laborSubtotal;
+  const materialSubtotal = useMemo(() => items.reduce((sum, { item }) => sum + (isPackageIncludedItem(item) ? 0 : toNumber(item.quantity) * toNumber(item.material_cost)), 0), [items]);
+  const laborSubtotal = useMemo(() => items.reduce((sum, { item }) => sum + (isPackageIncludedItem(item) ? 0 : toNumber(item.quantity) * toNumber(item.labor_cost)), 0), [items]);
+  const singlePricing = items.length > 0 && items.every(({ item }) => item.pricing_mode === "single");
+  const total = items.reduce((sum, { item }) => sum + getBaseOrMaterialItemTotal(item), 0);
+  const displaySequences = hidePricingColumns ? getQuotationSpaceSequences(items, ({ item }) => inferItemSpace(item) || "未分类") : [];
   const itemKeys = useMemo(() => items.map(({ item, index }) => getQuotationItemKey(item, index)), [items]);
+  const columnWidths = hidePricingColumns
+    ? (showSpace ? [7, 12, 24, 10, 8, 39] : [8, 28, 11, 9, 44])
+    : singlePricing ? (showSpace ? [6, 12, 22, 20, 6, 2, 2, 2, 2, 8, 18] : [6, 26, 20, 6, 2, 2, 2, 2, 10, 24]) : (showSpace
+      ? [6.5, 10, 12, 8, 7, 8.5, 9, 8.5, 9, 7, 14]
+      : [7, 14, 9, 7.5, 9.5, 10, 9.5, 10, 8, 15.5]
+    );
+  const columnCount = hidePricingColumns ? (showSpace ? 6 : 5) : (showSpace ? 11 : 10);
 
   return (
     <ThinScrollArea className="quote-table-shell" scrollClassName="quote-table-freeze-scroll">
-      <table className={`w-full table-fixed border-collapse text-sm ${showSpace ? "min-w-[1510px]" : "min-w-[1390px]"}`}>
+      <table className={`w-full table-fixed border-collapse text-sm ${hidePricingColumns ? (showSpace ? "min-w-[980px]" : "min-w-[860px]") : singlePricing ? "min-w-[980px]" : showSpace ? "min-w-[1510px]" : "min-w-[1390px]"}`}>
         <colgroup>
-          {(showSpace
-            ? [6.5, 10, 12, 8, 7, 8.5, 9, 8.5, 9, 7, 14]
-            : [7, 14, 9, 7.5, 9.5, 10, 9.5, 10, 8, 15.5]
-          ).map((width, index) => (
+          {columnWidths.map((width, index) => (
             <col key={index} style={{ width: `${width}%` }} />
           ))}
         </colgroup>
         <thead className="bg-surface-50 text-center text-xs font-semibold text-surface-600">
           <tr>
-            <QuoteIndexHeaderCell rowSpan={2} itemKeys={itemKeys} selectedItemKeys={selectedItemKeys} readOnly={readOnly} onToggleAll={onToggleAllItemSelection} />
-            {showSpace && <th rowSpan={2} className="border border-surface-200 px-3 py-1.5">空间/类别</th>}
-            <th rowSpan={2} className="border border-surface-200 px-3 py-1.5">工程项目</th>
-            <th rowSpan={2} className="border border-surface-200 px-2 py-1.5">数量</th>
-            <th rowSpan={2} className="border border-surface-200 px-2 py-1.5">单位</th>
-            <th colSpan={2} className="border border-surface-200 px-2 py-1.5">材料</th>
-            <th colSpan={2} className="border border-surface-200 px-2 py-1.5">人工</th>
-            <th rowSpan={2} className="border border-surface-200 px-2 py-1.5">合计<br />材料+人工</th>
-            <th rowSpan={2} className="border border-surface-200 px-3 py-1.5">施工工艺及材料说明</th>
+            <QuoteIndexHeaderCell rowSpan={hidePricingColumns || singlePricing ? 1 : 2} itemKeys={itemKeys} selectedItemKeys={selectedItemKeys} readOnly={readOnly} onToggleAll={onToggleAllItemSelection} />
+            {showSpace && <th rowSpan={hidePricingColumns || singlePricing ? 1 : 2} className="border border-surface-200 px-3 py-1.5">空间/类别</th>}
+            <th rowSpan={hidePricingColumns || singlePricing ? 1 : 2} className="border border-surface-200 px-3 py-1.5">工程项目</th>
+            <th rowSpan={hidePricingColumns || singlePricing ? 1 : 2} className="border border-surface-200 px-2 py-1.5">数量</th>
+            <th rowSpan={hidePricingColumns || singlePricing ? 1 : 2} className="border border-surface-200 px-2 py-1.5">单位</th>
+            {!hidePricingColumns && (
+              <>
+                {singlePricing ? <th colSpan={4} className="border border-surface-200 px-2 py-1.5">客户单价</th> : <><th colSpan={2} className="border border-surface-200 px-2 py-1.5">材料</th>
+                <th colSpan={2} className="border border-surface-200 px-2 py-1.5">人工</th></>}
+                <th rowSpan={singlePricing ? 1 : 2} className="border border-surface-200 px-2 py-1.5">{singlePricing ? "合价" : <>合计<br />材料+人工</>}</th>
+              </>
+            )}
+            <th rowSpan={hidePricingColumns || singlePricing ? 1 : 2} className="border border-surface-200 px-3 py-1.5">施工工艺及材料说明</th>
           </tr>
-          <tr>
-            <th className="border border-surface-200 px-2 py-1.5">单价</th>
-            <th className="border border-surface-200 px-2 py-1.5">合价</th>
-            <th className="border border-surface-200 px-2 py-1.5">单价</th>
-            <th className="border border-surface-200 px-2 py-1.5">合价</th>
-          </tr>
+          {!hidePricingColumns && !singlePricing && (
+            <tr>
+              <th className="border border-surface-200 px-2 py-1.5">单价</th>
+              <th className="border border-surface-200 px-2 py-1.5">合价</th>
+              <th className="border border-surface-200 px-2 py-1.5">单价</th>
+              <th className="border border-surface-200 px-2 py-1.5">合价</th>
+            </tr>
+          )}
         </thead>
         <tbody>
-          {items.map(({ item, index }, rowIndex) => {
+          {items.map(({ item, index }, position) => {
+            const rowIndex = referenceItems.findIndex((row) => row.index === index);
             const itemKey = getQuotationItemKey(item, index);
             return (
+              <React.Fragment key={itemKey}>
+              {groupPackageItems && <PackageItemGroupRow items={items} position={position} columns={columnCount} />}
+              {hidePricingColumns && <PackageSpaceGroupRow items={items} position={position} columns={columnCount} />}
               <QuoteBaseRow
                 key={itemKey}
                 item={item}
                 index={index}
                 rowIndex={rowIndex}
+                displaySequence={displaySequences[position]}
                 showSpace={showSpace}
+                hidePricingColumns={hidePricingColumns}
                 spaceOptions={spaceOptions}
                 readOnly={readOnly}
                 onChange={onChange}
@@ -16599,28 +16997,33 @@ function BaseQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingIte
                 dropAfter={dragOverItem?.index === index && dragOverItem.position === "after"}
                 recentlyMoved={recentlyMovedItemKey === itemKey}
                 findReplaceHighlight={activeFindReplaceHighlight?.itemKey === itemKey ? activeFindReplaceHighlight : null}
-                quantityLinkItems={items.map(({ item }) => item)}
+                quantityLinkItems={referenceItems.map(({ item }) => item)}
+                invalidQuantityDraft={invalidQuantityDrafts[itemKey] || null}
+                onInvalidQuantityDraftChange={(draft) => onInvalidQuantityDraftChange(itemKey, draft)}
               />
+              </React.Fragment>
             );
           })}
           {items.length === 0 && (
             <tr className="quote-empty-row">
-              <td colSpan={showSpace ? 11 : 10} className="quote-empty-cell border border-surface-200 px-4 py-0 text-center">
+              <td colSpan={columnCount} className="quote-empty-cell border border-surface-200 px-4 py-0 text-center">
                 <div className="quote-empty-state">
                   <p className="text-sm font-semibold text-[#34445a]">{emptyText}</p>
-                  <p className="mt-1 text-xs leading-5 text-[#7c8aa0]">添加项目后，将在这里显示数量、材料、人工和施工说明。</p>
+                  <p className="mt-1 text-xs leading-5 text-[#7c8aa0]">{hidePricingColumns ? "套餐内项目将在这里显示空间、数量、单位和施工说明。" : "添加项目后，将在这里显示数量、材料、人工和施工说明。"}</p>
                 </div>
               </td>
             </tr>
           )}
-          <tr className="bg-surface-50 font-semibold text-surface-900">
-            <td className="border border-surface-200 px-2 py-3 text-center" colSpan={showSpace ? 6 : 5}>小计</td>
-            <td className="border border-surface-200 px-2 py-3 text-center text-red-600">{formatQuoteAmount(materialSubtotal)}</td>
-            <td className="border border-surface-200 px-2 py-3"></td>
-            <td className="border border-surface-200 px-2 py-3 text-center text-red-600">{formatQuoteAmount(laborSubtotal)}</td>
-            <td className="border border-surface-200 px-2 py-3 text-center text-red-600">{formatQuoteAmount(total)}</td>
-            <td className="border border-surface-200 px-2 py-3"></td>
-          </tr>
+          {!hidePricingColumns && (
+            <tr className="quote-subtotal-row bg-surface-50 font-semibold text-surface-900">
+              <td className="border border-surface-200 px-2 py-3 text-center" colSpan={singlePricing ? (showSpace ? 9 : 8) : (showSpace ? 6 : 5)}>{subtotalLabel}</td>
+              {!singlePricing && <><td className="border border-surface-200 px-2 py-3 text-center text-red-600">{formatQuoteAmount(materialSubtotal)}</td>
+              <td className="border border-surface-200 px-2 py-3"></td>
+              <td className="border border-surface-200 px-2 py-3 text-center text-red-600">{formatQuoteAmount(laborSubtotal)}</td></>}
+              <td className="border border-surface-200 px-2 py-3 text-center text-red-600">{formatQuoteAmount(total)}</td>
+              <td className="border border-surface-200 px-2 py-3"></td>
+            </tr>
+          )}
         </tbody>
       </table>
     </ThinScrollArea>
@@ -16632,7 +17035,9 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
   item,
   index,
   rowIndex,
+  displaySequence,
   showSpace,
+  hidePricingColumns,
   spaceOptions,
   readOnly,
   onChange,
@@ -16647,11 +17052,15 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
   recentlyMoved,
   findReplaceHighlight,
   quantityLinkItems,
+  invalidQuantityDraft,
+  onInvalidQuantityDraftChange,
 }: {
   item: QuotationItem;
   index: number;
   rowIndex: number;
+  displaySequence?: number;
   showSpace?: boolean;
+  hidePricingColumns?: boolean;
   spaceOptions: string[];
   readOnly?: boolean;
   onChange: (index: number, patch: Partial<QuotationItem>) => void;
@@ -16666,6 +17075,8 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
   recentlyMoved: boolean;
   findReplaceHighlight?: FindReplaceActiveHighlight | null;
   quantityLinkItems?: QuotationItem[];
+  invalidQuantityDraft?: InvalidQuantityDraft | null;
+  onInvalidQuantityDraftChange?: (draft: InvalidQuantityDraft | null) => void;
 }) {
   const itemKey = getQuotationItemKey(item, index);
   const rowColor = getQuotationRowColor(item.row_color);
@@ -16688,7 +17099,7 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
       <td className="border border-surface-200 px-1 py-1 text-center text-surface-500" style={cellStyle}>
         <QuoteRowIndexCell
           itemKey={itemKey}
-          label={rowIndex + 1}
+          label={displaySequence ?? rowIndex + 1}
           readOnly={readOnly}
           selected={selected}
           onToggle={onToggleItemSelection}
@@ -16722,20 +17133,28 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
           onOpenQuantityLink={(event) => onOpenQuantityLink(index, event)}
           quantityLinkItems={quantityLinkItems}
           targetIndex={rowIndex}
+          invalidDraft={invalidQuantityDraft}
+          onInvalidDraftChange={onInvalidQuantityDraftChange}
         />
       </td>
       <td className="border border-surface-200 px-2 py-1 text-center font-semibold text-red-600" style={cellStyle}>{formatQuoteAmount(area)}</td>
-      <td className="border border-surface-200 p-0" style={cellStyle}>
-        <div className="quote-price-input-wrap">
-          <QuoteNumberInput
-            value={item.unit_price}
-            onChange={(value) => handleChange({ unit_price: value })}
-            className="text-center"
-            disabled={readOnly}
-          />
-        </div>
-      </td>
-      <td className="border border-surface-200 px-2 py-1 text-center font-semibold text-red-600" style={cellStyle}>{formatQuoteAmount(itemTotal)}</td>
+      {!hidePricingColumns && isPackageIncludedItem(item) ? (
+        <td colSpan={2} className="quote-package-included-price border border-surface-200 px-2 py-1 text-center" style={cellStyle}>已含套餐价</td>
+      ) : !hidePricingColumns && (
+        <>
+          <td className="border border-surface-200 p-0" style={cellStyle}>
+            <div className="quote-price-input-wrap">
+              <QuoteNumberInput
+                value={item.unit_price}
+                onChange={(value) => handleChange({ unit_price: value })}
+                className="text-center"
+                disabled={readOnly}
+              />
+            </div>
+          </td>
+          <td className="border border-surface-200 px-2 py-1 text-center font-semibold text-red-600" style={cellStyle}>{formatQuoteAmount(itemTotal)}</td>
+        </>
+      )}
       <td className="border border-surface-200 p-0 align-middle" style={cellStyle}>
         <QuoteDescriptionCell
           value={item.remark || ""}
@@ -16752,9 +17171,13 @@ const QuoteCabinetRow = React.memo(function QuoteCabinetRow({
 });
 
 
-function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onOpenQuantityLink, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
+function CustomCabinetQuoteTable({ items, groupPackageItems = false, referenceItems = items, subtotalLabel = "小计", showSpace, hidePricingColumns, spaceOptions, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onOpenQuantityLink, invalidQuantityDrafts, onInvalidQuantityDraftChange, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown }: {
+  groupPackageItems?: boolean;
+  referenceItems?: { item: QuotationItem; index: number }[];
+  subtotalLabel?: string;
   items: { item: QuotationItem; index: number }[];
   showSpace?: boolean;
+  hidePricingColumns?: boolean;
   spaceOptions: string[];
   emptyText: string;
   draggingItemIndex: number | null;
@@ -16764,6 +17187,8 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
   onChange: (index: number, patch: Partial<QuotationItem>) => void;
   onOpenRowMenu: RowMenuOpenHandler;
   onOpenQuantityLink: QuantityLinkOpenHandler;
+  invalidQuantityDrafts: Record<string, InvalidQuantityDraft>;
+  onInvalidQuantityDraftChange: (itemKey: string, draft: InvalidQuantityDraft | null) => void;
   selectedItemKeys: Set<string>;
   onToggleItemSelection: (key: string) => void;
   onToggleAllItemSelection: (keys: string[]) => void;
@@ -16772,10 +17197,12 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
 }) {
   const total = useMemo(() => items.reduce((sum, { item }) => sum + getBaseOrMaterialItemTotal(item), 0), [items]);
   const itemKeys = useMemo(() => items.map(({ item, index }) => getQuotationItemKey(item, index)), [items]);
+  const columnCount = hidePricingColumns ? (showSpace ? 11 : 10) : (showSpace ? 13 : 12);
+  const displaySequences = hidePricingColumns ? getQuotationSpaceSequences(items, ({ item }) => inferItemSpace(item) || "未分类") : [];
 
   return (
     <ThinScrollArea className="quote-table-shell" scrollClassName="quote-table-freeze-scroll">
-      <table className={`w-full table-fixed border-collapse text-sm ${showSpace ? "min-w-[1461px]" : "min-w-[1349px]"}`}>
+      <table className={`w-full table-fixed border-collapse text-sm ${hidePricingColumns ? (showSpace ? "min-w-[1174px]" : "min-w-[1062px]") : showSpace ? "min-w-[1461px]" : "min-w-[1349px]"}`}>
         <colgroup>
           <col style={{ width: "80px" }} />
           {showSpace && <col style={{ width: "112px" }} />}
@@ -16787,8 +17214,8 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
           <col style={{ width: "144px" }} />
           <col style={{ width: "88px" }} />
           <col style={{ width: "59px" }} />
-          <col style={{ width: "59px" }} />
-          <col style={{ width: "152px" }} />
+          {!hidePricingColumns && <col style={{ width: "59px" }} />}
+          {!hidePricingColumns && <col style={{ width: "152px" }} />}
           <col style={{ width: "135px" }} />
         </colgroup>
         <thead className="bg-surface-50 text-center text-xs font-semibold text-surface-600">
@@ -16799,8 +17226,8 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
             <th colSpan={5} className="border border-surface-200 px-2 py-1.5">H高×W宽×D深（mm）</th>
             <th rowSpan={2} className="w-[88px] border border-surface-200 px-2 py-1.5">数量</th>
             <th rowSpan={2} className="w-[59px] border border-surface-200 px-2 py-1.5">平方</th>
-            <th rowSpan={2} className="w-[59px] border border-surface-200 px-2 py-1.5">单价</th>
-            <th rowSpan={2} className="w-[152px] border border-surface-200 px-2 py-1.5">金额</th>
+            {!hidePricingColumns && <th rowSpan={2} className="w-[59px] border border-surface-200 px-2 py-1.5">单价</th>}
+            {!hidePricingColumns && <th rowSpan={2} className="w-[152px] border border-surface-200 px-2 py-1.5">金额</th>}
             <th rowSpan={2} className="w-[135px] border border-surface-200 px-3 py-1.5">备注</th>
           </tr>
           <tr>
@@ -16812,15 +17239,21 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
           </tr>
         </thead>
         <tbody>
-          {items.map(({ item, index }, rowIndex) => {
+          {items.map(({ item, index }, position) => {
+            const rowIndex = referenceItems.findIndex((row) => row.index === index);
             const itemKey = getQuotationItemKey(item, index);
             return (
+              <React.Fragment key={itemKey}>
+              {groupPackageItems && <PackageItemGroupRow items={items} position={position} columns={columnCount} />}
+              {hidePricingColumns && <PackageSpaceGroupRow items={items} position={position} columns={columnCount} />}
               <QuoteCabinetRow
                 key={itemKey}
                 item={item}
                 index={index}
                 rowIndex={rowIndex}
+                displaySequence={displaySequences[position]}
                 showSpace={showSpace}
+                hidePricingColumns={hidePricingColumns}
                 spaceOptions={spaceOptions}
                 readOnly={readOnly}
                 onChange={onChange}
@@ -16834,23 +17267,26 @@ function CustomCabinetQuoteTable({ items, showSpace, spaceOptions, emptyText, dr
                 dropAfter={dragOverItem?.index === index && dragOverItem.position === "after"}
                 recentlyMoved={recentlyMovedItemKey === itemKey}
                 findReplaceHighlight={activeFindReplaceHighlight?.itemKey === itemKey ? activeFindReplaceHighlight : null}
-                quantityLinkItems={items.map(({ item }) => item)}
+                quantityLinkItems={referenceItems.map(({ item }) => item)}
+                invalidQuantityDraft={invalidQuantityDrafts[itemKey] || null}
+                onInvalidQuantityDraftChange={(draft) => onInvalidQuantityDraftChange(itemKey, draft)}
               />
+              </React.Fragment>
             );
           })}
           {items.length === 0 && (
             <tr className="quote-empty-row">
-              <td colSpan={showSpace ? 13 : 12} className="quote-empty-cell border border-surface-200 px-4 py-0 text-center">
+              <td colSpan={columnCount} className="quote-empty-cell border border-surface-200 px-4 py-0 text-center">
                 <div className="quote-empty-state">
                   <p className="text-sm font-semibold text-[#34445a]">{emptyText}</p>
-                  <p className="mt-1 text-xs leading-5 text-[#7c8aa0]">添加项目后，将在这里显示尺寸、数量、单价和备注。</p>
+                  <p className="mt-1 text-xs leading-5 text-[#7c8aa0]">{hidePricingColumns ? "套餐内项目将在这里显示尺寸、数量和备注。" : "添加项目后，将在这里显示尺寸、数量、单价和备注。"}</p>
                 </div>
               </td>
             </tr>
           )}
-          {items.length > 0 && (
-            <tr className="bg-surface-50 font-semibold text-surface-900">
-              <td className="border border-surface-200 px-2 py-3 text-center" colSpan={showSpace ? 11 : 10}>小计</td>
+          {!hidePricingColumns && items.length > 0 && (
+            <tr className="quote-subtotal-row bg-surface-50 font-semibold text-surface-900">
+              <td className="border border-surface-200 px-2 py-3 text-center" colSpan={showSpace ? 11 : 10}>{subtotalLabel}</td>
               <td className="border border-surface-200 px-2 py-3 text-center text-red-600">{formatQuoteAmount(total)}</td>
               <td className="border border-surface-200 px-2 py-3"></td>
             </tr>
@@ -17011,10 +17447,14 @@ function FeeScopeSelector({
   );
 }
 
-function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, spaceOptions, feeScopeOptions: feeScopeOptionsInput, isOtherFees, baseAmount, materialAmount, feeFormulaContext, formulaFinalFeeItemId, discountDetailText, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onOpenQuantityLink, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown, onNotify }: {
+function SimpleQuoteTable({ items, groupPackageItems = false, referenceItems = items, subtotalLabel = "小计", otherFeeRows, showSpace, hidePricingColumns, editableSpace, spaceOptions, feeScopeOptions: feeScopeOptionsInput, isOtherFees, baseAmount, materialAmount, feeFormulaContext, formulaFinalFeeItemId, discountDetailText, emptyText, draggingItemIndex, dragOverItem, recentlyMovedItemKey, activeFindReplaceHighlight, onChange, onOpenRowMenu, onOpenQuantityLink, invalidQuantityDrafts, onInvalidQuantityDraftChange, selectedItemKeys, onToggleItemSelection, onToggleAllItemSelection, readOnly, onItemPointerDown, onNotify }: {
+  groupPackageItems?: boolean;
+  referenceItems?: { item: QuotationItem; index: number }[];
+  subtotalLabel?: string;
   items: { item: QuotationItem; index: number }[];
   otherFeeRows: { item: QuotationItem; index: number }[];
   showSpace?: boolean;
+  hidePricingColumns?: boolean;
   editableSpace?: boolean;
   spaceOptions: string[];
   feeScopeOptions: string[];
@@ -17032,6 +17472,8 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
   onChange: (index: number, patch: Partial<QuotationItem>) => void;
   onOpenRowMenu: RowMenuOpenHandler;
   onOpenQuantityLink: QuantityLinkOpenHandler;
+  invalidQuantityDrafts: Record<string, InvalidQuantityDraft>;
+  onInvalidQuantityDraftChange: (itemKey: string, draft: InvalidQuantityDraft | null) => void;
   selectedItemKeys: Set<string>;
   onToggleItemSelection: (key: string) => void;
   onToggleAllItemSelection: (keys: string[]) => void;
@@ -17040,6 +17482,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
   onNotify?: (title: string, message: string, tone?: QuoteSystemDialogState["tone"]) => void;
 }) {
   const [feeFormulaDrafts, setFeeFormulaDrafts] = useState<Record<string, string>>({});
+  const displaySequences = hidePricingColumns ? getQuotationSpaceSequences(items, ({ item }) => inferItemSpace(item) || "未分类") : [];
   const [feeSuggestion, setFeeSuggestion] = useState<{ itemKey: string; left: number; top: number; width: number } | null>(null);
   const [feeSuggestionActiveIndex, setFeeSuggestionActiveIndex] = useState(0);
   const feeSuggestionInputRef = useRef<HTMLInputElement | null>(null);
@@ -17108,6 +17551,11 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
     });
     return Array.from(names);
   }, [feeScopeOptionsInput, otherFeeRows]);
+  const emptyColumnCount = isOtherFees
+    ? (hasFormulaTableRows ? 7 : 9)
+    : hidePricingColumns
+      ? (showSpace ? 8 : 7)
+      : (showSpace ? 10 : 9);
   const toggleFeeScopeName = (index: number, item: QuotationItem, name: string) => {
     const names = new Set(parseFeeScopeValues(item.fee_scope_space_names));
     if (names.has(name)) names.delete(name);
@@ -17280,7 +17728,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
   return (
     <>
     <ThinScrollArea className="quote-table-shell" scrollClassName={`quote-table-freeze-scroll ${isOtherFees ? "pb-2" : ""}`}>
-      <table className={`w-full table-fixed border-collapse text-sm ${isOtherFees ? "quote-other-fees-table min-w-[1400px]" : showSpace ? "min-w-[1430px]" : "min-w-[1310px]"}`}>
+      <table className={`w-full table-fixed border-collapse text-sm ${isOtherFees ? "quote-other-fees-table min-w-[1400px]" : hidePricingColumns ? (showSpace ? "min-w-[1120px]" : "min-w-[1000px]") : showSpace ? "min-w-[1430px]" : "min-w-[1310px]"}`}>
         <thead className="bg-surface-50 text-center text-xs font-semibold text-surface-600">
           <tr>
             <QuoteIndexHeaderCell itemKeys={itemKeys} selectedItemKeys={selectedItemKeys} readOnly={readOnly} onToggleAll={onToggleAllItemSelection} />
@@ -17311,18 +17759,20 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
               </>
             ) : (
               <>
+                {groupPackageItems && <th className="w-40 border border-surface-200 py-1.5">数量</th>}
                 <th className="w-20 border border-surface-200 py-1.5">单位</th>
-                <th className="w-28 border border-surface-200 py-1.5">单价</th>
-                <th className="w-40 border border-surface-200 py-1.5">数量</th>
+                {!hidePricingColumns && <th className="w-28 border border-surface-200 py-1.5">单价</th>}
+                {!groupPackageItems && <th className="w-40 border border-surface-200 py-1.5">数量</th>}
               </>
             )}
-            <th className={`${isOtherFees ? "h-11 w-32 border border-surface-200 py-0 text-center" : "w-28 border border-surface-200 py-1.5"}`}>小计</th>
+            {(isOtherFees || !hidePricingColumns) && <th className={`${isOtherFees ? "h-11 w-32 border border-surface-200 py-0 text-center" : "w-28 border border-surface-200 py-1.5"}`}>小计</th>}
             {!isOtherFees && <th className="w-52 border border-surface-200 py-1.5">备注</th>}
             {isOtherFees && <th className="h-11 w-72 border border-surface-200 py-0">规则/说明</th>}
           </tr>
         </thead>
         <tbody className="divide-y divide-surface-100">
-          {items.map(({ item, index }, rowIndex) => {
+          {items.map(({ item, index }, position) => {
+            const rowIndex = referenceItems.findIndex((row) => row.index === index);
             const isDragging = draggingItemIndex === index;
             const dropBefore = dragOverItem?.index === index && dragOverItem.position === "before";
             const dropAfter = dragOverItem?.index === index && dragOverItem.position === "after";
@@ -17359,6 +17809,9 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
               isDiscountFeeRow ? discountDetailText : otherFeeRuleText,
             ].filter(Boolean).join("；");
             return (
+              <React.Fragment key={itemKey}>
+              {groupPackageItems && <PackageItemGroupRow items={items} position={position} columns={emptyColumnCount} />}
+              {hidePricingColumns && <PackageSpaceGroupRow items={items} position={position} columns={emptyColumnCount} />}
               <tr
                 key={itemKey}
                 data-quote-item-row
@@ -17371,7 +17824,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                 <td className={`${isOtherFees ? "h-14 py-0" : "py-1"} border border-surface-200 px-1 text-center text-surface-500`} style={cellStyle}>
                   <QuoteRowIndexCell
                     itemKey={itemKey}
-                    label={isOtherFees ? feeMeta?.sequence || formatAlphaSequence(rowIndex) : rowIndex + 1}
+                    label={isOtherFees ? feeMeta?.sequence || formatAlphaSequence(rowIndex) : displaySequences[position] ?? rowIndex + 1}
                     starred={isOtherFees && String(item.id) === String(formulaFinalFeeItemId || "")}
                     readOnly={readOnly}
                     selected={selectedItemKeys.has(itemKey)}
@@ -17389,7 +17842,7 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                   </td>
                 )}
                 <td className={`${isOtherFees ? "h-14 w-36 border border-surface-200" : "border border-surface-200"} px-0 py-0 align-middle`} style={cellStyle}>
-                  <QuoteNameTextarea value={item.name} onChange={(value) => onChange(index, { name: value })} className="px-4 text-left font-medium" readOnly={readOnly} special={isSpecialQuoteItem(item)} highlight={findReplaceHighlight?.field === "name" ? findReplaceHighlight : null} />
+                  <QuoteNameTextarea value={item.name} onChange={(value) => onChange(index, { name: value })} className="px-4 text-left font-medium" readOnly={readOnly || item.category === PACKAGE_AREA_CATEGORY || item.category === PACKAGE_AREA_OVERAGE_CATEGORY} special={isSpecialQuoteItem(item)} highlight={findReplaceHighlight?.field === "name" ? findReplaceHighlight : null} />
                 </td>
                 {!isOtherFees && (
                   <>
@@ -17599,43 +18052,52 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                   </>
                 ) : (
                   <>
+                    {groupPackageItems && <td className="border border-surface-200 py-0" style={cellStyle}>
+                      <QuantityLinkInput item={item} readOnly={readOnly} onChange={(patch) => onChange(index, patch)} onOpenQuantityLink={(event) => onOpenQuantityLink(index, event)} quantityLinkItems={referenceItems.map(({ item }) => item)} targetIndex={rowIndex} invalidDraft={invalidQuantityDrafts[itemKey] || null} onInvalidDraftChange={(draft) => onInvalidQuantityDraftChange(itemKey, draft)} />
+                    </td>}
                     <td className="border border-surface-200 py-0" style={cellStyle}><UnitInputCell value={item.unit} onChange={(value) => onChange(index, { unit: value })} className="w-20 text-center" readOnly={readOnly} /></td>
-                    <td className="border border-surface-200 py-0" style={cellStyle}>
-                      <div className="quote-price-input-wrap">
-                        <QuoteNumberInput
-                          value={item.unit_price}
-                          onChange={(value) => onChange(index, {
-                            unit_price: value,
-                            price_manually_edited: setManualPriceEditFlag(item.price_manually_edited, "material"),
-                          })}
-                          className="w-28 text-center"
-                          disabled={readOnly}
-                        />
-                        {manualPriceEditFlags.material ? <span className="quote-price-edit-mark" title="单价已手动修改">改</span> : null}
-                      </div>
-                    </td>
-                    <td className="border border-surface-200 py-0" style={cellStyle}>
+                    {groupPackageItems && isPackageIncludedItem(item) ? <td colSpan={2} className="quote-package-included-price border border-surface-200 py-1 text-center" style={cellStyle}>已含套餐价</td> : !hidePricingColumns && (
+                      <td className="border border-surface-200 py-0" style={cellStyle}>
+                        <div className="quote-price-input-wrap">
+                          <QuoteNumberInput
+                            value={item.unit_price}
+                            onChange={(value) => onChange(index, {
+                              unit_price: value,
+                              price_manually_edited: setManualPriceEditFlag(item.price_manually_edited, "material"),
+                            })}
+                            className="w-28 text-center"
+                            disabled={readOnly}
+                          />
+                          {manualPriceEditFlags.material ? <span className="quote-price-edit-mark" title="单价已手动修改">改</span> : null}
+                        </div>
+                      </td>
+                    )}
+                    {!groupPackageItems && <td className="border border-surface-200 py-0" style={cellStyle}>
                       <QuantityLinkInput
                         item={item}
                         readOnly={readOnly}
                         onChange={(patch) => onChange(index, patch)}
                         onOpenQuantityLink={(event) => onOpenQuantityLink(index, event)}
-                        quantityLinkItems={items.map(({ item }) => item)}
+                        quantityLinkItems={referenceItems.map(({ item }) => item)}
                         targetIndex={rowIndex}
+                        invalidDraft={invalidQuantityDrafts[itemKey] || null}
+                        onInvalidDraftChange={(draft) => onInvalidQuantityDraftChange(itemKey, draft)}
                       />
-                    </td>
+                    </td>}
                   </>
                 )}
-                <td
-                  className={`border border-surface-200 py-1 text-center text-red-600 ${isOtherFees ? "quote-other-fee-subtotal-cell font-semibold" : "font-semibold"}`}
-                  style={isOtherFees ? { ...cellStyle, fontWeight: 600 } : cellStyle}
-                >
-                  {feeBaseError ? (
-                    "-"
-                  ) : (
-                    formatQuoteAmount(feeTotal)
-                  )}
-                </td>
+                {(isOtherFees || !hidePricingColumns) && !(groupPackageItems && isPackageIncludedItem(item)) && (
+                  <td
+                    className={`border border-surface-200 py-1 text-center text-red-600 ${isOtherFees ? "quote-other-fee-subtotal-cell font-semibold" : "font-semibold"}`}
+                    style={isOtherFees ? { ...cellStyle, fontWeight: 600 } : cellStyle}
+                  >
+                    {feeBaseError ? (
+                      "-"
+                    ) : (
+                      formatQuoteAmount(feeTotal)
+                    )}
+                  </td>
+                )}
                 {!isOtherFees && (
                   <td className="border border-surface-200 p-0 align-middle" style={cellStyle}>
                     <QuoteDescriptionCell
@@ -17663,21 +18125,22 @@ function SimpleQuoteTable({ items, otherFeeRows, showSpace, editableSpace, space
                   </td>
                 )}
               </tr>
+              </React.Fragment>
             );
           })}
           {items.length === 0 && (
             <tr className="quote-empty-row">
-              <td colSpan={isOtherFees ? (hasFormulaTableRows ? 7 : 9) : showSpace ? 10 : 9} className="quote-empty-cell border border-surface-200 px-4 py-0 text-center">
+              <td colSpan={emptyColumnCount} className="quote-empty-cell border border-surface-200 px-4 py-0 text-center">
                 <div className="quote-empty-state">
                   <p className="text-sm font-semibold text-[#34445a]">{emptyText}</p>
-                  <p className="mt-1 text-xs leading-5 text-[#7c8aa0]">添加项目后，将在这里显示单价、数量、小计和备注。</p>
+                  <p className="mt-1 text-xs leading-5 text-[#7c8aa0]">{hidePricingColumns ? "套餐内项目将在这里显示规格、单位、数量和备注。" : "添加项目后，将在这里显示单价、数量、小计和备注。"}</p>
                 </div>
               </td>
             </tr>
           )}
-          {!isOtherFees && items.length > 0 && (
-            <tr className="bg-surface-50 font-semibold text-surface-900">
-              <td className="border border-surface-200 px-2 py-3 text-center" colSpan={showSpace ? 8 : 7}>小计</td>
+          {!isOtherFees && !hidePricingColumns && items.length > 0 && (
+            <tr className="quote-subtotal-row bg-surface-50 font-semibold text-surface-900">
+              <td className="border border-surface-200 px-2 py-3 text-center" colSpan={showSpace ? 8 : 7}>{subtotalLabel}</td>
               <td className="border border-surface-200 py-3 text-center font-semibold text-red-600">{formatQuoteAmount(visibleSubtotal)}</td>
               <td className="border border-surface-200 py-3"></td>
             </tr>

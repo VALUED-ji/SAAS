@@ -6,9 +6,15 @@ import { applyQuoteDiscountToFormulaTotal, calculateDiscountRuleAmounts, formatD
 import { getQuotationRowColor } from "@/lib/quotationRowColors";
 import { formatAlphaSequence } from "@/lib/quotationSequence";
 import { normalizeQuotationSignatureLabels } from "@/lib/quotationPrintSettings";
+import { PACKAGE_AREA_CATEGORY, PACKAGE_AREA_OVERAGE_CATEGORY, isPackageIncludedItem } from "@/lib/quotationPackageArea";
 import NativeImage from "@/components/ui/NativeImage";
 
 export type PrintableQuotationItem = {
+  pricing_mode?: "single" | "split";
+  package_scope?: string | null;
+  package_overage_rule_id?: string | null;
+  package_overage_included_quantity?: number | string | null;
+  package_overage_actual_quantity?: number | string | null;
   id?: string;
   client_key?: string;
   category: string;
@@ -156,7 +162,18 @@ type DiscountScopeOption = {
   amount: number;
 };
 
+type CostCompositionRows = {
+  unsplit?: { name: string; amount: number }[];
+  workTypes: { name: string; amount: number }[];
+  materialCategories: { name: string; amount: number }[];
+};
+
+type SpaceCostComposition = CostCompositionRows & {
+  space: string;
+};
+
 const emptyText = "-";
+const defaultPrintBrandLogoUrl = "/brand/xingyi-decoration-logo-print.png";
 const defaultQuoteCategories = ["base", "main_material", "custom_cabinet", "other"];
 const defaultBaseColumnOptions: QuotationBaseColumnOptions = {
   materialUnit: true,
@@ -216,6 +233,8 @@ const builtInCategoryLabels: Record<string, string> = {
   main_material: "产品",
   custom_cabinet: "定制柜",
   other: "综合费用",
+  [PACKAGE_AREA_CATEGORY]: "套餐平方",
+  [PACKAGE_AREA_OVERAGE_CATEGORY]: "套餐超标加价",
 };
 
 function getCategoryKey(category: unknown) {
@@ -237,6 +256,14 @@ function isOtherCategory(category: unknown) {
 
 function isCustomCabinetCategory(category: unknown) {
   return getCategoryKey(category) === "custom_cabinet";
+}
+
+function isPackageAreaCategory(category: unknown) {
+  return getCategoryKey(category) === PACKAGE_AREA_CATEGORY;
+}
+
+function isPackageAreaOverageCategory(category: unknown) {
+  return getCategoryKey(category) === PACKAGE_AREA_OVERAGE_CATEGORY;
 }
 
 function getDiscountScopeLabel(settings?: PrintableQuotationSettings) {
@@ -304,21 +331,22 @@ function uniqueValues(values: string[]) {
 
 function getBasePriceParts(item: PrintableQuotationItem) {
   const quantity = toNumber(item.quantity);
+  if (item.pricing_mode === "single") return { quantity, materialUnit: 0, materialTotal: 0, laborUnit: 0, laborTotal: 0, total: isPackageIncludedItem(item) ? 0 : quantity * toNumber(item.unit_price) };
   const materialUnit = toNumber(item.material_cost);
   const rawLaborUnit = toNumber(item.labor_cost);
   const laborUnit = materialUnit || rawLaborUnit ? rawLaborUnit : toNumber(item.unit_price);
   return {
     quantity,
     materialUnit,
-    materialTotal: quantity * materialUnit,
+    materialTotal: isPackageIncludedItem(item) ? 0 : quantity * materialUnit,
     laborUnit,
-    laborTotal: quantity * laborUnit,
-    total: quantity * (materialUnit + laborUnit),
+    laborTotal: isPackageIncludedItem(item) ? 0 : quantity * laborUnit,
+    total: isPackageIncludedItem(item) ? 0 : quantity * (materialUnit + laborUnit),
   };
 }
 
 function getItemUnitPrice(item: PrintableQuotationItem) {
-  if (!isBaseCategory(item.category)) return toNumber(item.unit_price);
+  if (item.pricing_mode === "single" || !isBaseCategory(item.category)) return toNumber(item.unit_price);
   const parts = getBasePriceParts(item);
   return parts.materialUnit + parts.laborUnit;
 }
@@ -328,6 +356,7 @@ function getCustomCabinetArea(item: PrintableQuotationItem) {
 }
 
 function getItemTotal(item: PrintableQuotationItem) {
+  if (isPackageIncludedItem(item)) return 0;
   if (isCustomCabinetCategory(item.category)) {
     const area = getCustomCabinetArea(item);
     return toMoney(toNumber(item.quantity) * (area > 0 ? area : 1) * toNumber(item.unit_price));
@@ -336,12 +365,16 @@ function getItemTotal(item: PrintableQuotationItem) {
 }
 
 function getItemLaborSubtotal(item: PrintableQuotationItem) {
+  if (item.pricing_mode === "single") return 0;
+  if (isPackageIncludedItem(item)) return 0;
   if (isOtherCategory(item.category)) return 0;
   const factor = isCustomCabinetCategory(item.category) ? Math.max(1, getCustomCabinetArea(item)) : 1;
   return toMoney(toNumber(item.quantity) * factor * toNumber(item.labor_cost));
 }
 
 function getItemMaterialSubtotal(item: PrintableQuotationItem) {
+  if (item.pricing_mode === "single") return 0;
+  if (isPackageIncludedItem(item)) return 0;
   if (isOtherCategory(item.category)) return 0;
   const factor = isCustomCabinetCategory(item.category) ? Math.max(1, getCustomCabinetArea(item)) : 1;
   return toMoney(toNumber(item.quantity) * factor * toNumber(item.material_cost));
@@ -349,6 +382,46 @@ function getItemMaterialSubtotal(item: PrintableQuotationItem) {
 
 function isSpecialQuoteItem(item?: Pick<PrintableQuotationItem, "row_color"> | null) {
   return String(item?.row_color || "") === "special";
+}
+
+function SpecialPriceBadge() {
+  return <span className="quotation-print-special-badge" title="特价项目"><span>特</span></span>;
+}
+
+function PrintableItemName({ item }: { item: PrintableQuotationItem }) {
+  const name = text(item.name);
+  if (!isSpecialQuoteItem(item)) return <>{name}</>;
+  return (
+    <span className="quotation-print-special-name">
+      <span>{name}</span>
+      {isSpecialQuoteItem(item) && <SpecialPriceBadge />}
+    </span>
+  );
+}
+
+function PrintBrandLogo({ src }: { src?: string | null }) {
+  const configuredSrc = String(src || "").trim();
+  const initialSrc = configuredSrc || defaultPrintBrandLogoUrl;
+  const [imageSrc, setImageSrc] = useState(initialSrc);
+
+  useEffect(() => {
+    setImageSrc(initialSrc);
+  }, [initialSrc]);
+
+  return (
+    <NativeImage
+      src={imageSrc}
+      alt="公司 logo"
+      loading="eager"
+      onError={(event) => {
+        if (imageSrc !== defaultPrintBrandLogoUrl) {
+          setImageSrc(defaultPrintBrandLogoUrl);
+          return;
+        }
+        event.currentTarget.style.display = "none";
+      }}
+    />
+  );
 }
 
 function isLaborOnlyQuoteItem(item: PrintableQuotationItem) {
@@ -519,15 +592,17 @@ function getDiscountRuleRows(items: PrintableQuotationItem[], settings: Printabl
     .filter((row) => row.amount > 0);
 }
 
-function buildCostComposition(items: PrintableQuotationItem[]) {
+function buildCostComposition(items: PrintableQuotationItem[]): CostCompositionRows {
   const addAmount = (map: Map<string, number>, name: string, amount: number) => {
     if (amount <= 0) return;
     const label = name.trim() || "未指定";
     map.set(label, toMoney((map.get(label) || 0) + amount));
   };
+  const unsplitMap = new Map<string, number>();
   const workTypeMap = new Map<string, number>();
   const materialCategoryMap = new Map<string, number>();
   items.forEach((item) => {
+    if (item.pricing_mode === "single" && isBaseCategory(item.category)) addAmount(unsplitMap, item.name, getItemTotal(item));
     addAmount(workTypeMap, String(item.work_type_name || "未指定工种"), getItemLaborSubtotal(item));
     addAmount(materialCategoryMap, String(item.material_category_name || "未分类材料"), getItemMaterialSubtotal(item));
   });
@@ -535,9 +610,19 @@ function buildCostComposition(items: PrintableQuotationItem[]) {
     .map(([name, amount]) => ({ name, amount }))
     .sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, "zh-CN"));
   return {
+    unsplit: sortRows(unsplitMap),
     workTypes: sortRows(workTypeMap),
     materialCategories: sortRows(materialCategoryMap),
   };
+}
+
+function buildSpaceCostCompositions(items: PrintableQuotationItem[], settings?: PrintableQuotationSettings): SpaceCostComposition[] {
+  return groupItemsBySpace(items.filter((item) => !isOtherCategory(item.category)), settings)
+    .map((group) => ({
+      space: group.space,
+      ...buildCostComposition(group.items),
+    }))
+    .filter((group) => group.workTypes.length > 0 || group.materialCategories.length > 0 || (group.unsplit?.length || 0) > 0);
 }
 
 function buildFeeFormulaContext(items: PrintableQuotationItem[], categories: string[] = [], houseArea = 0): FeeFormulaContext {
@@ -920,20 +1005,17 @@ function PrintCoverPage({
     { label: "报价人", value: quotation?.creator_name },
     { label: "设计师", value: quotation?.designer_name },
   ];
-  const configuredBrandLogoUrl = String(quotation?.branch_company_logo_url || "").trim();
-  const brandLogoUrl = configuredBrandLogoUrl || "/brand/xingyi-decoration-logo-print.png";
+  const brandLogoUrl = String(quotation?.branch_company_logo_url || "").trim() || defaultPrintBrandLogoUrl;
   const brandShortName = String(quotation?.branch_company_short_name || "").trim();
   const legalCompanyName = String(quotation?.branch_company_legal_name || "").trim();
   const coverCompanyName = legalCompanyName || (brandShortName ? `${brandShortName}工程有限公司` : quotation?.company_name || "装修公司");
-  const displayTitle = buildQuotationDisplayTitle(quotation);
-
   return (
     <section className="quotation-print-cover-page">
       <div className="quotation-print-cover-main">
         <h1>
           <span>{text(coverCompanyName)}</span>
         </h1>
-        <h2>{displayTitle}</h2>
+        <h2>工程报价单</h2>
         <p>报价执行有效期：{getQuotationValidityDate(settings)}</p>
       </div>
 
@@ -949,7 +1031,7 @@ function PrintCoverPage({
       <div className="quotation-print-cover-brand">
         <span />
         <div className="quotation-print-cover-brand-mark">
-          <NativeImage src={brandLogoUrl} alt="公司 logo" loading="eager" />
+          <PrintBrandLogo src={brandLogoUrl} />
         </div>
         <span />
       </div>
@@ -969,96 +1051,136 @@ function Section({ title, children, className = "" }: { title: string; children:
   );
 }
 
-function CostCompositionOverview({
-  workTypes,
-  materialCategories,
+function CompositionGroupedTable({
+  groups,
+  className = "",
 }: {
-  workTypes: { name: string; amount: number }[];
-  materialCategories: { name: string; amount: number }[];
+  groups: { title: string; subtotalLabel: string; rows: { name: string; amount: number }[]; emptyText: string }[];
+  className?: string;
 }) {
-  const renderRows = (rows: { name: string; amount: number }[], emptyText: string) => (
-    <div className="quotation-print-composition-rows">
-      {rows.length === 0 ? (
-        <p className="quotation-print-composition-empty">{emptyText}</p>
-      ) : rows.slice(0, 10).map((row) => (
-        <div key={row.name} className="quotation-print-composition-row">
-          <span>{row.name}</span>
-          <strong>{formatPrintAmount(row.amount)}</strong>
-        </div>
-      ))}
-    </div>
-  );
-
   return (
-    <section className="quotation-print-composition">
-      <div className="quotation-print-composition-card">
-        <h3>按工种汇总</h3>
-        {renderRows(workTypes, "暂无人工费用归属")}
-      </div>
-      <div className="quotation-print-composition-card">
-        <h3>按材料分类汇总</h3>
-        {renderRows(materialCategories, "暂无材料费用归属")}
-      </div>
-    </section>
-  );
-}
-
-function CompositionSummaryTable({
-  title,
-  rows,
-  emptyText,
-}: {
-  title: string;
-  rows: { name: string; amount: number }[];
-  emptyText: string;
-}) {
-  const total = rows.reduce((sum, row) => sum + row.amount, 0);
-  return (
-    <div className="quotation-print-composition-table-wrap">
-      <p className="quotation-print-composition-table-title">{title}</p>
-      <table className="quotation-print-table quotation-print-composition-table">
-        <colgroup>
-          <col />
-          <col />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>分类名称</th>
-            <th className="text-right">金额</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length > 0 ? rows.map((row) => (
-            <tr key={row.name}>
-              <td className="quotation-print-item-name">{row.name}</td>
-              <td className="text-right">{formatPrintAmount(row.amount)}</td>
-            </tr>
-          )) : (
-            <tr>
-              <td colSpan={2} className="py-8 text-center text-surface-400">{emptyText}</td>
-            </tr>
-          )}
-          <tr className="quotation-print-total-row">
-            <td className="text-right">{title.replace(/汇总$/, "")}小计</td>
-            <td className="text-right">{formatPrintAmount(total)}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <table className={`quotation-print-table quotation-print-composition-table quotation-print-composition-grouped-table ${className}`.trim()}>
+      <colgroup>
+        <col />
+        <col />
+        <col />
+        <col />
+      </colgroup>
+      <thead>
+        <tr>
+          <th>费用类型</th>
+          <th>一级分类</th>
+          <th>二级分类</th>
+          <th className="text-right">金额</th>
+        </tr>
+      </thead>
+      <tbody>
+        {groups.flatMap((group, groupIndex) => {
+          const total = group.rows.reduce((sum, row) => sum + row.amount, 0);
+          const rows: Array<{ name: string; amount: number; empty?: boolean }> = group.rows.length > 0
+            ? group.rows
+            : [{ name: group.emptyText, amount: 0, empty: true }];
+          const displayRows = rows.map((row) => {
+            const category = splitCompositionCategoryName(row.name);
+            return {
+              ...row,
+              primary: category.primary || "-",
+              secondary: category.secondary || "-",
+            };
+          });
+          return displayRows.map((row, index) => {
+            const shouldMergePrimary = index === 0 || row.primary !== displayRows[index - 1]?.primary;
+            const primaryRowSpan = shouldMergePrimary
+              ? displayRows.slice(index).findIndex((nextRow) => nextRow.primary !== row.primary)
+              : 0;
+            return (
+              <tr key={`${group.title}-${row.name}-${index}`} className={row.empty ? "quotation-print-composition-muted-row" : undefined}>
+                {index === 0 && (
+                  <td rowSpan={rows.length + 1} className={`quotation-print-composition-type-cell ${groupIndex === groups.length - 1 ? "quotation-print-composition-type-cell-last" : ""}`.trim()}>
+                    {group.title}
+                  </td>
+                )}
+                {shouldMergePrimary && (
+                  <td rowSpan={primaryRowSpan === -1 ? displayRows.length - index : primaryRowSpan} className="quotation-print-item-name quotation-print-composition-primary-cell">
+                    {row.primary}
+                  </td>
+                )}
+                <td className="quotation-print-item-name">{row.secondary}</td>
+                <td className="text-right">{row.empty ? "-" : formatPrintAmount(row.amount)}</td>
+              </tr>
+            );
+          }).concat(
+            <tr key={`${group.title}-subtotal`} className="quotation-print-total-row quotation-print-composition-subtotal-row">
+              <td colSpan={2} className="text-right">{group.subtotalLabel}</td>
+              <td className="text-right">{formatPrintAmount(total)}</td>
+            </tr>,
+          );
+        })}
+      </tbody>
+    </table>
   );
 }
 
 function CompositionDetails({
+  unsplit,
   workTypes,
   materialCategories,
 }: {
+  unsplit?: { name: string; amount: number }[];
   workTypes: { name: string; amount: number }[];
   materialCategories: { name: string; amount: number }[];
 }) {
+  const groups = [
+    ...(unsplit?.length ? [{ title: "未拆分客户报价", subtotalLabel: "未拆分报价小计", rows: unsplit, emptyText: "" }] : []),
+    { title: "工种费用", subtotalLabel: "工种费用小计", rows: workTypes, emptyText: "暂无人工费用归属" },
+    { title: "材料分类", subtotalLabel: "材料分类小计", rows: materialCategories, emptyText: "暂无材料费用归属" },
+  ];
   return (
     <div className="quotation-print-composition-detail-grid">
-      <CompositionSummaryTable title="工种费用汇总" rows={workTypes} emptyText="暂无人工费用归属" />
-      <CompositionSummaryTable title="材料分类汇总" rows={materialCategories} emptyText="暂无材料费用归属" />
+      <CompositionGroupedTable groups={groups} />
+    </div>
+  );
+}
+
+function splitCompositionCategoryName(name: string) {
+  const parts = String(name || "").split(/[\/／]/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length <= 1) return { primary: String(name || "").trim(), secondary: "" };
+  return {
+    primary: parts[0],
+    secondary: parts.slice(1).join(" / "),
+  };
+}
+
+function SpaceCompositionTable({ spaceGroup }: { spaceGroup: SpaceCostComposition }) {
+  const groups = [
+    ...(spaceGroup.unsplit?.length ? [{ title: "未拆分客户报价", subtotalLabel: "未拆分报价小计", rows: spaceGroup.unsplit, emptyText: "" }] : []),
+    { title: "工种费用", subtotalLabel: "工种费用小计", rows: spaceGroup.workTypes, emptyText: "暂无人工费用归属" },
+    { title: "材料分类", subtotalLabel: "材料分类小计", rows: spaceGroup.materialCategories, emptyText: "暂无材料费用归属" },
+  ];
+
+  return <CompositionGroupedTable groups={groups} className="quotation-print-space-composition-table" />;
+}
+
+function SpaceCompositionDetails({ spaces }: { spaces: SpaceCostComposition[] }) {
+  if (spaces.length === 0) {
+    return <p className="quotation-print-composition-empty quotation-print-space-composition-empty">暂无空间分类费用</p>;
+  }
+  return (
+    <div className="quotation-print-space-composition-list">
+      {spaces.map((spaceGroup, index) => (
+        <section key={spaceGroup.space} className="quotation-print-space-composition-block">
+          <div className="quotation-print-space-composition-head">
+            <span>{formatBaseSectionNumber(index)}、{spaceGroup.space}</span>
+            <strong>{formatPrintAmount([
+              ...spaceGroup.workTypes,
+              ...spaceGroup.materialCategories,
+            ].reduce((sum, row) => sum + row.amount, 0))}</strong>
+          </div>
+          <div className="quotation-print-space-composition-grid">
+            <SpaceCompositionTable spaceGroup={spaceGroup} />
+          </div>
+        </section>
+      ))}
     </div>
   );
 }
@@ -1184,13 +1306,7 @@ function getBaseColumnWidthMap(columns: { key: "sequence" | "name" | "quantity" 
 }
 
 function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQuotationItem[]; settings?: PrintableQuotationSettings; baseColumns?: Partial<QuotationBaseColumnOptions> }) {
-  const groups = groupItemsBySpace(items, settings);
-  let rowNumber = 0;
-  const baseTotal = items.reduce((sum, item) => sum + getItemTotal(item), 0);
-  const baseMaterialTotal = items.reduce((sum, item) => sum + getBasePriceParts(item).materialTotal, 0);
-  const baseLaborTotal = items.reduce((sum, item) => sum + getBasePriceParts(item).laborTotal, 0);
-  const columnOptions = normalizeBaseColumnOptions(baseColumns);
-  const columns: {
+  type BasePrintColumn = {
     key: "sequence" | "name" | "quantity" | "unit" | QuotationBaseColumnKey;
     top: string;
     bottom?: string;
@@ -1198,50 +1314,63 @@ function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQu
     className?: string;
     align?: "left" | "center" | "right";
     amount?: boolean;
-  }[] = [
-    { key: "sequence", top: "序号", className: "text-center", align: "center" },
-    { key: "name", top: "工程项目", className: "text-center", align: "left" },
-    { key: "quantity", top: "数量", className: "text-center", align: "center" },
-    { key: "unit", top: "单位", className: "text-center", align: "center" },
-    ...(columnOptions.materialUnit ? [{ key: "materialUnit" as const, top: "材料", bottom: "单价", group: "material" as const, className: "text-center", align: "right" as const, amount: true }] : []),
+  };
+
+  const groups = groupItemsBySpace(items, settings);
+  const hasPackageScopeItems = items.some((item) => item.package_scope === "included" || item.package_scope === "extra");
+  const includedItems = hasPackageScopeItems ? items.filter(isPackageIncludedItem) : [];
+  // Included spaces follow their saved item order, independently of extra space tabs.
+  const includedGroups = groupItemsBySpace(includedItems);
+  const extraItems = hasPackageScopeItems ? items.filter((item) => !isPackageIncludedItem(item)) : [];
+  let rowNumber = 0;
+  const baseTotal = items.reduce((sum, item) => sum + getItemTotal(item), 0);
+  const baseMaterialTotal = items.reduce((sum, item) => sum + getBasePriceParts(item).materialTotal, 0);
+  const baseLaborTotal = items.reduce((sum, item) => sum + getBasePriceParts(item).laborTotal, 0);
+  const singlePricing = items.some((item) => item.pricing_mode === "single");
+  const columnOptions = singlePricing ? { materialUnit: true, materialTotal: false, laborUnit: false, laborTotal: false, subtotal: true, description: true } : normalizeBaseColumnOptions(baseColumns);
+  const priceColumns: BasePrintColumn[] = [
+    ...(columnOptions.materialUnit ? [{ key: "materialUnit" as const, top: singlePricing ? "客户单价" : "材料", bottom: singlePricing ? undefined : "单价", group: singlePricing ? undefined : "material" as const, className: "text-center", align: "right" as const, amount: true }] : []),
     ...(columnOptions.materialTotal ? [{ key: "materialTotal" as const, top: "材料", bottom: "合价", group: "material" as const, className: "text-center", align: "right" as const, amount: true }] : []),
     ...(columnOptions.laborUnit ? [{ key: "laborUnit" as const, top: "人工", bottom: "单价", group: "labor" as const, className: "text-center", align: "right" as const, amount: true }] : []),
     ...(columnOptions.laborTotal ? [{ key: "laborTotal" as const, top: "人工", bottom: "合价", group: "labor" as const, className: "text-center", align: "right" as const, amount: true }] : []),
     ...(columnOptions.subtotal ? [{ key: "subtotal" as const, top: "小计", className: "quotation-print-base-subtotal-head text-center", align: "right" as const, amount: true }] : []),
-    ...(columnOptions.description ? [{ key: "description" as const, top: "施工工艺及材料说明", className: "text-center", align: "left" as const }] : []),
   ];
-  const colSpan = columns.length;
-  const materialColumns = columns.filter((column) => column.group === "material");
-  const laborColumns = columns.filter((column) => column.group === "labor");
-  const groupedPriceColumns = [...materialColumns, ...laborColumns];
-  const hasGroupedPriceColumns = materialColumns.length > 0 || laborColumns.length > 0;
-  const headerTopCells = columns.flatMap((column, index) => {
+  const descriptionColumn: BasePrintColumn[] = columnOptions.description ? [{ key: "description" as const, top: "施工工艺及材料说明", className: "text-center", align: "left" as const }] : [];
+  const columns: BasePrintColumn[] = [
+    { key: "sequence", top: "序号", className: "text-center", align: "center" },
+    { key: "name", top: "工程项目", className: "text-center", align: "left" },
+    { key: "quantity", top: "数量", className: "text-center", align: "center" },
+    { key: "unit", top: "单位", className: "text-center", align: "center" },
+    ...priceColumns,
+    ...descriptionColumn,
+  ];
+  const renderHeaderTopCells = (tableColumns: BasePrintColumn[], hasGroupedPriceColumns: boolean) => tableColumns.flatMap((column, index) => {
     const columnClassName = `quotation-print-base-col-${column.key}`;
     if (!column.group) {
       return [<th key={column.key} rowSpan={hasGroupedPriceColumns ? 2 : undefined} className={`${columnClassName} ${column.className || ""}`.trim()}>{column.top}</th>];
     }
-    if (columns[index - 1]?.group === column.group) return [];
-    const groupColumns = columns.filter((item) => item.group === column.group);
+    if (tableColumns[index - 1]?.group === column.group) return [];
+    const groupColumns = tableColumns.filter((item) => item.group === column.group);
     return [
       <th key={column.group} colSpan={groupColumns.length} className={`quotation-print-base-group-head ${column.group === "labor" ? "quotation-print-base-labor-head " : ""}text-center`}>
         {column.top}
       </th>,
     ];
   });
-  const cellClassName = (column: (typeof columns)[number]) => {
+  const cellClassName = (column: BasePrintColumn) => {
     if (column.key === "name") return "quotation-print-base-name";
     if (column.key === "description") return "quotation-print-base-description";
     if (column.align === "right") return "text-right";
     if (column.align === "center") return "text-center";
     return "";
   };
-  const baseCellValue = (column: (typeof columns)[number], item: PrintableQuotationItem, parts: ReturnType<typeof getBasePriceParts>, rowIndex: number, description: string) => {
-    const values: Record<(typeof columns)[number]["key"], ReactNode> = {
+  const baseCellValue = (column: BasePrintColumn, item: PrintableQuotationItem, parts: ReturnType<typeof getBasePriceParts>, rowIndex: number, description: string) => {
+    const values: Record<BasePrintColumn["key"], ReactNode> = {
       sequence: rowIndex,
-      name: text(item.name),
-      quantity: formatQuantity(parts.quantity),
+      name: <PrintableItemName item={item} />,
+      quantity: isPackageIncludedItem(item) && parts.quantity <= 0 ? emptyText : formatQuantity(parts.quantity),
       unit: text(item.unit),
-      materialUnit: formatPrintAmount(parts.materialUnit),
+      materialUnit: formatPrintAmount(singlePricing ? getItemUnitPrice(item) : parts.materialUnit),
       materialTotal: formatPrintAmount(parts.materialTotal),
       laborUnit: formatPrintAmount(parts.laborUnit),
       laborTotal: formatPrintAmount(parts.laborTotal),
@@ -1250,14 +1379,74 @@ function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQu
     };
     return values[column.key];
   };
-  const firstSummaryColumnIndex = columns.findIndex((column) => column.key === "materialTotal" || column.key === "laborTotal" || column.key === "subtotal");
-  const summaryLabelEndIndex = Math.max(0, (firstSummaryColumnIndex >= 0 ? firstSummaryColumnIndex : columns.length) - 1);
-  const columnWidths = getBaseColumnWidthMap(columns);
-
-  return (
-	    <table className={`quotation-print-table quotation-print-base-table ${columnOptions.description ? "quotation-print-base-table-with-description" : ""}`}>
+  const renderSpaceGroups = (spaceGroups: ReturnType<typeof groupItemsBySpace>, tableColumns: BasePrintColumn[], options?: { keyPrefix?: string; showSubtotal?: boolean; included?: boolean }) => {
+    const keyPrefix = options?.keyPrefix || "base";
+    const showSubtotal = options?.showSubtotal !== false;
+    const colSpan = tableColumns.length;
+    const firstSummaryColumnIndex = tableColumns.findIndex((column) => column.key === "materialTotal" || column.key === "laborTotal" || column.key === "subtotal");
+    const summaryLabelEndIndex = Math.max(0, (firstSummaryColumnIndex >= 0 ? firstSummaryColumnIndex : tableColumns.length) - 1);
+    return spaceGroups.map((group, groupIndex) => {
+      const groupTotal = group.items.reduce((sum, item) => sum + getItemTotal(item), 0);
+      const groupMaterialTotal = group.items.reduce((sum, item) => sum + getBasePriceParts(item).materialTotal, 0);
+      const groupLaborTotal = group.items.reduce((sum, item) => sum + getBasePriceParts(item).laborTotal, 0);
+      return (
+        <Fragment key={`${keyPrefix}-${group.space}`}>
+          <tr className="quotation-print-space-row">
+            <td className="text-center">{formatBaseSectionNumber(groupIndex)}</td>
+            <td colSpan={Math.max(1, colSpan - 1)}>
+              <span>{group.space}</span>
+            </td>
+          </tr>
+          {group.items.map((item) => {
+            rowNumber += 1;
+            const parts = getBasePriceParts(item);
+            const rowStyle = printRowStyle(item.row_color);
+            const description = getBaseRowDescription(item);
+            return (
+              <tr key={item.id || `${keyPrefix}-${group.space}-${rowNumber}`} style={rowStyle}>
+                {tableColumns.map((column, columnIndex) => {
+                  if (options?.included && columnIndex >= 4) {
+                    if (columnIndex !== 4) return null;
+                    return <td key="included-description" colSpan={tableColumns.length - 4} className="quotation-print-base-col-description">{columnOptions.description ? text(description) : ""}</td>;
+                  }
+                  return <td key={column.key} className={`quotation-print-base-col-${column.key} ${cellClassName(column)}`.trim()}>{baseCellValue(column, item, parts, rowNumber, description)}</td>;
+                })}
+              </tr>
+            );
+          })}
+          {showSubtotal ? (
+            <tr className="quotation-print-space-total-row">
+              {tableColumns.map((column, index) => {
+                if (index === 0) return <td key={column.key} colSpan={Math.max(1, summaryLabelEndIndex + 1)} className="text-center">小计</td>;
+                if (index <= summaryLabelEndIndex) return null;
+                if (column.key === "materialTotal") return <td key={column.key} className="text-right">{formatPrintAmount(groupMaterialTotal)}</td>;
+                if (column.key === "laborTotal") return <td key={column.key} className="text-right">{formatPrintAmount(groupLaborTotal)}</td>;
+                if (column.key === "subtotal") return <td key={column.key} className="text-right">{formatPrintAmount(groupTotal)}</td>;
+                return <td key={column.key}></td>;
+              })}
+            </tr>
+          ) : null}
+        </Fragment>
+      );
+    });
+  };
+  const renderBaseTable = (
+    tableColumns: BasePrintColumn[],
+    tableGroups: ReturnType<typeof groupItemsBySpace>,
+    options?: { title?: string; keyPrefix?: string; showSubtotal?: boolean; showTotal?: boolean; className?: string; appendIncluded?: boolean },
+  ) => {
+    const colSpan = tableColumns.length;
+    const materialColumns = tableColumns.filter((column) => column.group === "material");
+    const laborColumns = tableColumns.filter((column) => column.group === "labor");
+    const groupedPriceColumns = [...materialColumns, ...laborColumns];
+    const hasGroupedPriceColumns = materialColumns.length > 0 || laborColumns.length > 0;
+    const firstSummaryColumnIndex = tableColumns.findIndex((column) => column.key === "materialTotal" || column.key === "laborTotal" || column.key === "subtotal");
+    const summaryLabelEndIndex = Math.max(0, (firstSummaryColumnIndex >= 0 ? firstSummaryColumnIndex : tableColumns.length) - 1);
+    const columnWidths = getBaseColumnWidthMap(tableColumns);
+    return (
+      <table className={`quotation-print-table quotation-print-base-table ${columnOptions.description ? "quotation-print-base-table-with-description" : ""} ${options?.className || ""}`.trim()}>
         <colgroup>
-          {columns.map((column) => (
+          {tableColumns.map((column) => (
             <col
               key={column.key}
               className={`quotation-print-base-col-${column.key}`}
@@ -1265,10 +1454,10 @@ function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQu
             />
           ))}
         </colgroup>
-	      <thead>
-	        <tr>
-            {headerTopCells}
-	        </tr>
+        <thead>
+          <tr>
+            {renderHeaderTopCells(tableColumns, hasGroupedPriceColumns)}
+          </tr>
           {hasGroupedPriceColumns ? (
             <tr>
               {groupedPriceColumns.map((column, index) => (
@@ -1281,65 +1470,90 @@ function BaseDetailsTable({ items, settings, baseColumns }: { items: PrintableQu
               ))}
             </tr>
           ) : null}
-	      </thead>
-      <tbody>
-        {groups.length > 0 ? (
-	          groups.map((group, groupIndex) => {
-              const groupTotal = group.items.reduce((sum, item) => sum + getItemTotal(item), 0);
-              const groupMaterialTotal = group.items.reduce((sum, item) => sum + getBasePriceParts(item).materialTotal, 0);
-              const groupLaborTotal = group.items.reduce((sum, item) => sum + getBasePriceParts(item).laborTotal, 0);
-              return (
-	            <Fragment key={group.space}>
-	              <tr className="quotation-print-space-row">
-	                <td className="text-center">{formatBaseSectionNumber(groupIndex)}</td>
-	                <td colSpan={Math.max(1, colSpan - 1)}>
-	                  <span>{group.space}</span>
-	                </td>
-              </tr>
-              {group.items.map((item) => {
-                rowNumber += 1;
-                const parts = getBasePriceParts(item);
-                const rowStyle = printRowStyle(item.row_color);
-                const description = getBaseRowDescription(item);
-                return (
-                  <tr key={item.id || `${group.space}-${rowNumber}`} style={rowStyle}>
-                    {columns.map((column) => (
-                      <td key={column.key} className={`quotation-print-base-col-${column.key} ${cellClassName(column)}`.trim()}>{baseCellValue(column, item, parts, rowNumber, description)}</td>
-                    ))}
-                  </tr>
-                );
+        </thead>
+        <tbody>
+          {options?.title ? (
+            <tr className="quotation-print-package-group-row">
+              <td colSpan={colSpan}>{options.title}</td>
+            </tr>
+          ) : null}
+          {tableGroups.length > 0 ? (
+            renderSpaceGroups(tableGroups, tableColumns, { keyPrefix: options?.keyPrefix, showSubtotal: options?.showSubtotal })
+          ) : (
+            <tr>
+              <td colSpan={colSpan} className="py-8 text-center text-surface-400">暂无基装明细</td>
+            </tr>
+          )}
+          {options?.showTotal !== false ? (
+            <tr className="quotation-print-total-row">
+              {tableColumns.map((column, index) => {
+                if (index === 0) return <td key={column.key} colSpan={Math.max(1, summaryLabelEndIndex + 1)} className="text-center">基装小计</td>;
+                if (index <= summaryLabelEndIndex) return null;
+                if (column.key === "materialTotal") return <td key={column.key} className="text-right">{formatPrintAmount(baseMaterialTotal)}</td>;
+                if (column.key === "laborTotal") return <td key={column.key} className="text-right">{formatPrintAmount(baseLaborTotal)}</td>;
+                if (column.key === "subtotal") return <td key={column.key} className="text-right">{formatPrintAmount(baseTotal)}</td>;
+                return <td key={column.key}></td>;
               })}
-              <tr className="quotation-print-space-total-row">
-                {columns.map((column, index) => {
-                  if (index === 0) return <td key={column.key} colSpan={Math.max(1, summaryLabelEndIndex + 1)} className="text-center">小计</td>;
-                  if (index <= summaryLabelEndIndex) return null;
-                  if (column.key === "materialTotal") return <td key={column.key} className="text-right">{formatPrintAmount(groupMaterialTotal)}</td>;
-                  if (column.key === "laborTotal") return <td key={column.key} className="text-right">{formatPrintAmount(groupLaborTotal)}</td>;
-                  if (column.key === "subtotal") return <td key={column.key} className="text-right">{formatPrintAmount(groupTotal)}</td>;
-                  return <td key={column.key}></td>;
-                })}
+            </tr>
+          ) : null}
+          {options?.appendIncluded && includedItems.length > 0 ? (
+            <>
+              <tr className="quotation-print-package-group-row"><td colSpan={colSpan}>套餐内项目</td></tr>
+              <tr>
+                {tableColumns.slice(0, 4).map((column) => <th key={column.key} className="text-center">{column.top}</th>)}
+                {colSpan > 4 ? <th colSpan={colSpan - 4} className="text-center">{columnOptions.description ? "施工工艺及材料说明" : "已含套餐价"}</th> : null}
               </tr>
-            </Fragment>
-              );
-            })
-	        ) : (
-	          <tr>
-	            <td colSpan={colSpan} className="py-8 text-center text-surface-400">暂无基装明细</td>
-	          </tr>
-	        )}
-	        <tr className="quotation-print-total-row">
-            {columns.map((column, index) => {
-              if (index === 0) return <td key={column.key} colSpan={Math.max(1, summaryLabelEndIndex + 1)} className="text-center">基装小计</td>;
-              if (index <= summaryLabelEndIndex) return null;
-              if (column.key === "materialTotal") return <td key={column.key} className="text-right">{formatPrintAmount(baseMaterialTotal)}</td>;
-              if (column.key === "laborTotal") return <td key={column.key} className="text-right">{formatPrintAmount(baseLaborTotal)}</td>;
-              if (column.key === "subtotal") return <td key={column.key} className="text-right">{formatPrintAmount(baseTotal)}</td>;
-              return <td key={column.key}></td>;
-            })}
-        </tr>
-      </tbody>
-    </table>
-  );
+              {renderSpaceGroups(includedGroups, tableColumns, { keyPrefix: "included", showSubtotal: false, included: true })}
+            </>
+          ) : null}
+        </tbody>
+      </table>
+    );
+  };
+
+  if (hasPackageScopeItems) {
+    if (extraItems.length > 0) {
+      const extraGroups = groupItemsBySpace(extraItems, settings);
+      const combinedTable = renderBaseTable(columns, extraGroups, {
+          title: "套餐外另计项目",
+          keyPrefix: "extra",
+          showSubtotal: true,
+          showTotal: true,
+          className: includedItems.length > 0 ? "quotation-print-package-screen-table" : "quotation-print-base-table-extra",
+          appendIncluded: true,
+        });
+      if (includedItems.length === 0) return combinedTable;
+      // Independent print tables let the browser repeat the correct section header.
+      rowNumber = 0;
+      return <>
+        {combinedTable}
+        {renderBaseTable(columns, extraGroups, {
+          title: "套餐外另计项目",
+          keyPrefix: "print-extra",
+          className: "quotation-print-package-print-table quotation-print-package-print-extra",
+        })}
+        {renderBaseTable(columns.filter((column) => !column.amount), includedGroups, {
+          title: "套餐内项目",
+          keyPrefix: "print-included",
+          showSubtotal: false,
+          showTotal: false,
+          className: "quotation-print-package-print-table",
+        })}
+      </>;
+    }
+    if (includedItems.length > 0) {
+      return renderBaseTable(columns.filter((column) => !column.amount), includedGroups, {
+          title: "套餐内项目",
+          keyPrefix: "included",
+          showSubtotal: false,
+          showTotal: false,
+          className: "quotation-print-base-table-included",
+        });
+    }
+    return renderBaseTable(columns, [], { showTotal: false });
+  }
+
+  return renderBaseTable(columns, groups);
 }
 
 function MaterialDetailsTable({ items, settings, productColumns }: { items: PrintableQuotationItem[]; settings?: PrintableQuotationSettings; productColumns?: Partial<QuotationProductColumnOptions> }) {
@@ -1353,7 +1567,7 @@ function MaterialDetailsTable({ items, settings, productColumns }: { items: Prin
     value: (item: PrintableQuotationItem, rowIndex: number) => ReactNode;
   }[] = [
     { key: "sequence", label: "序号", className: "text-center", value: (_item, rowIndex) => rowIndex },
-    { key: "name", label: "材料名称", className: "quotation-print-item-name", value: (item) => text(item.name) },
+    { key: "name", label: "材料名称", className: "quotation-print-base-name", value: (item) => <PrintableItemName item={item} /> },
     { key: "spec", label: "规格", className: "quotation-print-item-name", value: (item) => text(item.spec) },
     { key: "model", label: "型号", className: "quotation-print-item-name", value: (item) => text(item.material_model) },
     { key: "unit", label: "单位", className: "quotation-print-item-name text-center", value: (item) => text(item.unit) },
@@ -1392,7 +1606,7 @@ function MaterialDetailsTable({ items, settings, productColumns }: { items: Prin
                 rowNumber += 1;
                 const rowStyle = printRowStyle(item.row_color);
                 return (
-                  <tr key={item.id || `${group.space}-${rowNumber}`} style={rowStyle}>
+                  <tr key={item.id || `${group.space}-${rowNumber}`} className="quotation-print-material-item-row" style={rowStyle}>
                     {columns.map((column) => <td key={column.key} className={column.className || ""}>{column.value(item, rowNumber)}</td>)}
                   </tr>
                 );
@@ -1432,6 +1646,65 @@ function MaterialDetailsTable({ items, settings, productColumns }: { items: Prin
   );
 }
 
+function PackageAreaDetailsTable({ items }: { items: PrintableQuotationItem[] }) {
+  const columns: {
+    key: "sequence" | "name" | "quantity" | "unit" | "unitPrice" | "amount" | "remark";
+    label: string;
+    className?: string;
+    value: (item: PrintableQuotationItem, rowIndex: number) => ReactNode;
+    width: string;
+  }[] = [
+    { key: "sequence", label: "序号", className: "text-center", value: (_item, rowIndex) => rowIndex, width: "48px" },
+    { key: "name", label: "套餐项目", className: "quotation-print-item-name", value: (item) => <PrintableItemName item={item} />, width: "22%" },
+    { key: "quantity", label: "计价数量", className: "quotation-print-item-name text-center", value: (item) => formatQuantity(toNumber(item.quantity)), width: "96px" },
+    { key: "unit", label: "单位", className: "quotation-print-item-name text-center", value: (item) => text(item.unit), width: "64px" },
+    { key: "unitPrice", label: "单价", className: "quotation-print-item-name text-right", value: (item) => formatPrintAmount(getItemUnitPrice(item)), width: "96px" },
+    { key: "amount", label: "套餐金额", className: "quotation-print-item-name text-right", value: (item) => formatPrintAmount(getItemTotal(item)), width: "104px" },
+    { key: "remark", label: "计价说明", className: "quotation-print-item-name", value: (item) => text(item.remark), width: "auto" },
+  ];
+  const colSpan = columns.length;
+  const amountColumnIndex = columns.findIndex((column) => column.key === "amount");
+  const total = items.reduce((sum, item) => sum + getItemTotal(item), 0);
+
+  return (
+    <table className="quotation-print-table quotation-print-material-table quotation-print-package-area-table">
+      <colgroup>
+        {columns.map((column) => <col key={column.key} style={{ width: column.width }} />)}
+      </colgroup>
+      <thead>
+        <tr>
+          {columns.map((column) => <th key={column.key} className={column.className || ""}>{column.label}</th>)}
+        </tr>
+      </thead>
+      <tbody>
+        {items.length > 0 ? (
+          items.map((item, index) => (
+            <tr key={item.id || `package-area-${index + 1}`} style={printRowStyle(item.row_color)}>
+              {columns.map((column) => <td key={column.key} className={column.className || ""}>{column.value(item, index + 1)}</td>)}
+            </tr>
+          ))
+        ) : (
+          <tr>
+            <td colSpan={colSpan} className="py-8 text-center text-surface-400">暂无套餐平方明细</td>
+          </tr>
+        )}
+        <tr className="quotation-print-total-row">
+          {amountColumnIndex >= 0 ? (
+            <>
+              <td colSpan={amountColumnIndex} className="text-right">套餐小计</td>
+              <td className="quotation-print-item-name text-right">{formatPrintAmount(total)}</td>
+              {columns.slice(amountColumnIndex + 1).map((column) => <td key={column.key}></td>)}
+            </>
+          ) : (
+            <td colSpan={colSpan} className="text-right">套餐小计</td>
+          )}
+        </tr>
+      </tbody>
+    </table>
+  );
+}
+
+
 function CustomCabinetDetailsTable({ items, settings, cabinetColumns }: { items: PrintableQuotationItem[]; settings?: PrintableQuotationSettings; cabinetColumns?: Partial<QuotationCabinetColumnOptions> }) {
   const groups = groupItemsBySpace(items, settings);
   let rowNumber = 0;
@@ -1443,7 +1716,7 @@ function CustomCabinetDetailsTable({ items, settings, cabinetColumns }: { items:
     value: (item: PrintableQuotationItem, rowIndex: number) => ReactNode;
   }[] = [
     { key: "sequence", label: "编号", className: "quotation-print-item-name text-center", value: (_item, rowIndex) => rowIndex },
-    { key: "name", label: "名称", className: "quotation-print-item-name", value: (item) => text(item.name) },
+    { key: "name", label: "名称", className: "quotation-print-item-name", value: (item) => <PrintableItemName item={item} /> },
     { key: "size", label: "H高×W宽×D深（mm）", className: "quotation-print-item-name quotation-print-cabinet-size text-center", value: (item) => `${formatQuantity(toNumber(item.material_cost))} × ${formatQuantity(toNumber(item.labor_cost))} × ${formatQuantity(toNumber(item.profit_margin))}` },
     ...(columnOptions.quantity ? [{ key: "quantity" as const, label: "数量", className: "quotation-print-item-name text-center", value: (item: PrintableQuotationItem) => formatQuantity(toNumber(item.quantity)) }] : []),
     ...(columnOptions.area ? [{ key: "area" as const, label: "平方", className: "quotation-print-item-name text-center", value: (item: PrintableQuotationItem) => formatPrintAmount(getCustomCabinetArea(item)) }] : []),
@@ -1608,7 +1881,7 @@ function OtherFeesTable({ items, allItems, totals, settings, houseArea = 0 }: { 
             return (
               <tr key={item.id || `other-${index}`} style={printRowStyle(item.row_color)}>
                 <td className="text-center">{formatAlphaSequence(index + feeSequenceOffset)}</td>
-                <td className="quotation-print-item-name">{text(item.name)}</td>
+                <td className="quotation-print-item-name"><PrintableItemName item={item} /></td>
                 <td>{getFeeFormulaText(item, items, feeSequenceOffset)}</td>
                 <td className="text-right font-semibold text-surface-950">
                   {formatPrintAmount(otherFeeTotals[index] || 0)}
@@ -1738,9 +2011,13 @@ export function QuotationPrintDocument({
       items: normalizedItems.filter((item) => getCategoryKey(item.category) === getCategoryKey(category)),
     }))
     .filter((group) => group.items.length > 0);
+  const packageAreaCategories = materialCategories.filter((group) => isPackageAreaCategory(group.category));
+  const packageAreaOverageCategories = materialCategories.filter((group) => isPackageAreaOverageCategory(group.category));
+  const regularMaterialCategories = materialCategories.filter((group) => !isPackageAreaCategory(group.category) && !isPackageAreaOverageCategory(group.category));
   const houseArea = toNumber(quotation?.customer_area_size ?? quotation?.project_area);
   const totals = calculateQuotationTotals(normalizedItems, settings, houseArea);
   const costComposition = buildCostComposition(normalizedItems);
+  const spaceCostCompositions = buildSpaceCostCompositions(normalizedItems, settings);
   const targetUrl = shareUrl || "";
   const [qrTargetUrl, setQrTargetUrl] = useState("");
   useEffect(() => {
@@ -1779,9 +2056,9 @@ export function QuotationPrintDocument({
   const shouldShowCover = outputMode === "list" && printScope === "all";
   const displayTitle = buildQuotationDisplayTitle(quotation);
   const appendixNoteParts = buildAppendixNoteParts(settings, quotation);
-  const shouldShowAppendixNote = outputMode === "list" && appendixNoteParts.length > 0 && (isAllDetailScope || printScope === "fees");
+  const shouldShowAppendixNote = appendixNoteParts.length > 0 && (outputMode === "composition" || (outputMode === "list" && (isAllDetailScope || printScope === "fees")));
   const budgetCompilationHtml = getBudgetCompilationHtml(settings);
-  const shouldShowBudgetCompilation = outputMode === "list" && includeBudgetCompilation && budgetCompilationHtml && (isAllDetailScope || printScope === "fees");
+  const shouldShowBudgetCompilation = includeBudgetCompilation && budgetCompilationHtml && (outputMode === "composition" || (outputMode === "list" && (isAllDetailScope || printScope === "fees")));
 
   return (
     <article className="quotation-print-document mx-auto w-full max-w-[1040px] bg-white text-surface-900 shadow-[0_18px_50px_rgba(31,41,53,0.08)]">
@@ -1876,19 +2153,34 @@ export function QuotationPrintDocument({
       </section>
 
       {outputMode === "composition" ? (
-        <Section title="工种材料分类汇总">
-          <CostCompositionOverview workTypes={costComposition.workTypes} materialCategories={costComposition.materialCategories} />
-          <CompositionDetails workTypes={costComposition.workTypes} materialCategories={costComposition.materialCategories} />
-        </Section>
+        <>
+          <Section title="按空间工种材料分类">
+            <SpaceCompositionDetails spaces={spaceCostCompositions} />
+          </Section>
+          <Section title="工种材料分类汇总">
+            <CompositionDetails unsplit={costComposition.unsplit} workTypes={costComposition.workTypes} materialCategories={costComposition.materialCategories} />
+          </Section>
+          <Section title="综合费用和总费用">
+            <OtherFeesTable items={otherItems} allItems={items} totals={totals} settings={settings} houseArea={houseArea} />
+          </Section>
+          {shouldShowAppendixNote && <AppendixNoteBlock parts={appendixNoteParts} />}
+          {shouldShowBudgetCompilation && <BudgetCompilationBlock html={budgetCompilationHtml} />}
+        </>
       ) : (
         <>
+          {isAllDetailScope && (packageAreaCategories.length > 0 || packageAreaOverageCategories.length > 0) && (
+            <Section title="套餐平方明细">
+              <PackageAreaDetailsTable items={[...packageAreaCategories.flatMap((group) => group.items), ...packageAreaOverageCategories.flatMap((group) => group.items)]} />
+            </Section>
+          )}
+
           {shouldShowBase && (
-            <Section title="基装明细">
+            <Section title="基装明细" className="quotation-print-base-section">
               <BaseDetailsTable items={baseItems} settings={settings} baseColumns={baseColumns} />
             </Section>
           )}
 
-          {materialCategories
+          {regularMaterialCategories
             .filter((group) => {
               if (isAllDetailScope) return true;
               if (printScope === "main_material") return getCategoryKey(group.category) === "main_material";
@@ -2276,29 +2568,6 @@ export function QuotationPrintDocument({
         .quotation-print-head-field-strong strong {
           font-weight: 750;
         }
-        .quotation-print-composition {
-          display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 10px;
-          margin-top: 10px;
-        }
-        .quotation-print-composition-card {
-          border-radius: 10px;
-          border: 1px solid #e4e7ec;
-          background: #fbfcfe;
-          padding: 12px;
-        }
-        .quotation-print-composition-card h3 {
-          margin: 0 0 8px;
-          font-size: 12px;
-          font-weight: 700;
-          color: #182230;
-        }
-        .quotation-print-composition-rows {
-          display: grid;
-          gap: 5px;
-        }
-        .quotation-print-composition-row,
         .quotation-print-composition-empty {
           display: flex;
           align-items: center;
@@ -2309,35 +2578,60 @@ export function QuotationPrintDocument({
           padding: 7px 9px;
           font-size: 11px;
         }
-        .quotation-print-composition-row span {
-          color: #475467;
-        }
-        .quotation-print-composition-row strong {
-          color: #182230;
-          white-space: nowrap;
-        }
         .quotation-print-composition-empty {
           color: #98a2b3;
         }
         .quotation-print-composition-detail-grid {
           display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 14px;
+          grid-template-columns: minmax(0, 1fr);
+          gap: 12px;
           margin-top: 12px;
         }
-        .quotation-print-composition-table-title {
-          margin: 0 0 8px;
+        .quotation-print-space-composition-list {
+          display: grid;
+          gap: 16px;
+        }
+        .quotation-print-space-composition-block {
+          overflow: hidden;
+          border: 1px solid #111111;
+          border-radius: 10px;
+          break-inside: avoid;
+          page-break-inside: avoid;
+        }
+        .quotation-print-space-composition-head {
+          display: flex;
+          min-height: 34px;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          border-bottom: 1px solid #111111;
+          background: #d9d9d9;
+          padding: 7px 10px;
           font-size: 12px;
           font-weight: 700;
           color: #182230;
         }
-        .quotation-print-composition-table-wrap {
-          min-width: 0;
+        .quotation-print-space-composition-head strong {
+          white-space: nowrap;
+          font-weight: 750;
         }
-        .quotation-print-composition-table col:nth-child(1) {
+        .quotation-print-space-composition-grid {
+          margin-top: 0;
+        }
+        .quotation-print-space-composition-empty {
+          justify-content: center;
+          border: 1px solid #dce4ef;
+        }
+        .quotation-print-composition-grouped-table col:nth-child(1) {
+          width: 96px;
+        }
+        .quotation-print-composition-grouped-table col:nth-child(2) {
+          width: 176px;
+        }
+        .quotation-print-composition-grouped-table col:nth-child(3) {
           width: auto;
         }
-        .quotation-print-composition-table col:nth-child(2) {
+        .quotation-print-composition-grouped-table col:nth-child(4) {
           width: 132px;
         }
         .quotation-print-price-stack {
@@ -2502,6 +2796,27 @@ export function QuotationPrintDocument({
         }
         .quotation-print-material-table col:nth-child(9) {
           width: 176px;
+        }
+        .quotation-print-package-area-table col:nth-child(1) {
+          width: 48px;
+        }
+        .quotation-print-package-area-table col:nth-child(2) {
+          width: 22%;
+        }
+        .quotation-print-package-area-table col:nth-child(3) {
+          width: 96px;
+        }
+        .quotation-print-package-area-table col:nth-child(4) {
+          width: 64px;
+        }
+        .quotation-print-package-area-table col:nth-child(5) {
+          width: 96px;
+        }
+        .quotation-print-package-area-table col:nth-child(6) {
+          width: 104px;
+        }
+        .quotation-print-package-area-table col:nth-child(7) {
+          width: auto;
         }
         .quotation-print-cabinet-table col:nth-child(1) {
           width: 48px;
@@ -2696,6 +3011,46 @@ export function QuotationPrintDocument({
         .quotation-print-composition-table tbody tr:last-child td {
           border-bottom: 0;
         }
+        .quotation-print-composition-grouped-table th,
+        .quotation-print-composition-grouped-table td {
+          border-right: 1px solid #111111 !important;
+          border-bottom: 1px solid #111111 !important;
+          background: #ffffff;
+          vertical-align: middle !important;
+        }
+        .quotation-print-composition-grouped-table thead th {
+          background: #d9d9d9 !important;
+          color: #111111 !important;
+          font-weight: 700;
+        }
+        .quotation-print-composition-grouped-table th:last-child,
+        .quotation-print-composition-grouped-table td:last-child {
+          border-right: 0 !important;
+        }
+        .quotation-print-composition-grouped-table tbody tr:last-child td {
+          border-bottom: 0 !important;
+        }
+        .quotation-print-composition-grouped-table .quotation-print-composition-type-cell {
+          background: #f7f9fc !important;
+          color: #111111 !important;
+          font-weight: 700 !important;
+          text-align: center;
+        }
+        .quotation-print-composition-grouped-table .quotation-print-composition-type-cell-last {
+          border-bottom: 0 !important;
+        }
+        .quotation-print-composition-grouped-table .quotation-print-composition-subtotal-row td {
+          background: #eaf2ff !important;
+          color: #111111 !important;
+          font-weight: 700 !important;
+        }
+        .quotation-print-composition-grouped-table .quotation-print-composition-muted-row td {
+          color: #98a2b3 !important;
+        }
+        .quotation-print-space-composition-table {
+          border: 0 !important;
+          border-radius: 0 !important;
+        }
         .quotation-print-base-table {
           --quotation-base-grid-line-width: 1px;
           --quotation-base-grid-line-color: #111111;
@@ -2739,9 +3094,10 @@ export function QuotationPrintDocument({
           border-top: 0 !important;
         }
         .quotation-print-base-table thead tr:first-child .quotation-print-base-col-sequence,
-        .quotation-print-base-table tbody tr > td:first-child {
+        .quotation-print-base-table tbody tr > :first-child {
           border-left: 0 !important;
         }
+        .quotation-print-base-table .quotation-print-package-group-row td,
         .quotation-print-base-table .quotation-print-space-row td,
         .quotation-print-base-table .quotation-print-space-total-row td,
         .quotation-print-cabinet-table .quotation-print-space-row td,
@@ -2749,6 +3105,15 @@ export function QuotationPrintDocument({
           background: #d9d9d9;
           color: #344054;
           font-weight: 700;
+        }
+        .quotation-print-base-table .quotation-print-package-group-row td {
+          background: #eef2f6;
+          color: #182230;
+          text-align: left;
+          padding-left: 12px;
+        }
+        .quotation-print-base-section .quotation-print-base-table + .quotation-print-base-table {
+          margin-top: 12px;
         }
         .quotation-print-base-table .quotation-print-total-row td,
         .quotation-print-cabinet-table .quotation-print-total-row td {
@@ -2810,10 +3175,63 @@ export function QuotationPrintDocument({
           word-break: normal;
           overflow-wrap: anywhere;
         }
+        .quotation-print-material-item-row td {
+          font-weight: 400;
+        }
+        .quotation-print-material-item-row td.quotation-print-base-name {
+          font-weight: 500;
+        }
+        .quotation-print-special-name {
+          display: inline-grid;
+          width: 100%;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 6px;
+        }
+        .quotation-print-special-name > span:first-child {
+          min-width: 0;
+        }
+        .quotation-print-special-badge {
+          display: inline-flex;
+          position: relative;
+          width: 18px;
+          height: 18px;
+          flex: 0 0 auto;
+          align-items: center;
+          justify-content: center;
+          border: 1.4px solid #111111;
+          border-radius: 999px;
+          background: #ffffff;
+          color: #111111;
+          font-size: 10px;
+          font-weight: 800;
+          line-height: 1;
+        }
+        .quotation-print-special-badge > span {
+          position: absolute;
+          left: 50%;
+          top: 50%;
+          transform: translate(-50%, -52%);
+          display: block;
+          width: 1em;
+          height: 1em;
+          text-align: center;
+          line-height: 1;
+        }
         .quotation-print-space-row td {
           background: #d9d9d9;
           color: #344054;
           font-weight: 700;
+        }
+        .quotation-print-package-group-row td {
+          background: #eef2f6;
+          color: #182230;
+          font-weight: 700;
+          text-align: left;
+          padding-left: 12px;
+        }
+        .quotation-print-base-section .quotation-print-base-table + .quotation-print-base-table {
+          margin-top: 12px;
         }
         .quotation-print-space-row td {
           display: table-cell;
@@ -2852,6 +3270,9 @@ export function QuotationPrintDocument({
         }
         .quotation-print-document,
         .quotation-print-document :where(h1, h2, h3, p, span, strong, small, th, td, footer, div) {
+          color: #111111 !important;
+        }
+        .quotation-print-document .quotation-print-special-badge {
           color: #111111 !important;
         }
         .quotation-print-document table,
@@ -2942,10 +3363,6 @@ export function QuotationPrintDocument({
             grid-column: 4;
             grid-row: 2;
             border-top: 0;
-          }
-          .quotation-print-composition,
-          .quotation-print-composition-detail-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
           }
         }
         @media print {
@@ -3125,11 +3542,14 @@ export function QuotationPrintDocument({
             line-height: 1.1 !important;
             font-weight: 400 !important;
           }
-          .quotation-print-composition {
-            grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+          .quotation-print-space-composition-block {
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
           }
-          .quotation-print-composition-detail-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+          .quotation-print-space-composition-head {
+            border-color: var(--quotation-print-grid-line) !important;
+            border-radius: 0 !important;
+            background: var(--quotation-print-header-fill) !important;
           }
           .quotation-print-section {
             break-inside: auto;
@@ -3305,6 +3725,11 @@ export function QuotationPrintDocument({
             -webkit-text-stroke: 0 transparent !important;
             font-synthesis-weight: none !important;
           }
+          .quotation-print-document .quotation-print-special-badge {
+            border-color: #111111 !important;
+            color: #111111 !important;
+            background: #ffffff !important;
+          }
           .quotation-print-cover-main h1,
           .quotation-print-cover-main h1 em,
           .quotation-print-cover-main h2,
@@ -3404,7 +3829,7 @@ export function QuotationPrintDocument({
             border-top: 0 !important;
           }
           .quotation-print-base-table thead tr:first-child .quotation-print-base-col-sequence,
-          .quotation-print-base-table tbody tr > td:first-child {
+          .quotation-print-base-table tbody tr > :first-child {
             border-left: 0 !important;
           }
           .quotation-print-base-table th:last-child,
@@ -3759,6 +4184,26 @@ export function QuotationPrintDocument({
           .quotation-print-head-table-print tr:nth-child(2) > :first-child,
           .quotation-print-base-table thead tr:nth-child(2) > :first-child {
             border-left: 1px solid var(--quotation-print-grid-line) !important;
+          }
+        }
+        .quotation-print-package-print-table {
+          display: none;
+        }
+        @media print {
+          .quotation-print-package-screen-table {
+            display: none !important;
+          }
+          .quotation-print-package-print-table {
+            display: table !important;
+          }
+          .quotation-print-package-print-extra {
+            border-bottom-width: 0 !important;
+          }
+          .quotation-print-package-print-extra tbody tr:last-child > td {
+            border-bottom: 0 !important;
+          }
+          .quotation-print-base-section .quotation-print-package-print-table + .quotation-print-package-print-table {
+            margin-top: 0 !important;
           }
         }
         @media print and (orientation: landscape) {

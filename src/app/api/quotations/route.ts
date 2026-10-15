@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { pricingConfigurationError, pricingSnapshot } from "@/lib/quotationPricingMode";
 import { getDb } from "@/lib/db";
 import { syncCustomerProgress } from "@/lib/customerProgress";
 import { getQuotationPrintSettingsForOrgUnit } from "@/lib/branchSettingsLookup";
@@ -20,6 +21,7 @@ import {
 } from "@/lib/quotationFeeFormulas";
 import { applyQuoteDiscountToFormulaTotal, calculateDiscountRulesTotal, getDiscountRuleValue, type DiscountCalculationRule } from "@/lib/quotationDiscountRules";
 import { calculatePackageQuotePrice, formatPricingAmount, toPricingAmount } from "@/lib/quotaTemplatePricing";
+import { buildAreaPricingItems, calculateAreaQuotePrice, isPackageIncludedItem, normalizeAreaOverageRules, normalizePackageScope } from "@/lib/quotationPackageArea";
 import {
   applyQuotationQuantityLinks,
   getQuotationQuantityFormulaError,
@@ -280,6 +282,7 @@ function getTemplateQuoteCategory(scope: string, groupMap: Map<string, string>) 
 }
 
 function getBaseOrMaterialItemTotal(item: any) {
+  if (isPackageIncludedItem(item)) return 0;
   if (isCustomCabinetCategory(item.category)) {
     const area = getCustomCabinetArea(item);
     const quantity = safeNonNegativeNumber(item.quantity);
@@ -287,7 +290,7 @@ function getBaseOrMaterialItemTotal(item: any) {
     return toMoney(quantity * (area > 0 ? area : 1) * unitPrice);
   }
   const fallback = safeNonNegativeNumber(item.quantity) * safeNonNegativeNumber(item.unit_price);
-  return toMoney(Number(item.total_price ?? fallback) || 0);
+  return toMoney(isOtherCategory(item.category) ? Number(item.total_price ?? fallback) || 0 : fallback);
 }
 
 function getCustomCabinetArea(item: any) {
@@ -295,6 +298,8 @@ function getCustomCabinetArea(item: any) {
 }
 
 function getBaseLaborSubtotal(item: any) {
+  if (item.pricing_mode === "single") return 0;
+  if (isPackageIncludedItem(item)) return 0;
   if (!isBaseCategory(item.category)) return 0;
   const materialUnit = safeNonNegativeNumber(item.material_cost);
   const rawLaborUnit = safeNonNegativeNumber(item.labor_cost);
@@ -303,6 +308,8 @@ function getBaseLaborSubtotal(item: any) {
 }
 
 function getBaseMaterialSubtotal(item: any) {
+  if (item.pricing_mode === "single") return 0;
+  if (isPackageIncludedItem(item)) return 0;
   if (!isBaseCategory(item.category)) return 0;
   return toMoney(safeNonNegativeNumber(item.quantity) * safeNonNegativeNumber(item.material_cost));
 }
@@ -700,7 +707,7 @@ function buildTemplateScopeKeyMap(template: any) {
   return scopeKeyMap;
 }
 
-function buildTemplateQuotationItems(template: any) {
+function buildTemplateQuotationItems(template: any, singleCustomerPrice = false) {
   if (!template || typeof template !== "object") return [] as any[];
   const rows: any[] = [];
   let sortOrder = 1;
@@ -726,7 +733,10 @@ function buildTemplateQuotationItems(template: any) {
         const quotaCode = String(quota?.code || "").trim();
         const isStandardQuotaSource = isBase && quotaSourceType !== "custom" && Boolean(quotaSourceId || quotaCode);
         rows.push({
+          pricing_mode: ((singleCustomerPrice && isBase) || quota?.pricingMode === "single") ? "single" : "split",
+          quota_source_total_price: totalPrice,
           template_item_id: String(quota?.id || "").trim() || null,
+          package_scope: template.quoteConfig?.mode === "area" ? normalizePackageScope(quota?.packageScope) : null,
           category,
           space: spaceName,
           name,
@@ -736,10 +746,13 @@ function buildTemplateQuotationItems(template: any) {
           unit: String(quota?.unit || "").trim(),
           quantity: safeNonNegativeNumber(quota?.quantity),
           quantity_formula: String(quota?.quantityFormula || quota?.quantity_formula || "").trim() || null,
-          unit_price: toMoney(isBase ? (materialPrice || laborPrice ? materialPrice + laborPrice : unitPrice) : unitPrice),
+          unit_price: toMoney(((singleCustomerPrice && isBase) || quota?.pricingMode === "single") ? totalPrice : isBase ? (materialPrice || laborPrice ? materialPrice + laborPrice : unitPrice) : unitPrice),
           total_price: 0,
           material_cost: isBase ? materialPrice : 0,
-          labor_cost: isBase ? (laborPrice || (!materialPrice ? unitPrice : 0)) : 0,
+          labor_cost: isBase ? (((singleCustomerPrice && isBase) || quota?.pricingMode === "single") ? laborPrice : laborPrice || (!materialPrice ? unitPrice : 0)) : 0,
+          cost_material_unit: safeNonNegativeNumber(quota?.internalMaterialCost),
+          cost_labor_unit: safeNonNegativeNumber(quota?.internalLaborCost),
+          cost_loss_rate: safeNonNegativeNumber(quota?.lossRate),
           profit_margin: 0,
           row_color: null,
           fee_calc_method: null,
@@ -818,6 +831,19 @@ function getTemplatePricingArea(body: any, project: any, customer: any) {
     if (amount > 0) return amount;
   }
   return 0;
+}
+
+function mergeAreaOverageRules(templateRules: unknown, pricingRules: unknown) {
+  const incomingById = new Map(
+    normalizeAreaOverageRules(pricingRules).map((rule) => [String(rule.id || ""), rule]),
+  );
+  return normalizeAreaOverageRules(templateRules).map((rule) => {
+    const incoming = incomingById.get(String(rule.id || ""));
+    return {
+      ...rule,
+      actualQuantity: incoming?.actualQuantity ?? rule.includedQuantity,
+    };
+  });
 }
 
 function buildPackagePricingQuotationItem(template: any, area: number, sortOrder: number) {
@@ -1218,6 +1244,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ message: "没有该门店的报价权限" }, { status: 403 });
     }
     const title = isTemporaryQuotation ? buildDefaultTemporaryQuotationTitle(temporaryCustomer) : buildDefaultQuotationTitle(effectiveCustomer);
+    const templatePricingArea = getTemplatePricingArea(body, project, effectiveCustomer || { area_size: temporaryCustomer.area });
+    const isAreaTemplate = body.template?.quoteConfig?.mode === "area";
+    const areaQuoteConfig = isAreaTemplate ? {
+      ...body.template.quoteConfig,
+      overageRules: mergeAreaOverageRules(body.template.quoteConfig?.overageRules, body.templatePricing?.overageRules),
+    } : null;
+    const areaPricing = isAreaTemplate ? calculateAreaQuotePrice(areaQuoteConfig, templatePricingArea) : null;
+    if (areaPricing && (areaPricing.area <= 0 || areaPricing.unitPrice <= 0)) {
+      return NextResponse.json({ message: "请填写有效的计价面积和套餐平方单价" }, { status: 400 });
+    }
 
     if (customer && hasCustomerSnapshot) {
       db.prepare(`
@@ -1271,8 +1307,11 @@ export async function POST(req: NextRequest) {
       : { version: 0 };
     const quotationId = makeId("QUO");
     const branchPrintSettings = getQuotationPrintSettingsForOrgUnit(db, quotationOrg.id, companyId);
-    const templateItems = buildTemplateQuotationItems(body.template);
-    const templatePricingArea = getTemplatePricingArea(body, project, effectiveCustomer || { area_size: temporaryCustomer.area });
+    const templateItems = buildTemplateQuotationItems(body.template, branchPrintSettings.splitCustomerPrice === false).map((item) => {
+      const single = branchPrintSettings.splitCustomerPrice === false && isBaseCategory(item.category);
+      const unitPrice = single ? Number((item as any).quota_source_total_price ?? item.unit_price) : item.unit_price;
+      return { ...item, labor_cost: single && (item as any).quota_source_labor_price != null ? (item as any).quota_source_labor_price : item.labor_cost, pricing_mode: single ? "single" : (item as any).pricing_mode, unit_price: unitPrice, total_price: isPackageIncludedItem(item) ? 0 : toMoney(item.quantity * unitPrice) };
+    });
     const packagePricingItem = buildPackagePricingQuotationItem(body.template, templatePricingArea, 1);
     const pricedTemplateItems = packagePricingItem
       ? [
@@ -1280,6 +1319,9 @@ export async function POST(req: NextRequest) {
         ...templateItems.map((item, index) => ({ ...item, sort_order: index + 2 })),
       ]
       : templateItems;
+    if (isAreaTemplate && areaQuoteConfig) {
+      pricedTemplateItems.unshift(...buildAreaPricingItems(areaQuoteConfig, templatePricingArea).map((item, index) => ({ ...item, sort_order: index })));
+    }
     const templateFeeIdToQuotationItemId = new Map<string, string>();
     const templateItemIdToQuotationItemId = new Map<string, string>();
     const templateScopeKeyMap = buildTemplateScopeKeyMap(body.template);
@@ -1328,6 +1370,8 @@ export async function POST(req: NextRequest) {
       ? String((body.template?.comprehensiveFees || []).find((fee: any) => fee?.isFinalTotal === true)?.id || "").trim()
       : "";
     const settings = {
+      splitCustomerPrice: branchPrintSettings.splitCustomerPrice,
+      _pricing: pricingSnapshot(linkedTemplateItems),
 	      managementFeeRate: 0,
 	      taxRate: Number(body.taxRate ?? 0),
 	      discount: Number(body.discount ?? 0),
@@ -1353,7 +1397,17 @@ export async function POST(req: NextRequest) {
       budgetCompilationHtml: templateBudgetCompilationHtml,
       quoteSpaces: templateSpaces,
       quoteCategories: templateCategories,
-      templatePricing: packagePricingItem ? {
+      templatePricing: areaPricing ? {
+        mode: "area",
+        area: areaPricing.area,
+        areaUnitPrice: areaPricing.unitPrice,
+        areaTiers: body.template.quoteConfig.areaTiers,
+        overageRules: areaQuoteConfig?.overageRules || [],
+        minChargeAmount: areaPricing.minChargeAmount,
+        baseAmount: areaPricing.baseAmount,
+        overageAmount: areaPricing.overageAmount,
+        totalAmount: areaPricing.totalAmount,
+      } : packagePricingItem ? {
         mode: "package",
         area: packagePricingItem.pricingResult.area,
         includedArea: packagePricingItem.pricingResult.includedArea,
@@ -1375,6 +1429,8 @@ export async function POST(req: NextRequest) {
       } : undefined,
       signatureLabels: normalizeQuotationSignatureLabels(branchPrintSettings.quotationSignatureLabels),
     };
+    const pricingError = pricingConfigurationError(linkedTemplateItems, settings);
+    if (pricingError) return NextResponse.json({ message: pricingError }, { status: 400 });
     const normalizedTemplateItems = applyOtherFeeTotals(linkedTemplateItems, settings, templatePricingArea);
     const totals = calculate(normalizedTemplateItems, settings, templatePricingArea);
     const tx = (db as any).transaction(() => {
@@ -1466,6 +1522,8 @@ export async function POST(req: NextRequest) {
             Math.max(0, Math.min(3, Number((item as any).price_manually_edited || 0))),
             item.sort_order
           );
+          db.prepare("UPDATE quotation_items SET package_scope = ?, total_price = ? WHERE id = ? AND quotation_id = ?")
+            .run((item as any).package_scope || null, getBaseOrMaterialItemTotal(item), item.id, quotationId);
         });
       }
 

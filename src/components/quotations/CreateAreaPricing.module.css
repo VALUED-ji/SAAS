@@ -1,0 +1,170 @@
+.root {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #e7e9ee !important;
+  border-radius: 10px !important;
+  background: #fff;
+  box-shadow: none !important;
+  color: #182230;
+  letter-spacing: 0;
+}
+
+.heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.heading h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pricing {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding-bottom: 12px;
+}
+
+.overages {
+  border-top: 1px solid #e7e9ee;
+  padding-top: 12px;
+}
+
+.subheading {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #475467;
+}
+
+.rule {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+}
+
+.rule + .rule {
+  border-top: 1px solid #f0f1f4;
+}
+
+.ruleInfo {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ruleName {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.ruleInfo p,
+.breakdown {
+  margin: 2px 0 0;
+  color: #667085;
+  font-size: 12px;
+  line-height: 20px;
+  font-weight: 400;
+}
+
+.actual {
+  min-width: 170px;
+}
+
+.actualLabel {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.inputGroup {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+:global(html body .quotation-index-workbench .quotation-create-modal) .root .quantity {
+  width: 76px;
+  min-height: 38px !important;
+  height: 38px !important;
+  padding: 0 10px;
+  border: 1px solid #d9e1ec;
+  border-radius: 8px !important;
+  text-align: center;
+  font-size: 14px !important;
+  font-weight: 500 !important;
+  font-variant-numeric: tabular-nums;
+  outline: none;
+}
+
+:global(html body .quotation-index-workbench .quotation-create-modal) .root .quantity:focus {
+  border-color: #407aff !important;
+  box-shadow: 0 0 0 3px #407aff14;
+}
+
+.included,
+.charged {
+  margin: 4px 0 0;
+  text-align: right;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.included { color: #98a2b3; }
+.charged { color: #407aff; }
+
+.summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 0;
+  padding: 12px 0 0;
+  border-top: 1px solid #e7e9ee;
+}
+
+.totalLabel {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.summaryInfo {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.summaryInfo .breakdown {
+  margin: 0;
+}
+
+.total {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: #407aff;
+  font-variant-numeric: tabular-nums;
+}
+
+.total strong { font-size: 15px; font-weight: 700; }
+.total span { font-size: 12px; }
+
+@media (max-width: 640px) {
+  .root { padding: 12px; }
+  .rule { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .actualLabel { justify-content: flex-start; }
+  .included, .charged { text-align: left; }
+  .pricing { gap: 16px; }
+}

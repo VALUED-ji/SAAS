@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { pricingConfigurationError, pricingSnapshot, withPricingSnapshot } from "@/lib/quotationPricingMode";
 import { createHash } from "crypto";
+import { PACKAGE_AREA_CATEGORY, PACKAGE_AREA_OVERAGE_CATEGORY, buildAreaPricingItems, calculateAreaQuotePrice, isPackageIncludedItem, normalizePackageScope } from "@/lib/quotationPackageArea";
 import { getDb } from "@/lib/db";
 import { syncCustomerProgress } from "@/lib/customerProgress";
 import {
@@ -21,7 +23,7 @@ import { quotationRowColors } from "@/lib/quotationRowColors";
 import { getBranchSettingsForCustomer, getBranchSettingsForOrgUnit } from "@/lib/branchSettingsLookup";
 import { normalizeQuotationSignatureLabels } from "@/lib/quotationPrintSettings";
 import { getRequestIp, recordCustomerOperation } from "@/lib/operationLog";
-import { applyQuotationQuantityLinks, remapQuotationQuantityFormulaIds, serializeQuotationQuantityFormula } from "@/lib/quotationQuantityLinks";
+import { applyQuotationQuantityLinks, remapQuotationQuantityFormulaIds, serializeQuantityFormulaValue } from "@/lib/quotationQuantityLinks";
 import { getAuthContext, hasPermission } from "@/lib/security/authorization";
 import { verifyQuotationShareToken } from "@/lib/security/quotationShare";
 import { ensureQuotationSchema } from "@/lib/quotationSchema";
@@ -39,6 +41,9 @@ import {
 } from "@/lib/quotationOrgAccess";
 
 type ItemInput = {
+  pricing_mode?: "single" | "split";
+  quota_source_total_price?: number | null;
+  package_scope?: string | null;
   id?: string;
   category?: string;
   space?: string;
@@ -696,6 +701,7 @@ function getCustomCabinetArea(item: any) {
 }
 
 function getBaseOrMaterialItemTotal(item: any) {
+  if (isPackageIncludedItem(item)) return 0;
   if (isCustomCabinetCategory(item.category)) {
     const area = getCustomCabinetArea(item);
     const quantity = safeNonNegativeNumber(item.quantity);
@@ -703,10 +709,12 @@ function getBaseOrMaterialItemTotal(item: any) {
     return toMoney(quantity * (area > 0 ? area : 1) * unitPrice);
   }
   const fallback = Number(item.quantity || 0) * Number(item.unit_price || 0);
-  return toMoney(Number(item.total_price ?? fallback) || 0);
+  return toMoney(isOtherCategory(item.category) ? Number(item.total_price ?? fallback) || 0 : fallback);
 }
 
 function getBaseLaborSubtotal(item: any) {
+  if (item.pricing_mode === "single") return 0;
+  if (isPackageIncludedItem(item)) return 0;
   if (!isBaseCategory(item.category)) return 0;
   const materialUnit = safeNonNegativeNumber(item.material_cost);
   const rawLaborUnit = safeNonNegativeNumber(item.labor_cost);
@@ -715,6 +723,8 @@ function getBaseLaborSubtotal(item: any) {
 }
 
 function getBaseMaterialSubtotal(item: any) {
+  if (item.pricing_mode === "single") return 0;
+  if (isPackageIncludedItem(item)) return 0;
   if (!isBaseCategory(item.category)) return 0;
   return toMoney(safeNonNegativeNumber(item.quantity) * safeNonNegativeNumber(item.material_cost));
 }
@@ -1043,6 +1053,7 @@ function calculate(items: any[], settings: any, houseArea = 0) {
 }
 
 const quotaSyncFields = [
+  { key: "unit_price", label: "客户单价", itemKey: "unit_price", quotaKey: "total_price", snapshotKey: "quota_source_total_price", valueType: "money" },
   { key: "name", label: "工程项目名称", itemKey: "name", quotaKey: "name", snapshotKey: "quota_source_name", valueType: "text" },
   { key: "unit", label: "单位", itemKey: "unit", quotaKey: "unit", snapshotKey: "quota_source_unit", valueType: "text" },
   { key: "material_cost", label: "材料单价", itemKey: "material_cost", quotaKey: "material_price", snapshotKey: "quota_source_material_price", valueType: "money" },
@@ -1097,6 +1108,7 @@ function normalizeStandardQuotaRow(row: any) {
     unit: String(payload.unit || "").trim(),
     material_price: materialPrice,
     labor_price: laborPrice,
+    total_price: safeNonNegativeNumber(payload.totalPrice ?? payload.total_price ?? (laborPrice + materialPrice)),
     construction_description: normalizeMultilineText(payload.constructionDescription || payload.construction_description || ""),
   };
 }
@@ -1125,6 +1137,7 @@ function normalizeQuotaSyncValue(value: unknown, valueType: QuotaSyncField["valu
 }
 
 function getQuotaPayloadFieldValue(payload: any, quotaKey: QuotaSyncField["quotaKey"]) {
+  if (quotaKey === "total_price") return payload?.totalPrice ?? payload?.total_price;
   if (quotaKey === "material_price") return payload?.materialPrice ?? payload?.material_price;
   if (quotaKey === "labor_price") return payload?.laborPrice ?? payload?.labor_price;
   if (quotaKey === "construction_description") return payload?.constructionDescription ?? payload?.construction_description;
@@ -1167,6 +1180,8 @@ function getQuotaUpdateCandidates(db: any, quotationId: string, companyId: strin
     WHERE quotation_id = ?
     ORDER BY sort_order ASC, created_at ASC
   `).all(quotationId) as any[];
+  const pricingSettings = parseSettings((db.prepare("SELECT settings FROM quotations WHERE id = ?").get(quotationId) as any)?.settings || null);
+  const pricedItems = withPricingSnapshot(items, pricingSettings);
   const itemIdSet = Array.isArray(itemIds) && itemIds.length > 0 ? new Set(itemIds.map((id) => String(id || "").trim()).filter(Boolean)) : null;
   const standardByItemId = db.prepare(`
     SELECT *
@@ -1187,7 +1202,7 @@ function getQuotaUpdateCandidates(db: any, quotationId: string, companyId: strin
     ORDER BY datetime(COALESCE(updated_at, created_at, '1970-01-01')) DESC
     LIMIT 1
   `);
-  return items
+  return pricedItems
     .filter((item) => isBaseCategory(item.category) && (!itemIdSet || itemIdSet.has(String(item.id || ""))))
     .map((item) => {
       const sourceId = String(item.quota_source_id || "").trim();
@@ -1202,13 +1217,13 @@ function getQuotaUpdateCandidates(db: any, quotationId: string, companyId: strin
       if (!quota) return null;
       const baseline = String(item.quota_source_synced_at || item.created_at || "").trim();
       if (!hasStandardQuotaChangedAfter(db, companyId, quota.id, baseline)) return null;
-      const differences = quotaSyncFields
+      const differences = quotaSyncFields.filter((field) => item.pricing_mode === "single" ? !["material_cost", "labor_cost"].includes(field.key) : field.key !== "unit_price")
         .map((field) => {
           if (!shouldSyncQuotaItemField(db, companyId, item, quota, baseline, field)) return null;
-          const current = field.key === "material_cost" || field.key === "labor_cost"
+          const current = field.valueType === "money"
             ? normalizeComparableMoney(item[field.itemKey])
             : normalizeComparableText(item[field.itemKey]);
-          const latest = field.key === "material_cost" || field.key === "labor_cost"
+          const latest = field.valueType === "money"
             ? normalizeComparableMoney(quota[field.quotaKey])
             : normalizeComparableText(quota[field.quotaKey]);
           return current === latest ? null : { field: field.key, label: field.label, current, latest };
@@ -1227,19 +1242,20 @@ function getQuotaUpdateCandidates(db: any, quotationId: string, companyId: strin
 
 function getNormalizedQuotationItemsForTotals(db: any, quotationId: string) {
   const rawItems = db.prepare("SELECT * FROM quotation_items WHERE quotation_id = ? ORDER BY sort_order ASC, created_at ASC").all(quotationId) as any[];
-  return rawItems.map((item) => {
+  const storedPricing = parseSettings((db.prepare("SELECT settings FROM quotations WHERE id = ?").get(quotationId) as any)?.settings || null);
+  return withPricingSnapshot(rawItems, storedPricing).map((item) => {
     const category = String(item.category || "base").trim() || "base";
     const isBase = isBaseCategory(category);
     const isCustomCabinet = isCustomCabinetCategory(category);
     const quantity = isOtherCategory(category) ? Number(item.quantity || 0) : safeNonNegativeNumber(item.quantity);
     const materialCost = isOtherCategory(category) ? Number(item.material_cost || 0) : safeNonNegativeNumber(item.material_cost);
     const laborCost = isOtherCategory(category) ? Number(item.labor_cost || 0) : safeNonNegativeNumber(item.labor_cost);
-    const unitPrice = isBase ? materialCost + laborCost : safeNonNegativeNumber(item.unit_price);
+    const unitPrice = isBase && item.pricing_mode !== "single" ? materialCost + laborCost : safeNonNegativeNumber(item.unit_price);
     const cabinetArea = getCustomCabinetArea({ material_cost: materialCost, labor_cost: laborCost });
     const totalPrice = isCustomCabinet
       ? toMoney(quantity * (cabinetArea > 0 ? cabinetArea : 1) * unitPrice)
       : toMoney(quantity * unitPrice);
-    return { ...item, category, quantity, unit_price: unitPrice, total_price: totalPrice, material_cost: materialCost, labor_cost: laborCost };
+    return { ...item, category, quantity, unit_price: unitPrice, total_price: isPackageIncludedItem(item) ? 0 : totalPrice, material_cost: materialCost, labor_cost: laborCost };
   });
 }
 
@@ -1355,7 +1371,7 @@ export async function GET(req: NextRequest, { params: paramsPromise }: { params:
 
   const rawItems = db.prepare("SELECT * FROM quotation_items WHERE quotation_id = ? ORDER BY sort_order ASC, created_at ASC").all(params.id) as any[];
   const rawSettings = parseSettings(quotation.settings);
-  const migration = migrateManagementFeeToOtherItem(rawItems, rawSettings);
+  const migration = migrateManagementFeeToOtherItem(withPricingSnapshot(rawItems, rawSettings), rawSettings);
   const items = migration.items.map((item: any) => (
     isBaseCategory(item.category)
       ? {
@@ -1501,8 +1517,8 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
           const syncName = shouldSyncQuotaItemField(db, auth.companyId, item, quota, baseline, nameField);
           const syncUnit = shouldSyncQuotaItemField(db, auth.companyId, item, quota, baseline, unitField);
           const syncSpec = shouldSyncQuotaItemField(db, auth.companyId, item, quota, baseline, specField);
-          const syncMaterial = shouldSyncQuotaItemField(db, auth.companyId, item, quota, baseline, materialField);
-          const syncLabor = shouldSyncQuotaItemField(db, auth.companyId, item, quota, baseline, laborField);
+          const syncMaterial = item.pricing_mode !== "single" && shouldSyncQuotaItemField(db, auth.companyId, item, quota, baseline, materialField);
+          const syncLabor = item.pricing_mode !== "single" && shouldSyncQuotaItemField(db, auth.companyId, item, quota, baseline, laborField);
           const nextName = syncName
             ? String(quota.name || "").trim()
             : String(item.name || "").trim();
@@ -1514,7 +1530,9 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             : String(item.unit || "").trim();
           const nextMaterialCost = syncMaterial ? materialCost : safeNonNegativeNumber(item.material_cost);
           const nextLaborCost = syncLabor ? laborCost : safeNonNegativeNumber(item.labor_cost);
-          const nextUnitPrice = toMoney(nextMaterialCost + nextLaborCost);
+          const priceField = quotaSyncFields.find((field) => field.key === "unit_price")!;
+          const syncTotal = item.pricing_mode === "single" && shouldSyncQuotaItemField(db, auth.companyId, item, quota, baseline, priceField);
+          const nextUnitPrice = item.pricing_mode === "single" ? (syncTotal ? toMoney(quota.total_price) : toMoney(item.unit_price)) : toMoney(nextMaterialCost + nextLaborCost);
           const nextPriceEditMask = normalizeManualPriceEditMask(item.price_manually_edited)
             & (syncMaterial ? ~1 : -1)
             & (syncLabor ? ~2 : -1);
@@ -1523,7 +1541,7 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             nextSpec,
             nextUnit,
             nextUnitPrice,
-            toMoney(quantity * nextUnitPrice),
+            isPackageIncludedItem(item) ? 0 : toMoney(quantity * nextUnitPrice),
             nextMaterialCost,
             nextLaborCost,
             quota.id,
@@ -1539,6 +1557,9 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
         });
         const nextItems = getNormalizedQuotationItemsForTotals(db, params.id);
         const nextSettings = parseSettings(existing.settings);
+        nextSettings._pricing = { ...(nextSettings._pricing || {}) };
+        for (const { item, quota } of candidates) if (item.pricing_mode === "single") nextSettings._pricing[item.id] = { pricing_mode: "single", quota_source_total_price: quota.total_price };
+        db.prepare("UPDATE quotations SET settings = ? WHERE id = ? AND company_id = ?").run(JSON.stringify(nextSettings), params.id, auth.companyId);
         const totals = calculate(nextItems, { ...nextSettings, discount: existing.discount ?? nextSettings.discount }, quotationHouseArea);
         db.prepare(`
           UPDATE quotations
@@ -1815,8 +1836,11 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
 	          quotationType,
 	          quotationDecorationType: decorationType,
 	        };
-	        db.prepare("UPDATE quotations SET quotation_type = ?, temp_customer_decoration_type = ?, settings = ?, updated_at = datetime('now') WHERE id = ? AND company_id = ?")
-	          .run(quotationType || null, decorationType || null, JSON.stringify(nextSettings), params.id, auth.companyId);
+	        db.prepare("UPDATE quotations SET quotation_type = ?, temp_customer_decoration_type = ?, settings = ?, notes = ?, customer_visible_note = ?, updated_at = datetime('now') WHERE id = ? AND company_id = ?")
+	          .run(quotationType || null, decorationType || null, JSON.stringify(nextSettings),
+              Object.prototype.hasOwnProperty.call(body, "notes") ? String(body.notes || "").trim() || null : existing.notes,
+              Object.prototype.hasOwnProperty.call(body, "customer_visible_note") ? String(body.customer_visible_note || "").trim() || null : existing.customer_visible_note,
+              params.id, auth.companyId);
         if (bound?.project_id && bound?.customer_id) {
           db.prepare(`
             UPDATE customers
@@ -2051,7 +2075,7 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
       const rawSourceItems = Array.isArray(body.items)
         ? body.items
         : db.prepare("SELECT * FROM quotation_items WHERE quotation_id = ? ORDER BY sort_order ASC, created_at ASC").all(params.id);
-      const sourceItems = rawSourceItems
+      const sourceItems = withPricingSnapshot(rawSourceItems as any[], parseSettings(existing.settings))
         .map((item: any, index: number) => {
           const category = String(item.category || "base").trim() || "base";
           const isBase = isBaseCategory(category);
@@ -2060,7 +2084,7 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
           const materialCost = safeNonNegativeNumber(item.material_cost);
           const laborCost = safeNonNegativeNumber(item.labor_cost);
           const rawUnitPrice = safeNonNegativeNumber(item.unit_price);
-          const unitPrice = isBase ? materialCost + laborCost : rawUnitPrice;
+          const unitPrice = isBase && item.pricing_mode !== "single" ? materialCost + laborCost : rawUnitPrice;
           const cabinetArea = getCustomCabinetArea({ material_cost: materialCost, labor_cost: laborCost });
           const totalPrice = isCustomCabinet
             ? toMoney(quantity * (cabinetArea > 0 ? cabinetArea : 1) * unitPrice)
@@ -2163,6 +2187,9 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             normalizeManualPriceEditMask(item.price_manually_edited),
             nextSortOrder,
           );
+          const packageScope = targetSettings.templatePricing?.mode === "area" ? normalizePackageScope(item.package_scope || "extra") : null;
+          db.prepare("UPDATE quotation_items SET package_scope = ?, total_price = ? WHERE id = ?")
+            .run(packageScope, packageScope === "included" ? 0 : item.total_price, copiedItemId);
           copiedCount += 1;
         });
 
@@ -2172,7 +2199,7 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
           ...sourceItems.map((item: any) => String(item.category || "")),
           "other",
         ]);
-        const nextSettings = { ...targetSettings, quoteSpaces: nextQuoteSpaces, quoteCategories: nextQuoteCategories };
+        const nextSettings = { ...targetSettings, _pricing: { ...targetSettings._pricing, ...Object.fromEntries(sourceItems.map((item: any) => [copiedItemIdBySourceId.get(String(item.id || "").trim()), { pricing_mode: item.pricing_mode, quota_source_total_price: item.quota_source_total_price ?? null }])) }, quoteSpaces: nextQuoteSpaces, quoteCategories: nextQuoteCategories };
         db.prepare("UPDATE quotations SET settings = ? WHERE id = ? AND company_id = ?")
           .run(JSON.stringify(nextSettings), targetQuotationId, auth.companyId);
         const recalculated = recalculatePersistedQuotationTotals(db, { ...targetQuotation, settings: JSON.stringify(nextSettings) });
@@ -2296,6 +2323,7 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
 	            quotationDecorationType: nextDecorationType,
           };
       const sourceFinalFeeItemId = String(existingSettings.formulaFinalFeeItemId || "").trim();
+      nextSettings._pricing = Object.fromEntries(Object.entries(existingSettings._pricing || {}).map(([sourceId, value]) => [copiedItemIdBySourceId.get(sourceId) || sourceId, value]));
       const copiedFinalFeeItemId = sourceFinalFeeItemId
         ? copiedItemIdBySourceId.get(sourceFinalFeeItemId) || ""
         : "";
@@ -2342,6 +2370,7 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
         `);
         sourceItems.forEach((item) => {
           const copiedItemId = copiedItemIdBySourceId.get(String(item.id)) || makeId("QITEM");
+          const clearQuantity = copyItemsOnly && !(existingSettings.templatePricing?.mode === "area" && (item.category === PACKAGE_AREA_CATEGORY || item.category === PACKAGE_AREA_OVERAGE_CATEGORY));
           insertItem.run(
             copiedItemId,
             nextQuotationId,
@@ -2356,10 +2385,10 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             item.material_model,
             item.remark,
             item.unit || "",
-            copyItemsOnly ? 0 : toMoney(Number(item.quantity || 0)),
+            clearQuantity ? 0 : toMoney(Number(item.quantity || 0)),
             remapQuotationQuantityFormulaIds(item.quantity_formula, copiedItemIdBySourceId),
             item.unit_price || 0,
-            copyItemsOnly ? 0 : item.total_price || 0,
+            clearQuantity ? 0 : item.total_price || 0,
             item.material_cost || 0,
             item.labor_cost || 0,
             item.profit_margin || 0,
@@ -2385,7 +2414,13 @@ export async function POST(req: NextRequest, { params: paramsPromise }: { params
             normalizeManualPriceEditMask(item.price_manually_edited),
             item.sort_order || 0
           );
+          db.prepare("UPDATE quotation_items SET package_scope = ? WHERE id = ?")
+            .run(item.package_scope || null, copiedItemId);
         });
+        if (existingSettings.templatePricing?.mode === "area") {
+          const copiedQuotation = db.prepare("SELECT * FROM quotations WHERE id = ?").get(nextQuotationId);
+          recalculatePersistedQuotationTotals(db, copiedQuotation);
+        }
       });
       tx();
       const customerId = getQuotationCustomerId(db, nextQuotationId);
@@ -2586,6 +2621,8 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
     const incomingQuotationType = String(body.quotation_type ?? body.settings?.quotationType ?? "").trim().slice(0, 20);
     const existingQuotationType = String(existing.quotation_type || existingSettings.quotationType || "").trim().slice(0, 20);
     const settings = {
+      splitCustomerPrice: existingSettings.splitCustomerPrice !== false,
+      _pricing: pricingSnapshot(items.map((item) => ({ ...item, pricing_mode: existingSettings._pricing?.[item.id || ""]?.pricing_mode || (existingSettings.splitCustomerPrice === false ? "single" : item.pricing_mode) }))),
       managementFeeRate: 0,
 	      taxRate: Number(body.settings?.taxRate || 0),
 	      discount: Number(body.settings?.discount || 0),
@@ -2621,7 +2658,7 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
       quotationValidUntil: String(body.settings?.quotationValidUntil ?? existingSettings.quotationValidUntil ?? "").trim() || null,
     };
 
-    let normalizedItems = items
+    let normalizedItems: any[] = items
       .map((item, index) => {
         const category = String(item.category || "base").trim() || "base";
         const isBase = isBaseCategory(category);
@@ -2639,16 +2676,21 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
         const costLaborUnit = isOther ? 0 : safeNonNegativeNumber(item.cost_labor_unit);
         const costLossRate = isOther ? 0 : safeNonNegativeNumber(item.cost_loss_rate);
         const finalMaterialCost = isBase || isCustomCabinet ? materialCost : Number(item.material_cost || 0);
-        const finalLaborCost = isBase
+        const pricingMode = settings._pricing[item.id || ""]?.pricing_mode || (settings.splitCustomerPrice ? item.pricing_mode : "single");
+        const finalLaborCost = isBase && pricingMode !== "single"
           ? (materialCost || laborCost ? laborCost : rawUnitPrice)
           : isCustomCabinet ? laborCost : Number(item.labor_cost || 0);
-        const unitPrice = isBase ? finalMaterialCost + finalLaborCost : rawUnitPrice;
+        const unitPrice = isBase && pricingMode !== "single" ? finalMaterialCost + finalLaborCost : rawUnitPrice;
         const cabinetArea = getCustomCabinetArea({ material_cost: finalMaterialCost, labor_cost: finalLaborCost });
         const totalPrice = isCustomCabinet
           ? toMoney(quantity * (cabinetArea > 0 ? cabinetArea : 1) * unitPrice)
           : toMoney(quantity * unitPrice);
         return {
+          pricing_mode: pricingMode,
+          quota_source_total_price: item.quota_source_total_price,
           id: item.id || makeId("QITEM"),
+          package_scope: settings.templatePricing?.mode === "area" && !isOther && category !== PACKAGE_AREA_CATEGORY && category !== PACKAGE_AREA_OVERAGE_CATEGORY
+            ? normalizePackageScope(item.package_scope || "extra") : null,
           category,
           space: inferItemSpace({ category, name: item.name, spec: item.spec, space: item.space }),
           work_type_id: String(item.work_type_id || "").trim() || null,
@@ -2661,7 +2703,7 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           remark: normalizeMultilineText(item.remark),
           unit: isCustomCabinet ? String(cabinetArea) : String(item.unit ?? "").trim(),
           quantity: isOther && (feeMethod === "percent" || feeMethod === "reference" || feeMethod === "formula" || feeMethod === "area_unit") ? 1 : quantity,
-          quantity_formula: isOther ? null : serializeQuotationQuantityFormula(item.quantity_formula) || null,
+          quantity_formula: isOther ? null : serializeQuantityFormulaValue(item.quantity_formula) || null,
           unit_price: unitPrice,
           total_price: totalPrice,
           material_cost: finalMaterialCost,
@@ -2692,6 +2734,39 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
       })
       .filter((item) => item.name);
 
+    if (settings.templatePricing?.mode === "area") {
+      const pricing = calculateAreaQuotePrice(settings.templatePricing, settings.templatePricing.area);
+      if (pricing.area <= 0 || pricing.unitPrice <= 0) {
+        return NextResponse.json({ message: "请填写有效的计价面积和套餐平方单价" }, { status: 400 });
+      }
+      const previousGenerated = normalizedItems.filter((item) => item.category === PACKAGE_AREA_CATEGORY || item.category === PACKAGE_AREA_OVERAGE_CATEGORY);
+      const previousBase = previousGenerated.find((item) => item.category === PACKAGE_AREA_CATEGORY);
+      const previousOverageByKey = new Map(previousGenerated
+        .filter((item) => item.category === PACKAGE_AREA_OVERAGE_CATEGORY)
+        .map((item) => [String((item as any).package_overage_rule_id || item.name || "").trim(), item]));
+      const generatedItems = buildAreaPricingItems(settings.templatePricing, pricing.area).map((item) => {
+        const key = String((item as any).package_overage_rule_id || item.name || "").trim();
+        const previous = item.category === PACKAGE_AREA_CATEGORY ? previousBase : previousOverageByKey.get(key);
+        return { ...item, id: previous?.id || makeId("QITEM") };
+      });
+      const rest = normalizedItems.filter((item) => item.category !== PACKAGE_AREA_CATEGORY && item.category !== PACKAGE_AREA_OVERAGE_CATEGORY);
+      // 套餐基础价和超标加价都由服务端按已保存的计价规则重新计算。
+      normalizedItems = [...generatedItems.map((item) => ({
+        ...item,
+        work_type_id: null, work_type_name: null, material_category_id: null, material_category_name: null,
+        cost_material_unit: 0, cost_labor_unit: 0, cost_loss_rate: 0, cost_source: null,
+        quota_source_id: null, quota_source_type: null, quota_source_name: null, quota_source_unit: null,
+        quota_source_spec: null, quota_source_synced_at: null, quota_source_material_price: null, quota_source_labor_price: null,
+        price_manually_edited: 0, fee_scope_mode: null, fee_scope_space_ids: [], fee_scope_space_names: [],
+      })), ...rest].map((item, index) => ({ ...item, sort_order: index + 1 }));
+      settings.templatePricing = {
+        ...settings.templatePricing,
+        baseAmount: pricing.baseAmount,
+        overageAmount: pricing.overageAmount,
+        totalAmount: pricing.totalAmount,
+      };
+    }
+
     const migration = migrateManagementFeeToOtherItem(normalizedItems, { ...settings, managementFeeRate: Number(body.settings?.managementFeeRate || 0) });
     normalizedItems = migration.items;
     normalizedItems = applyQuotationQuantityLinks(normalizedItems);
@@ -2720,7 +2795,9 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
     });
 
     const totals = calculate(normalizedItems, settings, quotationHouseArea);
-    const persistedSettings = { ...settings, discount: totals.discount };
+    const pricingError = pricingConfigurationError(normalizedItems, settings);
+    if (pricingError) return NextResponse.json({ message: pricingError }, { status: 400 });
+    const persistedSettings = { ...settings, _pricing: pricingSnapshot(normalizedItems), discount: totals.discount };
     const existingItemCount = Number((db.prepare("SELECT COUNT(*) AS count FROM quotation_items WHERE quotation_id = ?").get(params.id) as any)?.count || 0);
     const allowEmptyItems = body.allowEmptyItems === true;
     if (existingItemCount > 0 && normalizedItems.length === 0 && !allowEmptyItems) {
@@ -2754,7 +2831,7 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           item.remark || null,
           item.unit,
           item.quantity,
-          isOtherCategory(item.category) ? null : serializeQuotationQuantityFormula(item.quantity_formula) || null,
+          isOtherCategory(item.category) ? null : serializeQuantityFormulaValue(item.quantity_formula) || null,
           item.unit_price,
           item.total_price,
           item.material_cost,
@@ -2782,6 +2859,8 @@ export async function PUT(req: NextRequest, { params: paramsPromise }: { params:
           normalizeManualPriceEditMask(item.price_manually_edited),
           item.sort_order
         );
+        db.prepare("UPDATE quotation_items SET package_scope = ?, total_price = ? WHERE id = ? AND quotation_id = ?")
+          .run(item.package_scope, isOtherCategory(item.category) ? item.total_price : getBaseOrMaterialItemTotal(item), item.id, params.id);
       });
 	      db.prepare(`
 	        UPDATE quotations

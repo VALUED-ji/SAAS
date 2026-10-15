@@ -2,6 +2,7 @@
 // 从 page.tsx 渐进拆出，共享工具来自 ./custom-quota-shared。
 
 "use client";
+import CustomerPriceLabel from "./customer-price-label";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
@@ -57,7 +58,7 @@ export function CustomQuotaPromoteDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const totalPrice = Number(state.item.totalPrice || 0) || Number(state.item.laborPrice || 0) + Number(state.item.materialPrice || 0);
+  const totalPrice = state.item.pricingMode === "single" ? Number(state.item.totalPrice || 0) : Number(state.item.laborPrice || 0) + Number(state.item.materialPrice || 0);
   return (
     <div className="qm-modal-overlay fixed inset-y-0 right-0 z-50 flex w-[calc(100vw-var(--active-sidebar-width,260px))] items-center justify-center bg-surface-950/25 px-6 py-7 max-md:inset-0 max-md:w-full max-md:px-4">
       <div role="dialog" aria-modal="true" className="qm-modal-shell flex w-full max-w-lg flex-col overflow-hidden border border-surface-200 bg-white shadow-[0_24px_72px_rgba(15,35,70,0.18)]">
@@ -115,6 +116,7 @@ export function normalizeCustomStatus(value: unknown): CustomQuotaItem["status"]
 }
 
 export function CustomQuotaLibraryPanel({
+  pricingModes = {},
   storeOptions,
   defaultStoreName,
   onPromote,
@@ -122,6 +124,7 @@ export function CustomQuotaLibraryPanel({
   workTypeOptions = [],
   materialCategoryOptions = [],
 }: {
+  pricingModes?: Record<string, string>;
   storeOptions: string[];
   defaultStoreName: string;
   onPromote: (item: CustomQuotaItem) => Promise<void>;
@@ -159,6 +162,7 @@ export function CustomQuotaLibraryPanel({
         name: String(row.name || ""),
         constructionDescription: String(row.constructionDescription || ""),
         unit: String(row.unit || ""),
+        pricingMode: row.pricingMode === "single" ? "single" : "split",
         laborPrice: Number(row.laborPrice || 0),
         materialPrice: Number(row.materialPrice || 0),
         totalPrice: Number(row.totalPrice || 0),
@@ -245,6 +249,8 @@ export function CustomQuotaLibraryPanel({
     setEditingItem(makeEmptyCustomQuotaItem(getDefaultEditorStoreName()));
   };
 
+  const showSplitPrices = items.some((item) => item.pricingMode !== "single");
+  const singlePricing = editingItem?.pricingMode === "single" || pricingModes[editingItem?.storeName || editingItem?.scope || ""] === "single";
   const saveEditingItem = async () => {
     if (!editingItem) return;
     const nextStoreName = editingItem.storeName.trim() || editingItem.scope.trim();
@@ -264,9 +270,10 @@ export function CustomQuotaLibraryPanel({
     try {
       const payload = {
         ...editingItem,
+        pricingMode: singlePricing ? "single" : "split",
         storeName: nextStoreName,
         scope: nextStoreName,
-        totalPrice: Number(editingItem.totalPrice || 0) || Number(editingItem.laborPrice || 0) + Number(editingItem.materialPrice || 0),
+        totalPrice: singlePricing ? Number(editingItem.totalPrice || 0) : Number(editingItem.laborPrice || 0) + Number(editingItem.materialPrice || 0),
       };
       if (editMode === "create") {
         await requestCustomQuotaLibrary("", { method: "POST", body: JSON.stringify(payload) });
@@ -336,8 +343,7 @@ export function CustomQuotaLibraryPanel({
             <col className="w-[7%]" />
             <col className="w-[15%]" />
             <col className="w-[5%]" />
-            <col className="w-[7%]" />
-            <col className="w-[7%]" />
+            {showSplitPrices && <><col className="w-[7%]" /><col className="w-[7%]" /></>}
             <col className="w-[7%]" />
             <col className="w-[18%]" />
             <col className="w-[10%]" />
@@ -349,8 +355,8 @@ export function CustomQuotaLibraryPanel({
               <th className="px-3 py-3 text-center">分类</th>
               <th className="px-3 py-3 text-left">项目名称</th>
               <th className="px-3 py-3 text-center">单位</th>
-              <th className="px-3 py-3 text-right">人工单价</th>
-              <th className="px-3 py-3 text-right">材料单价</th>
+              {showSplitPrices && <th className="px-3 py-3 text-right">人工单价</th>}
+              {showSplitPrices && <th className="px-3 py-3 text-right">材料单价</th>}
               <th className="px-3 py-3 text-right">客户单价</th>
               <th className="px-3 py-3 text-left">施工说明</th>
               <th className="px-3 py-3 text-center">来源员工</th>
@@ -359,10 +365,10 @@ export function CustomQuotaLibraryPanel({
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={10} className="px-4 py-12 text-center text-sm text-surface-500">正在加载自定义库...</td></tr>
+              <tr><td colSpan={showSplitPrices ? 10 : 8} className="px-4 py-12 text-center text-sm text-surface-500">正在加载自定义库...</td></tr>
             ) : pagination.pageItems.length === 0 ? (
               <tr className="quota-empty-row quota-custom-empty-row">
-                <td colSpan={10} className="px-4 py-12 text-center">
+                <td colSpan={showSplitPrices ? 10 : 8} className="px-4 py-12 text-center">
                   <div className="quota-custom-empty-state mx-auto flex max-w-md flex-col items-center justify-center text-center">
                     <div className="quota-empty-icon mx-auto flex h-12 w-12 items-center justify-center rounded-[14px]">
                       <Search className="h-5 w-5" />
@@ -384,9 +390,9 @@ export function CustomQuotaLibraryPanel({
                   <p className="quota-item-name">{item.name}</p>
                 </td>
                 <td className="quota-unit-cell px-3 py-3 text-center text-surface-700">{item.unit}</td>
-                <td className="quota-money-cell px-3 py-3 text-right tabular-nums text-surface-700">{formatAmount(item.laborPrice)}</td>
-                <td className="quota-money-cell px-3 py-3 text-right tabular-nums text-surface-700">{formatAmount(item.materialPrice)}</td>
-                <td className="quota-money-cell quota-total-price px-3 py-3 text-right font-semibold tabular-nums text-red-600">{formatAmount(item.totalPrice || item.laborPrice + item.materialPrice)}</td>
+                {showSplitPrices && <td className="quota-money-cell px-3 py-3 text-right tabular-nums text-surface-700">{item.pricingMode === "single" ? "-" : formatAmount(item.laborPrice)}</td>}
+                {showSplitPrices && <td className="quota-money-cell px-3 py-3 text-right tabular-nums text-surface-700">{item.pricingMode === "single" ? "-" : formatAmount(item.materialPrice)}</td>}
+                <td className="quota-money-cell quota-total-price px-3 py-3 text-right font-semibold tabular-nums text-red-600">{formatAmount(item.pricingMode === "single" ? item.totalPrice : item.laborPrice + item.materialPrice)}</td>
                 <td className="quota-description-cell px-3 py-3 text-left text-surface-700">
                   <p className="line-clamp-2 leading-5" title={item.constructionDescription || undefined}>{item.constructionDescription || "-"}</p>
                 </td>
@@ -519,7 +525,7 @@ export function CustomQuotaLibraryPanel({
                       </div>
                     </div>
                     <div className="quota-editor-quote-inline quota-editor-field-wide">
-                      <label className="qm-field quota-editor-field">
+                      {!singlePricing && <label className="qm-field quota-editor-field">
                         <span>人工单价 <em>*</em></span>
                         <input
                           type="text"
@@ -530,8 +536,8 @@ export function CustomQuotaLibraryPanel({
                           onChange={(event) => setEditingItem({ ...editingItem, laborPrice: parsePriceInput(event.target.value) })}
                           className="input-field text-center tabular-nums"
                         />
-                      </label>
-                      <label className="qm-field quota-editor-field">
+                      </label>}
+                      {!singlePricing && <label className="qm-field quota-editor-field">
                         <span>材料单价 <em>*</em></span>
                         <input
                           type="text"
@@ -542,11 +548,11 @@ export function CustomQuotaLibraryPanel({
                           onChange={(event) => setEditingItem({ ...editingItem, materialPrice: parsePriceInput(event.target.value) })}
                           className="input-field text-center tabular-nums"
                         />
-                      </label>
+                      </label>}
                       <div className="quota-editor-price-total-field">
-                        <span>客户单价</span>
+                        <CustomerPriceLabel />
                         <div className="quota-editor-price-tile">
-                          <strong>{formatAmount(Number(editingItem.laborPrice || 0) + Number(editingItem.materialPrice || 0))}</strong>
+                          {singlePricing ? <input style={{ border: 0, boxShadow: "none", background: "transparent", color: "#dc2626", padding: 0, height: "100%" }} aria-label="客户单价" type="text" inputMode="decimal" value={editingItem.totalPrice} onChange={(event) => setEditingItem({ ...editingItem, totalPrice: parsePriceInput(event.target.value) })} className="w-full min-w-0 text-center text-red-600 outline-none" /> : <strong>{formatAmount(Number(editingItem.laborPrice || 0) + Number(editingItem.materialPrice || 0))}</strong>}
                         </div>
                       </div>
                       <div className="quota-editor-toggle-field quota-editor-special-field">

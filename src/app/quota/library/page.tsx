@@ -1,4 +1,6 @@
 "use client";
+import CustomerPriceLabel from "./customer-price-label";
+import { customerUnitPrice, isSingleCustomerPrice, type PricingMode } from "@/lib/quotationPricingMode";
 
 import {
   downloadQuotaImportErrors,
@@ -75,6 +77,7 @@ export default function QuotaLibraryPage() {
   const { user } = useAuth();
   const [libraryMode, setLibraryMode] = useState<"standard" | "custom">("standard");
   const [quotaItems, setQuotaItems] = useState<QuotaItem[]>(initialQuotaItems);
+  const showSplitPrices = quotaItems.some((item) => !isSingleCustomerPrice(item));
   const [quotaItemsLoaded, setQuotaItemsLoaded] = useState(false);
   const quotaItemsPersistSkipRef = useRef(true);
   const quotaItemsPersistSkipOnceRef = useRef(false);
@@ -91,6 +94,7 @@ export default function QuotaLibraryPage() {
   const [priceSceneFilter, setPriceSceneFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<"" | QuotaItem["status"]>("enabled");
   const [selectedQuotaIds, setSelectedQuotaIds] = useState<string[]>([]);
+  const [pricingModes, setPricingModes] = useState<Record<string, PricingMode>>({});
   const [editingItem, setEditingItem] = useState<QuotaItem | null>(null);
   const [editMode, setEditMode] = useState<"create" | "edit">("edit");
   const [importOpen, setImportOpen] = useState(false);
@@ -262,6 +266,7 @@ export default function QuotaLibraryPage() {
           : [];
         const loadedItems = serverItems;
         if (cancelled) return;
+        setPricingModes(data?.pricingModes && typeof data.pricingModes === "object" ? data.pricingModes : {});
         setQuotaItems(loadedItems);
         setQuotaItemsLoaded(true);
       } catch {
@@ -453,7 +458,7 @@ export default function QuotaLibraryPage() {
       internalLaborCost: 0,
       internalMaterialCost: 0,
       costLossRate: 0,
-      totalPrice: laborPrice + materialPrice,
+      totalPrice: customerUnitPrice(item),
       isSpecialPrice: Boolean(item.isSpecialPrice),
       status: "enabled",
       updatedAt: todayText(),
@@ -511,13 +516,13 @@ export default function QuotaLibraryPage() {
       setImportMessage("请选择导入门店后再确认导入。");
       return;
     }
-    const preview = parseQuotaImport(importText, quotaItems, storeScopeOptions, importTargetScope);
+    const preview = parseQuotaImport(importText, quotaItems, storeScopeOptions, importTargetScope, pricingModes[importTargetScope] === "single");
     setImportErrors(preview.errors);
     setImportMessage(preview.errors.length > 0
       ? `导入到${importTargetScope}时发现 ${preview.errors.length} 行错误，请导出错误明细并修正 Excel 后重新上传。`
       : `识别到 ${preview.items.length} 条定额，将导入到${importTargetScope}，定额编码自动生成`
     );
-  }, [hasRealImportFile, importIsExample, importTargetScope, importText, quotaItems, storeScopeOptions]);
+  }, [hasRealImportFile, importIsExample, importTargetScope, importText, quotaItems, storeScopeOptions, pricingModes]);
   useEffect(() => {
     if (editMode !== "create" || !currentUserStore?.name) return;
     setEditingItem((current) => {
@@ -531,7 +536,7 @@ export default function QuotaLibraryPage() {
   }, [currentUserStore?.name, editMode, makeCodeForScope]);
   const openCreateDialog = () => {
     setEditMode("create");
-    setEditingItem(makeEmptyQuotaItem(quotaItems, storeScopeOptions, getDefaultCreateScope()));
+    setEditingItem({ ...makeEmptyQuotaItem(quotaItems, storeScopeOptions, getDefaultCreateScope()), pricingMode: pricingModes[getDefaultCreateScope()] || "split" });
   };
   const handleCopy = (item: QuotaItem) => {
     const copyItem = {
@@ -674,7 +679,7 @@ export default function QuotaLibraryPage() {
       internalLaborCost,
       internalMaterialCost,
       costLossRate: Number(editingItem.costLossRate || 0),
-      totalPrice: Number(editingItem.laborPrice || 0) + Number(editingItem.materialPrice || 0),
+      totalPrice: customerUnitPrice(editingItem),
       isSpecialPrice: Boolean(editingItem.isSpecialPrice),
       updatedAt: todayText(),
     };
@@ -711,7 +716,7 @@ export default function QuotaLibraryPage() {
       setImportMessage("该门店已停用，不能导入定额。请改选启用门店。");
       return;
     }
-    const result = parseQuotaImport(importText, quotaItems, storeScopeOptions, importTargetScope);
+    const result = parseQuotaImport(importText, quotaItems, storeScopeOptions, importTargetScope, pricingModes[importTargetScope] === "single");
     if (result.errors.length > 0) {
       setImportErrors(result.errors);
       setImportMessage(`发现 ${result.errors.length} 行错误，请导出错误明细并修正 Excel 后重新上传。`);
@@ -755,7 +760,7 @@ export default function QuotaLibraryPage() {
       setImportMessage("请选择导入门店后再确认导入。");
       return;
     }
-    const preview = parseQuotaImport(importText, quotaItems, storeScopeOptions, targetScope);
+    const preview = parseQuotaImport(importText, quotaItems, storeScopeOptions, targetScope, pricingModes[targetScope] === "single");
     setImportErrors(preview.errors);
     setImportMessage(preview.errors.length > 0
       ? `导入到${targetScope}时发现 ${preview.errors.length} 行错误，请导出错误明细并修正 Excel 后重新上传。`
@@ -771,7 +776,7 @@ export default function QuotaLibraryPage() {
         return;
       }
       const targetScope = importTargetScope;
-      const preview = targetScope ? parseQuotaImport(text, quotaItems, storeScopeOptions, targetScope) : null;
+      const preview = targetScope ? parseQuotaImport(text, quotaItems, storeScopeOptions, targetScope, pricingModes[targetScope] === "single") : null;
       setImportText(text);
       setImportIsExample(false);
       setHasRealImportFile(true);
@@ -942,8 +947,8 @@ export default function QuotaLibraryPage() {
                 <th className="px-3 py-3 text-center">分类</th>
                 <th className="px-3 py-3 text-left">项目名称</th>
                 <th className="px-3 py-3 text-center">单位</th>
-                <th className="px-3 py-3 text-center">材料单价</th>
-                <th className="px-3 py-3 text-center">人工单价</th>
+                {showSplitPrices && <th className="px-3 py-3 text-center">材料单价</th>}
+                {showSplitPrices && <th className="px-3 py-3 text-center">人工单价</th>}
                 <th className="px-3 py-3 text-center">客户单价</th>
                 <th className="px-3 py-3 text-left">施工说明</th>
                 <th className="px-3 py-3 text-center">适用门店</th>
@@ -989,8 +994,8 @@ export default function QuotaLibraryPage() {
                     <p className="quota-item-name">{item.name}</p>
                   </td>
                   <td className="quota-unit-cell px-3 py-3 text-center text-surface-700">{item.unit}</td>
-                  <td className="quota-money-cell px-3 py-3 text-center tabular-nums text-surface-700">{formatAmount(item.materialPrice)}</td>
-                  <td className="quota-money-cell px-3 py-3 text-center tabular-nums text-surface-700">{formatAmount(item.laborPrice)}</td>
+                  {showSplitPrices && <td className="quota-money-cell px-3 py-3 text-center tabular-nums text-surface-700">{!isSingleCustomerPrice(item) ? formatAmount(item.materialPrice) : "—"}</td>}
+                  {showSplitPrices && <td className="quota-money-cell px-3 py-3 text-center tabular-nums text-surface-700">{!isSingleCustomerPrice(item) ? formatAmount(item.laborPrice) : "—"}</td>}
                   <td className="quota-money-cell quota-total-price px-3 py-3 text-center font-semibold tabular-nums text-red-600">
                     <span className="quota-total-price-inner">
                       <span>{formatAmount(item.totalPrice)}</span>
@@ -1036,6 +1041,7 @@ export default function QuotaLibraryPage() {
       </section>
       ) : (
         <CustomQuotaLibraryPanel
+          pricingModes={pricingModes}
           storeOptions={storeFilterOptions}
           defaultStoreName={currentUserStore?.name || storeFilterOptions[0] || ""}
           onPromote={promoteCustomQuotaItem}
@@ -1151,6 +1157,7 @@ export default function QuotaLibraryPage() {
                         setEditingItem({
                           ...editingItem,
                           scope: nextScope,
+                          pricingMode: pricingModes[nextScope] === "single" ? "single" : editingItem.pricingMode,
                           code: shouldRefreshCode ? makeCodeForScope(nextScope, editingItem.id) : editingItem.code,
                         });
                       }}
@@ -1276,7 +1283,7 @@ export default function QuotaLibraryPage() {
                       </div>
                     </div>
                     <div className="quota-editor-quote-inline quota-editor-field-wide">
-                      <label className="qm-field quota-editor-field">
+                      {!isSingleCustomerPrice(editingItem) && <label className="qm-field quota-editor-field">
                         <span>人工单价 <em>*</em></span>
                         <input
                           type="text"
@@ -1287,8 +1294,8 @@ export default function QuotaLibraryPage() {
                           onChange={(event) => setEditingItem({ ...editingItem, laborPrice: parsePriceInput(event.target.value) })}
                           className="input-field text-center tabular-nums"
                         />
-                      </label>
-                      <label className="qm-field quota-editor-field">
+                      </label>}
+                      {!isSingleCustomerPrice(editingItem) && <label className="qm-field quota-editor-field">
                         <span>材料单价 <em>*</em></span>
                         <input
                           type="text"
@@ -1299,11 +1306,11 @@ export default function QuotaLibraryPage() {
                           onChange={(event) => setEditingItem({ ...editingItem, materialPrice: parsePriceInput(event.target.value) })}
                           className="input-field text-center tabular-nums"
                         />
-                      </label>
+                      </label>}
                       <div className="quota-editor-price-total-field">
-                        <span>客户单价</span>
+                        <CustomerPriceLabel />
                         <div className="quota-editor-price-tile">
-                          <strong>{formatAmount(Number(editingItem.laborPrice || 0) + Number(editingItem.materialPrice || 0))}</strong>
+                          {isSingleCustomerPrice(editingItem) ? <input style={{ border: 0, boxShadow: "none", background: "transparent", color: "#dc2626", padding: 0, height: "100%" }} aria-label="客户单价" type="text" inputMode="decimal" value={editingItem.totalPrice} onChange={(event) => setEditingItem({ ...editingItem, totalPrice: parsePriceInput(event.target.value) })} className="w-full min-w-0 text-center font-semibold text-red-600 outline-none" /> : <strong>{formatAmount(customerUnitPrice(editingItem))}</strong>}
                         </div>
                       </div>
                       <div className="quota-editor-toggle-field quota-editor-special-field">
@@ -1464,7 +1471,7 @@ export default function QuotaLibraryPage() {
             </div>
             <div className="qm-import-actions border-b border-surface-200 bg-surface-50 px-5 py-4">
               <div className="grid gap-3 md:grid-cols-2">
-                <button type="button" onClick={downloadQuotaImportTemplate} className="group flex min-h-[72px] items-center gap-3 rounded-xl border border-surface-200 bg-white px-4 text-left transition hover:border-primary-200 hover:bg-primary-50">
+                <button type="button" onClick={() => void downloadQuotaImportTemplate(pricingModes[importTargetScope] === "single")} className="group flex min-h-[72px] items-center gap-3 rounded-xl border border-surface-200 bg-white px-4 text-left transition hover:border-primary-200 hover:bg-primary-50">
                   <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-surface-100 text-surface-700 group-hover:bg-white group-hover:text-primary-700">
                     <Download className="h-4 w-4" />
                   </span>
